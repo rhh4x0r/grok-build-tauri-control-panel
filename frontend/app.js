@@ -25,6 +25,7 @@ const state = {
   auth: null,
   loggingIn: false,
   startingSession: false,
+  attachments: [], // images staged for the next prompt
   devServer: null,
   transcriptBySession: new Map(),
   transcriptLoaded: new Set(),
@@ -629,6 +630,11 @@ function appendTranscript(sessionId, role, body, at = nowIso(), opts = {}) {
     streaming: stream && (role === "agent" || role === "thought" || role === "term"),
   };
   if (opts.meta) entry.meta = opts.meta;
+  // Attached images render as thumbnails inside the bubble. Keep only the data
+  // URL for display — the base64 already went to the agent.
+  if (opts.images && opts.images.length) {
+    entry.images = opts.images.map((a) => a.dataUrl).filter(Boolean);
+  }
   list.push(entry);
   // Cap memory so huge TTY logs stay snappy
   if (list.length > 2000) {
@@ -1029,9 +1035,19 @@ function renderTranscript() {
           role === "agent" && !e.streaming
             ? `<button class="pin-mem" data-idx="${idx}" title="Remember this — saved to project memory, injected into future threads">📌</button>`
             : "";
+        // Attached images: thumbnails under the text, click opens full-size.
+        const thumbs =
+          Array.isArray(e.images) && e.images.length
+            ? `<div class="t-images">${e.images
+                .map(
+                  (src) =>
+                    `<a class="t-image" href="${escapeHtml(src)}" target="_blank" rel="noreferrer"><img src="${escapeHtml(src)}" alt="attachment" /></a>`,
+                )
+                .join("")}</div>`
+            : "";
         return `<div class="t-block ${escapeHtml(role)}${streamCls}">
   <div class="t-role"><span class="t-ts">${escapeHtml(shortTime(e.at || ""))}</span>${bombHtml(roleBombMood(role), "xs")}<span>${label}</span>${e.streaming ? '<span class="stream-caret" aria-hidden="true"></span>' : ""}${pin}</div>
-  <div class="t-body">${body}</div>
+  <div class="t-body">${body}${thumbs}</div>
 </div>`;
       })
       .join("");
@@ -2980,10 +2996,114 @@ async function startAcp() {
   }
 }
 
+// ── Image attachments ───────────────────────────────────────────────────
+const MAX_ATTACHMENTS = 8;
+const MAX_ATTACH_BYTES = 12 * 1024 * 1024; // 12 MB per image, pre-encode
+
+/** Read a File/Blob into an attachment record. `data` is bare base64 (no
+ *  `data:` prefix) for the agent; `dataUrl` is kept for the thumbnail. */
+function fileToAttachment(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error || new Error("read failed"));
+    reader.onload = () => {
+      const url = String(reader.result || "");
+      const comma = url.indexOf(",");
+      if (comma < 0) return reject(new Error("bad data URL"));
+      resolve({
+        mimeType: file.type || "image/png",
+        data: url.slice(comma + 1),
+        dataUrl: url,
+        name: file.name || "pasted-image",
+        size: file.size || 0,
+      });
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function addAttachmentFiles(files) {
+  const list = Array.from(files || []).filter((f) => (f.type || "").startsWith("image/"));
+  if (!list.length) return;
+  for (const f of list) {
+    if (state.attachments.length >= MAX_ATTACHMENTS) {
+      pushEvent(`attachment limit reached (${MAX_ATTACHMENTS})`, "err", null, { force: true });
+      break;
+    }
+    if (f.size > MAX_ATTACH_BYTES) {
+      pushEvent(`"${f.name || "image"}" is too large (max 12 MB)`, "err", null, { force: true });
+      continue;
+    }
+    try {
+      state.attachments.push(await fileToAttachment(f));
+    } catch (e) {
+      pushEvent(`couldn't attach an image: ${e.message || e}`, "err", null, { force: true });
+    }
+  }
+  renderAttachTray();
+  warnIfImagesUnsupported();
+}
+
+function removeAttachment(idx) {
+  state.attachments.splice(idx, 1);
+  renderAttachTray();
+}
+
+function clearAttachments() {
+  state.attachments = [];
+  renderAttachTray();
+}
+
+function renderAttachTray() {
+  const tray = $("attach-tray");
+  if (!tray) return;
+  const items = state.attachments;
+  if (!items.length) {
+    tray.style.display = "none";
+    tray.innerHTML = "";
+    return;
+  }
+  tray.style.display = "flex";
+  tray.innerHTML = items
+    .map(
+      (a, i) =>
+        `<div class="attach-chip" title="${escapeHtml(a.name || "")}">
+  <img src="${escapeHtml(a.dataUrl)}" alt="" />
+  <button class="attach-x" data-idx="${i}" title="Remove" type="button">×</button>
+</div>`,
+    )
+    .join("");
+  tray.querySelectorAll(".attach-x").forEach((b) => {
+    b.onclick = () => removeAttachment(Number(b.dataset.idx));
+  });
+}
+
+/** Warn (once per staging) if the selected live agent can't accept images. The
+ *  attachment still stages — the user may switch agents before sending. */
+async function warnIfImagesUnsupported() {
+  if (!state.attachments.length || !state.selectedSession) return;
+  try {
+    const ok = await invoke("agent_supports_images", { id: state.selectedSession });
+    const tray = $("attach-tray");
+    if (tray) tray.classList.toggle("unsupported", !ok);
+    if (!ok && !state._warnedNoImages) {
+      state._warnedNoImages = true;
+      pushEvent("this agent may not accept images — switch backend if it ignores them", "err", null, {
+        force: true,
+      });
+    }
+    if (ok) state._warnedNoImages = false;
+  } catch (_) {
+    /* not live yet; nothing to check */
+  }
+}
+
 async function sendPrompt() {
   try {
     const prompt = $("prompt").value;
-    if (!prompt.trim()) throw new Error("Empty prompt");
+    const images = (state.attachments || []).slice();
+    // A message may be image-only ("what's wrong here?"), but not truly empty.
+    if (!prompt.trim() && images.length === 0) throw new Error("Empty prompt");
     // Sending means "I want to watch this" — re-arm tail following.
     state.followTail = true;
     if (state.selectedSession && turnActive()) {
@@ -3010,8 +3130,9 @@ async function sendPrompt() {
     const needsResume =
       sess && (sess.live === false || String(sess.status || "").toLowerCase().includes("saved"));
 
-    appendTranscript(state.selectedSession, "user", prompt);
+    appendTranscript(state.selectedSession, "user", prompt, { images });
     $("prompt").value = "";
+    clearAttachments();
     endAgentStream(state.selectedSession);
     state.phraseIndex = 0;
     clearBoomTimer(state.selectedSession);
@@ -3049,6 +3170,7 @@ async function sendPrompt() {
       approvalMode: currentApprovalMode(),
       planMode: modeOn("plan-mode"),
       alwaysApprove: modeOn("always-approve"),
+      images: images.map((a) => ({ mimeType: a.mimeType, data: a.data, name: a.name })),
     });
     // Mark live after successful send/resume; refresh brain_mode from registry.
     if (sess) {
@@ -3466,6 +3588,54 @@ $("prompt").addEventListener("keydown", (e) => {
     sendPrompt();
   }
 });
+
+// Attach button → hidden file picker; picking files stages them.
+$("btn-attach") && ($("btn-attach").onclick = () => $("attach-input")?.click());
+$("attach-input") &&
+  ($("attach-input").onchange = (e) => {
+    addAttachmentFiles(e.target.files);
+    e.target.value = ""; // let the same file be re-picked later
+  });
+
+// Paste an image straight into the composer (screenshots).
+$("prompt").addEventListener("paste", (e) => {
+  const items = Array.from(e.clipboardData?.items || []);
+  const files = items
+    .filter((it) => it.kind === "file" && (it.type || "").startsWith("image/"))
+    .map((it) => it.getAsFile())
+    .filter(Boolean);
+  if (files.length) {
+    e.preventDefault(); // don't drop a base64 blob into the text
+    addAttachmentFiles(files);
+  }
+});
+
+// Drag-and-drop images onto the composer.
+(() => {
+  const zone = $("composer");
+  if (!zone) return;
+  const stop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  ["dragenter", "dragover"].forEach((ev) =>
+    zone.addEventListener(ev, (e) => {
+      if (Array.from(e.dataTransfer?.types || []).includes("Files")) {
+        stop(e);
+        zone.classList.add("drag-over");
+      }
+    }),
+  );
+  ["dragleave", "drop"].forEach((ev) =>
+    zone.addEventListener(ev, (e) => {
+      if (ev === "drop") {
+        stop(e);
+        addAttachmentFiles(e.dataTransfer?.files);
+      }
+      zone.classList.remove("drag-over");
+    }),
+  );
+})();
 
 // Shift+Tab cycles the approval stance from anywhere (including the prompt
 // box, where Tab would otherwise move focus).

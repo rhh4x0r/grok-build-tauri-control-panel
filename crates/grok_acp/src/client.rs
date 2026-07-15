@@ -22,7 +22,7 @@ use grok_events::{
 use crate::error::{AcpError, Result};
 use crate::messages::{
     id_key, AuthenticateParams, ClientCapabilities, ClientInfo, FsCapabilities,
-    IncomingAgentRequest, InitializeParams, JsonRpcNotification, PromptContent,
+    IncomingAgentRequest, InitializeParams, JsonRpcNotification, PromptBlock, PromptImage,
     SessionPromptParams,
 };
 use crate::terminals::TerminalRegistry;
@@ -507,7 +507,17 @@ impl AcpClient {
                 .unwrap_or(false);
         *self.load_session_supported.write().await = load;
         *self.resume_session_supported.write().await = resume;
-        info!(load_session = load, resume_session = resume, "ACP agent session capabilities");
+        let image_ok = caps
+            .as_ref()
+            .and_then(|c| c.pointer("/promptCapabilities/image"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        info!(
+            load_session = load,
+            resume_session = resume,
+            image_prompts = image_ok,
+            "ACP agent session capabilities"
+        );
 
         // Cache advertised auth methods (e.g. cached_token, grok.com).
         let methods = result
@@ -942,6 +952,14 @@ impl AcpClient {
     }
 
     pub async fn send_prompt(&self, prompt: &str) -> Result<()> {
+        self.send_prompt_with_images(prompt, &[]).await
+    }
+
+    pub async fn send_prompt_with_images(
+        &self,
+        prompt: &str,
+        images: &[PromptImage],
+    ) -> Result<()> {
         let sid = self
             .session_id
             .read()
@@ -949,7 +967,9 @@ impl AcpClient {
             .clone()
             .ok_or(AcpError::SessionNotReady)?;
 
-        if prompt.trim().is_empty() {
+        // An image-only message is legitimate ("what's wrong with this?"), but a
+        // message that is entirely empty is not.
+        if prompt.trim().is_empty() && images.is_empty() {
             return Err(AcpError::Protocol("empty prompt".into()));
         }
 
@@ -1023,12 +1043,49 @@ impl AcpClient {
             return Ok(());
         }
 
+        // Drop images the agent cannot use rather than sending blocks it will
+        // reject; warn once so a text-only agent doesn't silently swallow them.
+        let usable_images: Vec<&PromptImage> = if images.is_empty() {
+            Vec::new()
+        } else if self.image_prompts_supported().await {
+            images.iter().collect()
+        } else {
+            warn!(
+                count = images.len(),
+                "agent does not advertise image prompt support; dropping attachments"
+            );
+            if let Some(bus) = &self.event_bus {
+                Self::emit_term(
+                    bus,
+                    self.control_session_id,
+                    format!(
+                        "⚠ this agent can't accept images — {} attachment(s) not sent",
+                        images.len()
+                    ),
+                );
+            }
+            Vec::new()
+        };
+
+        let mut blocks: Vec<PromptBlock> = Vec::with_capacity(1 + usable_images.len());
+        if !text.trim().is_empty() {
+            blocks.push(PromptBlock::text(text));
+        }
+        for img in &usable_images {
+            blocks.push(PromptBlock::Image {
+                mime_type: img.mime_type.clone(),
+                data: img.data.clone(),
+            });
+        }
+        // A prompt must carry something; if text was blank and images were all
+        // dropped, fall back to a minimal text block.
+        if blocks.is_empty() {
+            blocks.push(PromptBlock::text(prompt.to_string()));
+        }
+
         let params = SessionPromptParams {
             session_id: sid,
-            prompt: vec![PromptContent {
-                kind: "text".into(),
-                text,
-            }],
+            prompt: blocks,
         };
         let params_val = serde_json::to_value(params)?;
         let transport = self.transport().await?;
@@ -1120,6 +1177,19 @@ impl AcpClient {
 
         // Return as soon as the request is on the wire.
         Ok(())
+    }
+
+    /// Does the agent accept image blocks in a prompt? We only refuse when the
+    /// agent explicitly advertises `promptCapabilities.image = false`; an
+    /// unknown or not-yet-initialized agent is given the benefit of the doubt.
+    pub async fn image_prompts_supported(&self) -> bool {
+        self.agent_capabilities
+            .read()
+            .await
+            .as_ref()
+            .and_then(|c| c.pointer("/promptCapabilities/image"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
     }
 
     pub async fn cancel(&self) -> Result<()> {

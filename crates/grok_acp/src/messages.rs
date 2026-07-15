@@ -184,24 +184,69 @@ pub struct SessionNewParams {
     pub mode: Option<String>,
 }
 
+/// One ACP prompt content block. The wire shape is tagged by `type`
+/// ("text" | "image"), matching the Agent Client Protocol ContentBlock.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PromptContent {
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub text: String,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PromptBlock {
+    Text {
+        text: String,
+    },
+    Image {
+        /// e.g. "image/png", "image/jpeg"
+        #[serde(rename = "mimeType")]
+        mime_type: String,
+        /// base64-encoded bytes, no `data:` prefix
+        data: String,
+    },
+}
+
+impl PromptBlock {
+    pub fn text(s: impl Into<String>) -> Self {
+        PromptBlock::Text { text: s.into() }
+    }
+}
+
+/// An image the user attached to a prompt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptImage {
+    #[serde(rename = "mimeType")]
+    pub mime_type: String,
+    /// base64-encoded bytes, no `data:` prefix.
+    pub data: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionPromptParams {
     #[serde(rename = "sessionId")]
     pub session_id: String,
-    pub prompt: Vec<PromptContent>,
+    pub prompt: Vec<PromptBlock>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn prompt_blocks_serialize_to_acp_content_shapes() {
+        let params = SessionPromptParams {
+            session_id: "s1".into(),
+            prompt: vec![
+                PromptBlock::text("look at this"),
+                PromptBlock::Image {
+                    mime_type: "image/png".into(),
+                    data: "AAAA".into(),
+                },
+            ],
+        };
+        let v = serde_json::to_value(&params).unwrap();
+        assert_eq!(v["prompt"][0], json!({"type": "text", "text": "look at this"}));
+        assert_eq!(
+            v["prompt"][1],
+            json!({"type": "image", "mimeType": "image/png", "data": "AAAA"})
+        );
+    }
 
     #[test]
     fn parses_session_update_as_notification_not_response() {

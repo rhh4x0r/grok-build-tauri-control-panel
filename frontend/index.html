@@ -166,11 +166,15 @@
                   title="Merge this thread's work back into the project">⬆ Land</button>
               </span>
             </div>
+            <div id="attach-tray" class="attach-tray" style="display:none"></div>
             <div class="composer-row">
+              <button id="btn-attach" class="btn ghost btn-attach" type="button"
+                title="Attach image (or paste / drop into the box)">🖼</button>
+              <input id="attach-input" type="file" accept="image/*" multiple hidden />
               <textarea
                 id="prompt"
                 rows="2"
-                placeholder="Message Bomb Code… (Enter to send, Shift+Enter newline)"
+                placeholder="Message Bomb Code… (Enter to send, Shift+Enter newline · paste or drop images)"
                 spellcheck="false"
               ></textarea>
               <button id="btn-send" class="btn primary">Send</button>

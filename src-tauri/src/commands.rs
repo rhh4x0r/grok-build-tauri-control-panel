@@ -718,6 +718,24 @@ pub async fn get_session_transcript(
     state.persistence.transcript_entries(id).map_err(err)
 }
 
+/// An image attached to a prompt from the composer. `data` is base64 with no
+/// `data:` URI prefix; `name` is only for the transcript breadcrumb.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageInput {
+    pub mime_type: String,
+    pub data: String,
+    pub name: Option<String>,
+}
+
+/// Whether the live agent for a thread accepts image prompts. Unknown / not-live
+/// threads answer `true` so the composer never blocks attaching pre-emptively.
+#[tauri::command]
+pub async fn agent_supports_images(state: State<'_, AppState>, id: String) -> Result<bool, String> {
+    let id = Uuid::parse_str(&id).map_err(err)?;
+    Ok(state.registry.image_prompts_supported(id).await.unwrap_or(true))
+}
+
 #[tauri::command]
 pub async fn send_prompt(
     state: State<'_, AppState>,
@@ -728,8 +746,10 @@ pub async fn send_prompt(
     approval_mode: Option<String>,
     plan_mode: Option<bool>,
     always_approve: Option<bool>,
+    images: Option<Vec<ImageInput>>,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
+    let images = images.unwrap_or_default();
 
     let want_backend = backend.as_deref().and_then(grok_config::Backend::from_key);
     let want_model = model.filter(|m| {
@@ -836,11 +856,34 @@ pub async fn send_prompt(
     }
 
     let prompt_len = prompt.len();
-    state.registry.send_prompt(id, &prompt).await.map_err(err)?;
+    let acp_images: Vec<grok_acp::PromptImage> = images
+        .iter()
+        .map(|i| grok_acp::PromptImage {
+            mime_type: i.mime_type.clone(),
+            data: i.data.clone(),
+        })
+        .collect();
+    state
+        .registry
+        .send_prompt_with_images(id, &prompt, &acp_images)
+        .await
+        .map_err(err)?;
     // User message — durable immediately (agent side streams via event bus).
+    // Note in the transcript that images rode along, so a reloaded thread does
+    // not read as if only text was sent.
+    let durable = if images.is_empty() {
+        prompt.clone()
+    } else {
+        let names: Vec<String> = images
+            .iter()
+            .enumerate()
+            .map(|(n, i)| i.name.clone().unwrap_or_else(|| format!("image {}", n + 1)))
+            .collect();
+        format!("{prompt}\n\n[attached: {}]", names.join(", ")).trim().to_string()
+    };
     let _ = state
         .persistence
-        .append_message(id, "prompt", prompt, Utc::now());
+        .append_message(id, "prompt", &durable, Utc::now());
     // Terminal breadcrumb so center column never looks idle after send.
     let _ = state.persistence.append_message(
         id,

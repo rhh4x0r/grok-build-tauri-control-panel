@@ -457,6 +457,13 @@ impl SessionRegistry {
         Some(c.brain_mode().await)
     }
 
+    /// Whether the live agent accepts image prompt blocks. `None` when the
+    /// thread is not live (no client to ask).
+    pub async fn image_prompts_supported(&self, id: Uuid) -> Option<bool> {
+        let c = self.sessions.get(&id)?.acp_client.clone()?;
+        Some(c.image_prompts_supported().await)
+    }
+
     pub fn list_sessions(&self) -> Vec<SessionMetadata> {
         self.sessions
             .iter()
@@ -472,6 +479,15 @@ impl SessionRegistry {
     }
 
     pub async fn send_prompt(&self, id: Uuid, prompt: &str) -> Result<()> {
+        self.send_prompt_with_images(id, prompt, &[]).await
+    }
+
+    pub async fn send_prompt_with_images(
+        &self,
+        id: Uuid,
+        prompt: &str,
+        images: &[grok_acp::PromptImage],
+    ) -> Result<()> {
         let client = {
             let mut entry = self
                 .sessions
@@ -494,7 +510,7 @@ impl SessionRegistry {
         self.event_bus
             .emit_status(id, SessionStatus::Running)
             .await;
-        client.send_prompt(prompt).await?;
+        client.send_prompt_with_images(prompt, images).await?;
         Ok(())
     }
 

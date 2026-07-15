@@ -97,6 +97,7 @@ pub fn run() {
             commands::get_session,
             commands::get_session_transcript,
             commands::send_prompt,
+            commands::agent_supports_images,
             commands::cancel_session,
             commands::remove_session,
             commands::set_plan_mode,

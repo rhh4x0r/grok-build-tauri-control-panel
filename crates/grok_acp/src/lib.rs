@@ -16,6 +16,6 @@ pub use error::{AcpError, Result};
 pub use messages::{
     AuthenticateParams, ClientCapabilities, ClientInfo, IncomingAgentRequest, InitializeParams,
     InitializeResult, JsonRpcError, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest,
-    JsonRpcResponse, PromptContent, SessionNewParams, SessionPromptParams,
+    JsonRpcResponse, PromptBlock, PromptImage, SessionNewParams, SessionPromptParams,
 };
 pub use transport::NdjsonTransport;
