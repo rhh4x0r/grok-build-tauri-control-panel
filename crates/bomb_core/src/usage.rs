@@ -5,7 +5,8 @@
 //!   token Claude Code keeps in the macOS Keychain.
 //! - Codex: `GET https://chatgpt.com/backend-api/wham/usage` with the token in
 //!   `~/.codex/auth.json`.
-//! - Grok: the CLI exposes no account-wide usage, only per-session tallies.
+//! - Grok: `GET <cli-chat-proxy>/billing?format=credits`, the call behind the
+//!   TUI's `/usage` command, with the OIDC key from `~/.grok/auth.json`.
 //!
 //! Requests go through `curl` so we don't drag an HTTP stack into the build.
 
@@ -36,8 +37,8 @@ pub struct AccountUsage {
 /// Fetch usage for every backend that has a source. Never fails as a whole:
 /// a backend without a token simply has no windows.
 pub async fn all() -> Vec<AccountUsage> {
-    let (claude, codex) = tokio::join!(claude(), codex());
-    vec![claude, codex]
+    let (claude, codex, grok) = tokio::join!(claude(), codex(), grok());
+    vec![grok, claude, codex]
 }
 
 async fn curl_json(url: &str, headers: &[String]) -> Result<serde_json::Value, String> {
@@ -158,6 +159,132 @@ async fn codex() -> AccountUsage {
             }
         }
         Err(e) => u.error = Some(e),
+    }
+    u
+}
+
+// ── Grok ────────────────────────────────────────────────────────────────
+
+/// The newest non-expired entry in `~/.grok/auth.json` (keyed by issuer).
+async fn grok_key() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let raw = tokio::fs::read(format!("{home}/.grok/auth.json")).await.ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+    let mut best: Option<(DateTime<Utc>, String)> = None;
+    for entry in v.as_object()?.values() {
+        let Some(key) = entry.get("key").and_then(|k| k.as_str()) else { continue };
+        let exp = ts(entry.get("expires_at")).unwrap_or(DateTime::<Utc>::MIN_UTC);
+        if best.as_ref().is_none_or(|(e, _)| exp > *e) {
+            best = Some((exp, key.to_string()));
+        }
+    }
+    best.map(|(_, k)| k)
+}
+
+/// Depth-first search for a numeric field, since the billing payload nests
+/// its period summary differently per plan.
+fn find_num(v: &serde_json::Value, key: &str) -> Option<f64> {
+    match v {
+        serde_json::Value::Object(m) => {
+            if let Some(x) = m.get(key) {
+                // Grok wraps money-like numbers as `{ "val": 12.5 }`.
+                if let Some(n) = x.as_f64().or_else(|| x.get("val").and_then(|v| v.as_f64())) {
+                    return Some(n);
+                }
+            }
+            m.values().find_map(|x| find_num(x, key))
+        }
+        serde_json::Value::Array(a) => a.iter().find_map(|x| find_num(x, key)),
+        _ => None,
+    }
+}
+
+fn find_val<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    match v {
+        serde_json::Value::Object(m) => m.get(key).or_else(|| m.values().find_map(|x| find_val(x, key))),
+        serde_json::Value::Array(a) => a.iter().find_map(|x| find_val(x, key)),
+        _ => None,
+    }
+}
+
+async fn grok() -> AccountUsage {
+    let mut u = AccountUsage { backend: "grok".into(), ..Default::default() };
+    let Some(key) = grok_key().await else {
+        return u;
+    };
+    let base = std::env::var("GROK_CLI_CHAT_PROXY_BASE_URL")
+        .ok()
+        .filter(|b| !b.trim().is_empty())
+        .unwrap_or_else(|| "https://cli-chat-proxy.grok.com/v1".into());
+    let url = format!("{}/billing?format=credits", base.trim_end_matches('/'));
+    match curl_json(&url, &[format!("authorization: Bearer {key}")]).await {
+        Ok(v) => {
+            if let Some(keys) = v.as_object().map(|m| m.keys().cloned().collect::<Vec<_>>()) {
+                tracing::debug!(?keys, "grok billing payload");
+            }
+            u.plan = find_val(&v, "tier")
+                .or_else(|| find_val(&v, "subscriptionTier"))
+                .or_else(|| find_val(&v, "plan"))
+                .and_then(|t| t.as_str())
+                .map(str::to_string);
+            let period_end = find_val(&v, "billingPeriodEnd").and_then(|x| ts(Some(x)));
+            let period_start = find_val(&v, "billingPeriodStart").and_then(|x| ts(Some(x)));
+            let cycle = find_val(&v, "billingCycle")
+                .or_else(|| v.pointer("/config/currentPeriod/type"))
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let label = if cycle.contains("week") {
+                "Weekly".to_string()
+            } else if cycle.contains("month") {
+                "Monthly".to_string()
+            } else if let (Some(a), Some(b)) = (period_start, period_end) {
+                window_label((b - a).num_seconds())
+            } else {
+                "Period".to_string()
+            };
+            if let Some(cfg) = v.get("config").and_then(|c| c.as_object()) {
+                let keys: Vec<String> = cfg
+                    .iter()
+                    .map(|(k, x)| match x.as_object() {
+                        Some(o) => format!("{k}{{{}}}", o.keys().cloned().collect::<Vec<_>>().join(",")),
+                        None => k.clone(),
+                    })
+                    .collect();
+                tracing::debug!(?keys, "grok billing config shape");
+            }
+            if let Some(pct) = find_num(&v, "creditUsagePercent") {
+                u.windows.push(UsageWindow { label: label.clone(), used_pct: pct as f32, resets_at: period_end });
+            } else if let (Some(used), Some(limit)) = (
+                find_num(&v, "includedUsed").or_else(|| find_num(&v, "totalUsed")),
+                find_num(&v, "monthlyLimit"),
+            ) {
+                if limit > 0.0 {
+                    u.windows.push(UsageWindow {
+                        label: label.clone(),
+                        used_pct: (used / limit * 100.0) as f32,
+                        resets_at: period_end,
+                    });
+                }
+            }
+            if let (Some(used), Some(cap)) = (find_num(&v, "onDemandUsed"), find_num(&v, "onDemandCap")) {
+                if cap > 0.0 {
+                    u.windows.push(UsageWindow { label: "Extra".into(), used_pct: (used / cap * 100.0) as f32, resets_at: period_end });
+                }
+            }
+            if u.windows.is_empty() {
+                u.error = find_val(&v, "error")
+                    .or_else(|| find_val(&v, "message"))
+                    .map(|e| e.to_string())
+                    .or(Some("no usage windows".into()));
+                tracing::warn!(body = %v, "grok billing: nothing usable");
+            }
+            tracing::debug!(plan = ?u.plan, windows = ?u.windows, "grok billing parsed");
+        }
+        Err(e) => {
+            tracing::warn!(%e, "grok billing request failed");
+            u.error = Some(e);
+        }
     }
     u
 }
