@@ -29,6 +29,7 @@ pub struct RootView {
     preview_open: bool,
     settings: Option<Entity<crate::views::settings::SettingsView>>,
     settings_open: bool,
+    _mode_shortcut: Subscription,
 }
 
 impl RootView {
@@ -38,7 +39,28 @@ impl RootView {
         let thread = cx.new(|cx| ThreadView::new(model.clone(), window, cx));
         let preview = cx.new(|cx| PreviewPanel::new(model.clone(), cx));
         let review = cx.new(|cx| crate::views::workspaces::ReviewPanel::new(model.clone(), cx));
+        let window_id = window.window_handle().window_id();
+        let view = cx.entity().downgrade();
+        let mode_shortcut = cx.intercept_keystrokes(move |event, window, cx| {
+            if window.window_handle().window_id() != window_id || !is_mode_shortcut(event) {
+                return;
+            }
+            // Intercept before Root's TabPrev or Input's OutdentInline can move
+            // focus/change text. Modal surfaces keep their own keyboard behavior.
+            if window.has_active_dialog(cx) || window.has_active_sheet(cx)
+                || gpui_kit::base::active_focus_trap(window, cx).is_some()
+            {
+                return;
+            }
+            let _ = view.update(cx, |this, cx| {
+                if this.settings_open { return; }
+                this.model.update(cx, |m, cx| m.cycle_mode(cx));
+                window.prevent_default();
+                cx.stop_propagation();
+            });
+        });
         Self {
+            _mode_shortcut: mode_shortcut,
             review,
             model,
             sidebar,
@@ -355,4 +377,49 @@ fn hostname() -> String {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "local".into())
+}
+
+/// Only the conversation surface and its composer own this shortcut. Other
+/// inputs and overlay controls must retain normal backwards tab navigation.
+fn is_mode_shortcut(event: &KeystrokeEvent) -> bool {
+    let key = &event.keystroke;
+    if key.key != "tab" || !key.modifiers.shift
+        || key.modifiers.platform || key.modifiers.control || key.modifiers.alt || key.modifiers.function
+    {
+        return false;
+    }
+    let has = |name| event.context_stack.iter().any(|context| context.contains(name));
+    !has("PopupMenu") && !has("Popover") && !has("Dialog")
+        && (!has("Input") || has("BombComposer"))
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::is_mode_shortcut;
+    use gpui_kit::{KeyContext, Keystroke, KeystrokeEvent};
+
+    fn event(key: &str, contexts: &[&str]) -> KeystrokeEvent {
+        KeystrokeEvent {
+            keystroke: Keystroke::parse(key).unwrap(),
+            action: None,
+            context_stack: contexts.iter().map(|c| KeyContext::parse(c).unwrap()).collect(),
+        }
+    }
+
+    #[test]
+    fn cycles_before_focus_enters_composer_and_while_typing() {
+        for contexts in [vec![], vec!["Root"], vec!["Root", "BombComposer"], vec!["Root", "BombComposer", "Input"]] {
+            assert!(is_mode_shortcut(&event("shift-tab", &contexts)));
+        }
+    }
+
+    #[test]
+    fn leaves_other_keys_inputs_and_overlays_alone() {
+        for key in ["tab", "ctrl-shift-tab", "cmd-shift-tab", "alt-shift-tab"] {
+            assert!(!is_mode_shortcut(&event(key, &["Root", "BombComposer", "Input"])));
+        }
+        for contexts in [vec!["Root", "Input"], vec!["Root", "BombComposer", "PopupMenu"], vec!["Root", "BombComposer", "Popover", "Input"], vec!["Root", "Dialog"]] {
+            assert!(!is_mode_shortcut(&event("shift-tab", &contexts)));
+        }
+    }
 }

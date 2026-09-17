@@ -335,3 +335,9 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 - Fixed Shift+Tab with composer-scoped bindings, including a more-specific input binding that overrides outdent. Replaced the composer's no-op mode action handler and stopped propagation to avoid cycling twice.
 - Mode changes update thread metadata immediately, report/roll back failures, and persist for saved threads without requiring a live process. Existing read-only restrictions and backend permission semantics remain intact.
 - Validation: workspace check, strict all-target Clippy, development build, and diff whitespace checks passed. All bomb_core tests passed (37 passed, 2 existing opt-in tests ignored), including new branch/PR-check tests and live/saved approval-mode coverage in the workspace lifecycle test. Live visual/keyboard verification remains unavailable after Computer Use denied app access; real GitHub PR retrieval was not exercised during automated tests.
+
+## 2026-09-17 — Consume Shift+Tab before focus navigation
+- Replaced composer-only Shift+Tab bindings with a main-window keystroke interceptor that cycles the current approval mode before GPUI can dispatch backward focus navigation or input outdent. It does not move focus or change composer text/selection.
+- The interceptor is scoped to its owning window and subscription lifetime. Settings, dialogs, sheets, focus traps, popup menus/popovers, unrelated inputs, ordinary Tab, and extra-modifier combinations retain normal keyboard handling.
+- Added routing regression coverage for initial/non-composer focus, composer typing, other inputs, overlays, and unrelated key combinations.
+- Validation: workspace check, strict all-target Clippy, both shortcut routing tests, development build, and diff whitespace checks passed. Live focus/cursor verification remains unavailable after the earlier Computer Use access denial.

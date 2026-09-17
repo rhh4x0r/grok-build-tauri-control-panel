@@ -38,9 +38,6 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-.", StopTurn, None),
         KeyBinding::new("cmd-f", FindInThread, None),
         KeyBinding::new("cmd-k", OpenCommandPalette, None),
-        // Beat the input's outdent binding only inside the conversation composer.
-        KeyBinding::new("shift-tab", CycleApprovalMode, Some("BombComposer")),
-        KeyBinding::new("shift-tab", CycleApprovalMode, Some("BombComposer > Input")),
     ]);
     cx.set_menus(vec![
         Menu {
