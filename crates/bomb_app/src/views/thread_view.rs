@@ -365,17 +365,17 @@ impl ThreadView {
                 .on_click(|_, window, cx| {
                     window.dispatch_action(Box::new(crate::actions::ToggleDevPreview), cx)
                 }))
-            .when(has_worktree, |el| el.child(
-                action("workspace-more", "", Lucide::Ellipsis)
-                    .tooltip("More workspace actions")
-                    .dropdown_menu(move |menu, _, _| {
-                        let app = app.clone();
-                        menu.item(PopupMenuItem::new("Merge latest default branch into workspace")
-                            .on_click(move |_, _, cx| {
-                                if let Some(id) = id {
-                                    app.update(cx, |m, cx| m.sync_thread(id, cx));
-                                }
-                            }))
+            .when_some(id, |el, thread_id| el.child(
+                action("thread-more", "", Lucide::Ellipsis)
+                    .tooltip("More thread actions")
+                    .dropdown_menu(move |mut menu, _, cx| {
+                        if has_worktree {
+                            let app = app.clone();
+                            menu = menu.item(PopupMenuItem::new("Merge latest default branch into workspace")
+                                .on_click(move |_, _, cx| app.update(cx, |m, cx| m.sync_thread(thread_id, cx))));
+                        }
+                        let archived = app.read(cx).archived.contains(&thread_id);
+                        super::sidebar::thread_lifecycle_menu(menu, app.clone(), thread_id, archived)
                     }),
             ))
     }

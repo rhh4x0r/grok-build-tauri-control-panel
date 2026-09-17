@@ -4,7 +4,7 @@
 use chrono::{DateTime, Utc};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, Sizable, WindowExt};
@@ -287,6 +287,11 @@ impl SidebarView {
             }
             if archived && !archive_open { continue; }
             for w in rows.iter().filter(|w| !w.inline && w.archived_at.is_some() == archived) {
+                // These rows stand in for conversations. Empty workspaces remain
+                // available in the project overview; archived threads live below.
+                if !w.threads.iter().filter_map(|id| Uuid::parse_str(id).ok())
+                    .any(|id| !self.model.read(cx).archived.contains(&id)) { continue; }
+                let single_thread = if w.threads.len() == 1 { Uuid::parse_str(&w.threads[0]).ok() } else { None };
                 let app = self.model.clone();
                 let wid = w.id.clone();
                 let active = self.model.read(cx).active_workspace.as_deref() == Some(&w.id);
@@ -340,7 +345,8 @@ impl SidebarView {
                             let app = menu_model.clone();
                             let wid = menu_id.clone();
                             let name = title.clone();
-                            menu.item(PopupMenuItem::new("Rename workspace…").on_click(move |_, window, cx| crate::views::workspaces::text_action(app.clone(), wid.clone(), "rename", "Workspace name", name.clone(), window, cx)))
+                            let menu = menu.item(PopupMenuItem::new("Rename workspace…").on_click(move |_, window, cx| crate::views::workspaces::text_action(app.clone(), wid.clone(), "rename", "Workspace name", name.clone(), window, cx)));
+                            if let Some(id) = single_thread { thread_lifecycle_menu(menu, menu_model.clone(), id, false) } else { menu }
                         })
                         .child(
                             div()
@@ -541,21 +547,7 @@ impl SidebarView {
                         a.reveal_project(cx);
                     });
                 }));
-                menu = menu.separator();
-                let m = menu_model.clone();
-                menu = menu.item(
-                    PopupMenuItem::new(if is_archived { "Unarchive thread" } else { "Archive thread" }).on_click(move |_, _, cx| {
-                        m.update(cx, |a, cx| if is_archived { a.unarchive_thread(id, cx) } else { a.archive_thread(id, cx) });
-                    }),
-                );
-                let m = menu_model.clone();
-                menu.item(PopupMenuItem::new("Delete thread…").on_click(move |_, window, cx| {
-                    let m = m.clone();
-                    tracing::info!(%id, "delete: menu item clicked");
-                    // The popup menu is still tearing down on this click; a
-                    // dialog opened before it is gone gets dismissed with it.
-                    after_layers_settle(window, cx, move |window, cx| confirm_delete(m, id, window, cx));
-                }))
+                thread_lifecycle_menu(menu, menu_model.clone(), id, is_archived)
             })
             .when(!project.is_empty(), |el| {
                 el.child(
@@ -920,6 +912,21 @@ fn usage_bar(backend: &str, ix: usize, w: &bomb_core::usage::UsageWindow, ui: &U
                 .text_color(ui.text_faint)
                 .child(format!("{}%", pct.round() as i64)),
         )
+}
+
+/// Shared by ordinary rows, workspace rows and the open thread's overflow menu.
+pub(super) fn thread_lifecycle_menu(mut menu: PopupMenu, model: Entity<AppModel>, id: Uuid, archived: bool) -> PopupMenu {
+    let app = model.clone();
+    menu = menu.separator().item(
+        PopupMenuItem::new(if archived { "Unarchive thread" } else { "Archive thread" })
+            .on_click(move |_, _, cx| app.update(cx, |m, cx| {
+                if archived { m.unarchive_thread(id, cx); } else { m.archive_thread(id, cx); }
+            })),
+    );
+    menu.item(PopupMenuItem::new("Delete thread…").on_click(move |_, window, cx| {
+        let model = model.clone();
+        after_layers_settle(window, cx, move |window, cx| confirm_delete(model, id, window, cx));
+    }))
 }
 
 /// Two confirmations before a thread is gone for good: the second one
