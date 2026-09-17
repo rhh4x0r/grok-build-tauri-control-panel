@@ -14,7 +14,7 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::progress::ProgressCircle;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{Icon, Side, Sizable};
+use gpui_kit::component::{Disableable, Icon, Side, Sizable};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -44,6 +44,10 @@ pub struct ComposerView {
     model_search: Entity<InputState>,
     provider_filter: Option<String>,
     speed: Entity<super::speed::SpeedSelector>,
+    foundry_busy: bool,
+    foundry_result: Option<(String, String, Option<uuid::Uuid>)>,
+    foundry_undo: Option<(String, String, Option<uuid::Uuid>)>,
+    foundry_message: Option<String>,
 }
 
 impl ComposerView {
@@ -81,7 +85,38 @@ impl ComposerView {
             slash_dismissed: false,
             model_search: cx.new(|cx| InputState::new(window, cx).placeholder("Search models…")),
             provider_filter: None,
+            foundry_busy: false,
+            foundry_result: None,
+            foundry_undo: None,
+            foundry_message: None,
         }
+    }
+
+    fn run_foundry(&mut self, cx: &mut Context<Self>) {
+        let original = self.input.read(cx).value().to_string();
+        if self.foundry_busy || original.trim().is_empty() { return; }
+        let m = self.model.read(cx);
+        let backend = m.prefs.backend.clone();
+        let model = m.effective_model();
+        let thread = m.selected;
+        let state = crate::runtime::services(cx);
+        self.foundry_busy = true;
+        self.foundry_message = None;
+        let weak = cx.entity().downgrade();
+        crate::runtime::spawn_service(cx, async move {
+            let result = bomb_core::foundry::generate_prompt(state, original.clone(), backend, model).await;
+            (original, result)
+        }, move |(original, result), cx| {
+            let _ = weak.update(cx, |v,cx| {
+                v.foundry_busy = false;
+                match result {
+                    Ok(prompt) => v.foundry_result = Some((original, prompt, thread)),
+                    Err(error) => v.foundry_message = Some(format!("Couldn’t improve prompt: {error}")),
+                }
+                cx.notify();
+            });
+        });
+        cx.notify();
     }
 
     fn slash_catalog(&self, cx: &App) -> serde_json::Value {
@@ -1224,7 +1259,20 @@ fn mode_presentation(mode: &str) -> (&'static str, Lucide, &'static str) {
 }
 
 impl Render for ComposerView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some((original, prompt, thread)) = self.foundry_result.take() {
+            if self.model.read(cx).selected == thread && self.input.read(cx).value().as_ref() == original {
+                self.input.update(cx, |s,cx| s.set_value(prompt.clone(), window, cx));
+                self.foundry_undo = Some((original, prompt, thread));
+                self.foundry_message = Some("Prompt improved · Review and send when ready".into());
+            } else {
+                self.foundry_message = Some("Draft changed while Foundry was working; your edits were kept. Run it again when ready.".into());
+            }
+        }
+        if self.foundry_undo.as_ref().is_some_and(|(_,generated,thread)| *thread != self.model.read(cx).selected || self.input.read(cx).value().as_ref() != generated) {
+            self.foundry_undo = None;
+            self.foundry_message = None;
+        }
         let ui = Ui::of(cx);
         let (busy, starting, branch, worktree_on, has_thread) = {
             let m = self.model.read(cx);
@@ -1334,13 +1382,16 @@ impl Render for ComposerView {
             .items_center()
             .px_6()
             .pb_4()
-            .child(div().flex().gap_2()
-                .child(Button::new("improve-prompt").ghost().small().label("Improve prompt").on_click(cx.listener(|this,_,window,cx| {
-                    let text=this.input.read(cx).value().to_string();
-                    this.model.update(cx,|m,_|m.foundry_request=Some(text));
-                    window.dispatch_action(Box::new(crate::actions::OpenFoundry),cx);
-                })))
-                .child(Button::new("use-foundry-skill").ghost().small().label("Use skill").on_click(|_,window,cx|window.dispatch_action(Box::new(crate::actions::OpenFoundry),cx))))
+            .child(div().w_full().flex().items_center().flex_wrap().gap_2().pb_1()
+                .child(Button::new("run-foundry").ghost().small()
+                    .label(if self.foundry_busy { "Improving prompt…" } else { "Run through Foundry" })
+                    .disabled(self.foundry_busy || busy || starting || self.input.read(cx).value().trim().is_empty() || !self.model.read(cx).model_ready())
+                    .on_click(cx.listener(|v,_,_,cx|v.run_foundry(cx))))
+                .when_some(self.foundry_message.clone(), |el,message|el.child(div().text_xs().text_color(ui.text_muted).child(message)))
+                .when(self.foundry_undo.is_some(), |el|el.child(Button::new("undo-foundry").ghost().small().label("Undo").on_click(cx.listener(|v,_,window,cx| {
+                    if let Some((original,_,_)) = v.foundry_undo.take() { v.input.update(cx,|s,cx|s.set_value(original,window,cx)); }
+                    v.foundry_message = None; cx.notify();
+                })))))
             .on_action(cx.listener(|this, _: &CycleApprovalMode, _, cx| {
                 this.model.update(cx, |m, cx| m.cycle_mode(cx));
                 cx.stop_propagation();

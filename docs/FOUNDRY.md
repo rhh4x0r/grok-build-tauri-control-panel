@@ -1,6 +1,8 @@
 # Foundry
 
-Open **Foundry** in the sidebar, or choose **Improve prompt** / **Use skill** in the composer. The screen shares the app sidebar and has a back button.
+For everyday use, type your request in the chat composer and click **Run through Foundry**. The selected provider/model rewrites it automatically and places the improved prompt back in the composer. Review, edit, and Send when ready; **Undo** restores your original. Attachments stay attached. Errors leave your draft intact, and a late result never replaces a changed draft or another thread's input.
+
+The sidebar **Foundry** screen remains available for advanced contract, graph and saved-skill editing. You do not need to open it to improve a prompt.
 
 ## Author a contract
 

@@ -436,3 +436,10 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 - Added user documentation in docs/FOUNDRY.md. Structured source/role/phase editing currently uses JSON; provider-folder installation, scheduled/parallel loops and Word/PDF export remain deferred as planned.
 - Validation: workspace tests, workspace check and strict all-target Clippy passed before the final UI navigation adjustment; final rerun and development build recorded below. A live Grok probe passed correlated completion and structured-result parsing with no tools authorized. Native visual/interaction QA remains unverified after the earlier Computer Use denial.
 - Final validation: all workspace tests passed (175 passed, two existing opt-in tests ignored), workspace check and strict all-target Clippy passed, and the development app built successfully. Run output/evidence is expandable to keep the inspector readable. Updated the development bundle for relaunch.
+
+## 2026-09-17 — Foundry directly in the composer
+- Replaced the composer’s editor-launching Improve prompt / Use skill actions with a single Run through Foundry button. It rewrites the typed request using the selected provider/model and puts the resulting prompt directly into the composer for review; no screen navigation, contract setup, or automatic send.
+- Added working/error feedback and Undo. Attachments remain in place. Results are inserted only when the originating thread and original text still match, preserving concurrent edits and drafts in other threads. Blank requests and duplicate generation are disabled.
+- Reused Foundry’s transient read-only ACP generation path; prompt-writing instructions preserve intent and scale detail to the request instead of requiring every task to become a plan. The advanced editor remains optional in the sidebar.
+- Validation: two output-parser tests passed (clean extraction, missing/empty/incomplete output), workspace check and strict all-target Clippy passed. Native interaction remains unverified after the prior Computer Use denial.
+- Development build passed; updated the app bundle and reopened it with the simplified composer action.
