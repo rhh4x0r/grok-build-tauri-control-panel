@@ -3,6 +3,7 @@
 //! entities that receive streamed deltas, expand/collapse state, timers).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bomb_core::presence::BOOM_HOLD;
@@ -20,6 +21,8 @@ pub struct ThreadModel {
     pub loading: bool,
     /// Markdown render state per entry id; the streaming tail gets `push_str`.
     pub markdown: HashMap<u64, Entity<TextViewState>>,
+    /// Decoded attachment thumbnails per entry id.
+    pub images: HashMap<u64, Vec<Arc<Image>>>,
     /// Entry ids the user expanded (thoughts, tool chips) or collapsed
     /// (tool groups are open by default while running).
     pub expanded: HashSet<u64>,
@@ -40,6 +43,7 @@ impl ThreadModel {
             hydrated: false,
             loading: false,
             markdown: HashMap::new(),
+            images: HashMap::new(),
             expanded: HashSet::new(),
             collapsed_groups: HashSet::new(),
             explain_open: false,
@@ -77,6 +81,40 @@ impl ThreadModel {
         state
     }
 
+    /// Thumbnails for an entry's attachments, decoded once.
+    pub fn images_for(&mut self, entry_id: u64) -> Vec<Arc<Image>> {
+        if let Some(v) = self.images.get(&entry_id) {
+            return v.clone();
+        }
+        use base64::Engine;
+        let decoded: Vec<Arc<Image>> = self
+            .thread
+            .entries
+            .iter()
+            .find(|e| e.id == entry_id)
+            .map(|e| {
+                e.images
+                    .iter()
+                    .filter_map(|a| {
+                        let bytes = base64::engine::general_purpose::STANDARD.decode(&a.data).ok()?;
+                        let format = match a.mime_type.as_str() {
+                            "image/png" => ImageFormat::Png,
+                            "image/jpeg" => ImageFormat::Jpeg,
+                            "image/webp" => ImageFormat::Webp,
+                            "image/gif" => ImageFormat::Gif,
+                            "image/svg+xml" => ImageFormat::Svg,
+                            "image/bmp" => ImageFormat::Bmp,
+                            _ => return None,
+                        };
+                        Some(Arc::new(Image::from_bytes(format, bytes)))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.images.insert(entry_id, decoded.clone());
+        decoded
+    }
+
     pub fn toggle_expanded(&mut self, entry_id: u64, cx: &mut Context<Self>) {
         if !self.expanded.remove(&entry_id) {
             self.expanded.insert(entry_id);
@@ -86,6 +124,7 @@ impl ThreadModel {
 
     pub fn after_hydrate(&mut self, cx: &mut Context<Self>) {
         self.markdown.clear();
+        self.images.clear();
         self.tail_version += 1;
         cx.notify();
     }
@@ -129,6 +168,7 @@ impl ThreadModel {
                 Change::Trimmed { .. } => {
                     let live: HashSet<u64> = self.thread.entries.iter().map(|e| e.id).collect();
                     self.markdown.retain(|id, _| live.contains(id));
+                    self.images.retain(|id, _| live.contains(id));
                 }
                 Change::Boom => self.schedule_settle(cx),
                 Change::Presence => self.ensure_ticking(cx),

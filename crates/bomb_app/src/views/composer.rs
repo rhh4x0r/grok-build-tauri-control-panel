@@ -288,6 +288,37 @@ impl ComposerView {
             })
     }
 
+    fn mcp_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let m = self.model.read(cx);
+        if m.selected.is_some() || m.mcp_names.is_empty() {
+            return None;
+        }
+        let names = m.mcp_names.clone();
+        let chosen = m.prefs.mcp_servers.clone();
+        let app = self.model.clone();
+        let label = if chosen.is_empty() { "mcp".to_string() } else { format!("mcp: {}", chosen.len()) };
+        Some(
+            Button::new("mcp-picker")
+                .ghost()
+                .small()
+                .compact()
+                .label(label)
+                .dropdown_menu(move |mut menu, _, _| {
+                    menu = menu.label("Attach to the new thread (auto-attach servers are always included)");
+                    for n in &names {
+                        let app = app.clone();
+                        let name = n.clone();
+                        let on = chosen.contains(n);
+                        menu = menu.item(PopupMenuItem::new(n.clone()).checked(on).on_click(move |_, _, cx| {
+                            app.update(cx, |a, cx| a.toggle_mcp_pref(&name, cx));
+                        }));
+                    }
+                    menu
+                })
+                .into_any_element(),
+        )
+    }
+
     fn mode_picker(&self, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
         let mode = self.model.read(cx).prefs.mode.clone();
         let app = self.model.clone();
@@ -384,6 +415,7 @@ impl Render for ComposerView {
         let tray = self.tray(&ui, cx);
         let model_picker = self.model_picker(&ui, cx);
         let mode_picker = self.mode_picker(&ui, cx);
+        let mcp_picker = self.mcp_picker(cx);
         let hover = ui.hover;
         let _ = danger;
 
@@ -457,6 +489,7 @@ impl Render for ComposerView {
                                             .pb_0p5()
                                             .child(model_picker)
                                             .child(mode_picker)
+                                            .children(mcp_picker)
                                             .child(
                                                 div()
                                                     .id("attach")

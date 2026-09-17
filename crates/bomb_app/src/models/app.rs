@@ -73,6 +73,8 @@ pub struct AppModel {
     pub backends: Vec<BackendInfo>,
     pub prefs: ComposerPrefs,
     pub dev_server: Option<DevServerStatus>,
+    /// Names of enabled MCP servers (for the composer picker).
+    pub mcp_names: Vec<String>,
     pub login: Option<LoginSessionState>,
     /// A device-code login was requested and the first status is pending.
     pub login_starting: bool,
@@ -97,6 +99,7 @@ impl AppModel {
             backends: Vec::new(),
             prefs: ComposerPrefs::default(),
             dev_server: None,
+            mcp_names: Vec::new(),
             login: None,
             login_starting: false,
             last_error: None,
@@ -118,6 +121,24 @@ impl AppModel {
         self.refresh_services(cx);
         self.refresh_backends(cx);
         self.refresh_dev_server(cx);
+        self.refresh_mcp_names(cx);
+    }
+
+    pub fn refresh_mcp_names(&mut self, cx: &mut Context<Self>) {
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(
+            cx,
+            async move { services::list_mcp_servers(&state).await },
+            move |res, cx| {
+                let _ = this.update(cx, |m, cx| {
+                    if let Ok(list) = res {
+                        m.mcp_names = list.into_iter().filter(|s| s.enabled).map(|s| s.name).collect();
+                        cx.notify();
+                    }
+                });
+            },
+        );
     }
 
     pub fn refresh_threads(&mut self, cx: &mut Context<Self>) {
@@ -447,6 +468,7 @@ impl AppModel {
                     self.toast(ToastKind::Error, message.clone());
                     cx.notify();
                 }
+                ControlEvent::McpChanged { .. } => self.refresh_mcp_names(cx),
                 ControlEvent::Raw { payload, session_id: Some(_) }
                     if payload.get("channel").and_then(|c| c.as_str()) == Some("thread") =>
                 {
@@ -585,6 +607,34 @@ impl AppModel {
         }
     }
 
+    /// Pin a reply into project memory.
+    pub fn remember(&mut self, text: String, cx: &mut Context<Self>) {
+        let Some(id) = self.selected else { return };
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(
+            cx,
+            async move { services::remember(&state, id.to_string(), text).await },
+            move |res, cx| {
+                let _ = this.update(cx, |m, cx| {
+                    match res {
+                        Ok(_) => m.toast(ToastKind::Success, "Saved to project memory"),
+                        Err(e) => m.fail(e, cx),
+                    }
+                    cx.notify();
+                });
+            },
+        );
+    }
+
+    /// Plan handoff: switch to `backend`/`model`, drop to auto approvals, and
+    /// ask the (possibly different) agent to implement the plan.
+    pub fn code_plan_with(&mut self, backend: &str, model: Option<String>, cx: &mut Context<Self>) {
+        self.set_backend(backend, model, cx);
+        self.set_mode("auto", cx);
+        self.send_prompt("Implement the plan above. Work through it step by step and report when done.".into(), Vec::new(), cx);
+    }
+
     pub fn cancel_selected(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.selected else { return };
         let state = svc(cx);
@@ -621,6 +671,15 @@ impl AppModel {
             .unwrap_or(0);
         let next = APPROVAL_CYCLE[(i + 1) % APPROVAL_CYCLE.len()];
         self.set_mode(next, cx);
+    }
+
+    pub fn toggle_mcp_pref(&mut self, name: &str, cx: &mut Context<Self>) {
+        if let Some(i) = self.prefs.mcp_servers.iter().position(|n| n == name) {
+            self.prefs.mcp_servers.remove(i);
+        } else {
+            self.prefs.mcp_servers.push(name.to_string());
+        }
+        cx.notify();
     }
 
     pub fn set_backend(&mut self, backend: &str, model: Option<String>, cx: &mut Context<Self>) {

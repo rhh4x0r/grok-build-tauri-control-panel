@@ -7,7 +7,10 @@ use bomb_core::transcript::{ApprovalCard, Body, Entry, PlanDoc, Role, ToolRow};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::assets::IconName as Lucide;
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::{Icon, IconName, Sizable};
+use std::sync::Arc;
+use crate::models::app::AppModelHandle;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -44,10 +47,12 @@ enum Row {
     User {
         id: u64,
         text: String,
+        images: Vec<Arc<Image>>,
     },
     Agent {
         id: u64,
         state: Entity<TextViewState>,
+        raw: String,
         streaming: bool,
         last: bool,
         at: String,
@@ -144,15 +149,20 @@ impl TranscriptView {
                         rows.push(Row::Agent {
                             id: e.id,
                             state,
+                            raw: s.clone(),
                             streaming: e.streaming,
                             last: last_agent == Some(e.id),
                             at: e.at.with_timezone(&chrono::Local).format("%b %-d, %-I:%M %p").to_string(),
                         });
                     }
-                    (Role::You, Body::Text(s)) => rows.push(Row::User {
-                        id: e.id,
-                        text: s.clone(),
-                    }),
+                    (Role::You, Body::Text(s)) => {
+                        let images = if e.images.is_empty() { Vec::new() } else { t.images_for(e.id) };
+                        rows.push(Row::User {
+                            id: e.id,
+                            text: s.clone(),
+                            images,
+                        })
+                    }
                     (Role::Plan, Body::Plan(doc)) => {
                         let state = t.markdown_state(e.id, &doc.markdown, cx);
                         rows.push(Row::Plan {
@@ -190,13 +200,26 @@ impl TranscriptView {
 
     // ── row renderers ───────────────────────────────────────────────────
 
-    fn user_row(&self, id: u64, text: &str, ui: &Ui) -> AnyElement {
+    fn user_row(&self, id: u64, text: &str, images: &[Arc<Image>], ui: &Ui) -> AnyElement {
         let bubble = div()
             .w_full()
             .flex()
-            .justify_end()
+            .flex_col()
+            .items_end()
+            .gap_2()
             .pt_4()
             .pb_2()
+            .when(!images.is_empty(), |el| {
+                el.child(div().flex().gap_2().justify_end().children(images.iter().map(|im| {
+                    div()
+                        .size(px(120.))
+                        .rounded(px(10.))
+                        .overflow_hidden()
+                        .border_1()
+                        .border_color(ui.border)
+                        .child(img(im.clone()).size_full().object_fit(ObjectFit::Cover))
+                })))
+            })
             .child(
                 div()
                     .min_w_0()
@@ -218,6 +241,7 @@ impl TranscriptView {
         &self,
         id: u64,
         state: &Entity<TextViewState>,
+        raw: &str,
         streaming: bool,
         last: bool,
         at: &str,
@@ -239,6 +263,18 @@ impl TranscriptView {
                 ))
             })
             .when(last && !streaming, |el| {
+                let hover = ui.hover;
+                let text_for_copy: SharedString = raw.to_string().into();
+                let text_for_mem = text_for_copy.clone();
+                let action = |id: &'static str, label: &'static str| {
+                    div()
+                        .id(id)
+                        .px_1p5()
+                        .rounded(px(4.))
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(hover))
+                        .child(label)
+                };
                 el.child(
                     div()
                         .flex()
@@ -247,7 +283,15 @@ impl TranscriptView {
                         .pt_1()
                         .text_xs()
                         .text_color(ui.text_faint)
-                        .child(at.to_string()),
+                        .child(at.to_string())
+                        .child(action("copy-reply", "Copy").on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text_for_copy.to_string()));
+                        }))
+                        .child(action("remember-reply", "Remember").on_click(move |_, _, cx| {
+                            let app = cx.global::<AppModelHandle>().0.clone();
+                            let t = text_for_mem.to_string();
+                            app.update(cx, |m, cx| m.remember(t, cx));
+                        })),
                 )
             });
         fade_in(("agent", id), body).into_any_element()
@@ -522,8 +566,32 @@ impl TranscriptView {
         state: &Entity<TextViewState>,
         doc: &PlanDoc,
         ui: &Ui,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
+        let app = cx.global::<AppModelHandle>().0.clone();
+        let backends = app.read(cx).backends.clone();
+        let code_it = Button::new(("code-it", id))
+            .outline()
+            .xsmall()
+            .label("Code it")
+            .dropdown_caret(true)
+            .dropdown_menu(move |mut menu, _, _| {
+                for b in &backends {
+                    if !b.available {
+                        continue;
+                    }
+                    let models: Vec<String> = if b.models.is_empty() { vec![b.default_model.clone()] } else { b.models.clone() };
+                    for md in models {
+                        let app = app.clone();
+                        let bid = b.id.clone();
+                        let mdl = md.clone();
+                        menu = menu.item(PopupMenuItem::new(format!("{} · {md}", b.display_name)).on_click(move |_, _, cx| {
+                            app.update(cx, |m, cx| m.code_plan_with(&bid, Some(mdl.clone()), cx));
+                        }));
+                    }
+                }
+                menu
+            });
         let card = div()
             .flex()
             .flex_col()
@@ -536,10 +604,18 @@ impl TranscriptView {
             .bg(ui.ink(0.03))
             .child(
                 div()
-                    .text_xs()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(ui.text_muted)
-                    .child(doc.title.clone().unwrap_or_else(|| "Plan".into())),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(ui.text_muted)
+                            .child(doc.title.clone().unwrap_or_else(|| "Plan".into())),
+                    )
+                    .child(div().flex_1())
+                    .child(code_it),
             )
             .child(div().text_sm().child(TextView::new(state).selectable(true)));
         fade_in(("plan", id), card).into_any_element()
@@ -648,9 +724,9 @@ impl Render for TranscriptView {
         let children: Vec<AnyElement> = rows
             .iter()
             .map(|row| match row {
-                Row::User { id, text } => self.user_row(*id, text, &ui),
-                Row::Agent { id, state, streaming, last, at } => {
-                    self.agent_row(*id, state, *streaming, *last, at, &ui, cx)
+                Row::User { id, text, images } => self.user_row(*id, text, images, &ui),
+                Row::Agent { id, state, raw, streaming, last, at } => {
+                    self.agent_row(*id, state, raw, *streaming, *last, at, &ui, cx)
                 }
                 Row::Activity { first_id, items, collapsed } => {
                     self.activity_row(*first_id, items, *collapsed, &ui, cx)
