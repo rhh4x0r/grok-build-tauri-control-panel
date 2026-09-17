@@ -2172,6 +2172,41 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
             db.append_message(*session_id, "plan", text, Utc::now())
                 .map(|_| ())
         }
+        // Images produced by tools: bytes go to disk next to the database,
+        // the row keeps the path so a restored thread shows them again.
+        Raw {
+            session_id: Some(session_id),
+            payload,
+        } if payload.get("channel").and_then(|v| v.as_str()) == Some("image") => {
+            let Some(data) = payload.get("data").and_then(|v| v.as_str()) else {
+                return Ok(());
+            };
+            let mime = payload.get("mimeType").and_then(|v| v.as_str()).unwrap_or("image/png");
+            let ext = match mime {
+                "image/jpeg" => "jpg",
+                "image/webp" => "webp",
+                "image/gif" => "gif",
+                "image/svg+xml" => "svg",
+                _ => "png",
+            };
+            use base64::Engine;
+            let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
+                return Ok(());
+            };
+            let dir = db
+                .path()
+                .parent()
+                .map(|p| p.join("images").join(session_id.to_string()))
+                .unwrap_or_else(|| PathBuf::from("/tmp/bomb-images"));
+            let _ = std::fs::create_dir_all(&dir);
+            let name = format!("{}.{ext}", Utc::now().format("%Y%m%d-%H%M%S%.3f"));
+            let path = dir.join(name);
+            if std::fs::write(&path, &bytes).is_err() {
+                return Ok(());
+            }
+            let row = serde_json::json!({ "path": path.display().to_string(), "mimeType": mime }).to_string();
+            db.append_message(*session_id, "image", row, Utc::now()).map(|_| ())
+        }
         // Raw ACP protocol lines: persist (merged into bounded multiline
         // rows) so the View toggle can reveal history across restarts.
         // Skip our own side channels (explain/usage/thread label events).

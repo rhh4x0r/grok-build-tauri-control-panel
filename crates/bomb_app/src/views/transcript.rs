@@ -85,6 +85,8 @@ enum Row {
         at: String,
         /// Local image files the reply refers to, resolved against the cwd.
         images: Vec<std::path::PathBuf>,
+        /// Images the agent/tool returned inline (decoded).
+        attached: Vec<Arc<Image>>,
     },
     Activity {
         first_id: u64,
@@ -114,7 +116,7 @@ impl TranscriptView {
             thread,
             scroll: ScrollHandle::new(),
             follow: true,
-            seen_tail: 0,
+            seen_tail: u64::MAX,
             search: None,
             matches: Vec::new(),
             scrolled_to: None,
@@ -128,7 +130,7 @@ impl TranscriptView {
             let project_root = t.meta.project_root.clone().map(std::path::PathBuf::from);
             let last_agent = entries
                 .iter()
-                .rposition(|e| e.role == Role::Agent)
+                .rposition(|e| e.role == Role::Agent && e.images.is_empty())
                 .map(|i| entries[i].id);
             let mut rows: Vec<Row> = Vec::with_capacity(entries.len());
             let mut i = 0;
@@ -180,13 +182,16 @@ impl TranscriptView {
                 match (&e.role, &e.body) {
                     (Role::Agent, Body::Text(s)) => {
                         let state = t.markdown_state(e.id, s, cx);
-                        let images = if e.streaming { Vec::new() } else { local_images(s, &cwd, project_root.as_deref()) };
+                        let mut images: Vec<std::path::PathBuf> = if e.streaming { Vec::new() } else { local_images(s, &cwd, project_root.as_deref()) };
+                        let _ = &mut images;
+                        let attached = if e.images.is_empty() { Vec::new() } else { t.images_for(e.id) };
                         rows.push(Row::Agent {
                             id: e.id,
                             state,
                             raw: s.clone(),
                             streaming: e.streaming,
                             images,
+                            attached,
                             last: last_agent == Some(e.id),
                             at: e.at.with_timezone(&chrono::Local).format("%b %-d, %-I:%M %p").to_string(),
                         });
@@ -283,6 +288,7 @@ impl TranscriptView {
         last: bool,
         at: &str,
         images: &[std::path::PathBuf],
+        attached: &[Arc<Image>],
         ui: &Ui,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -305,7 +311,23 @@ impl TranscriptView {
             .py_1()
             .text_size(px(Layout::BODY_SIZE))
             .line_height(px(Layout::BODY_LINE))
-            .child(body_text)
+            .when(!raw.trim().is_empty() || streaming, |el| el.child(body_text))
+            .when(!attached.is_empty(), |el| {
+                el.child(div().flex().flex_wrap().gap_2().py_2().children(attached.iter().enumerate().map(|(ix, im)| {
+                    let im = im.clone();
+                    div()
+                        .id(("att-img", id * 64 + ix as u64))
+                        .max_w(px(420.))
+                        .rounded(px(10.))
+                        .overflow_hidden()
+                        .border_1()
+                        .border_color(ui.border)
+                        .child(crate::views::motion::reveal(
+                            ("att-reveal", id * 64 + ix as u64),
+                            img(im).max_w(px(420.)).max_h(px(420.)).object_fit(ObjectFit::Contain),
+                        ))
+                })))
+            })
             .when(!images.is_empty(), |el| {
                 el.child(div().flex().flex_wrap().gap_2().py_2().children(images.iter().enumerate().map(|(ix, p)| {
                     let path = p.clone();
@@ -822,8 +844,8 @@ impl Render for TranscriptView {
             .map(|(i, row)| {
                 let el = match row {
                 Row::User { id, text, images } => self.user_row(*id, text, images, &ui),
-                Row::Agent { id, state, raw, streaming, last, at, images } => {
-                    self.agent_row(*id, state, raw, *streaming, *last, at, images, &ui, cx)
+                Row::Agent { id, state, raw, streaming, last, at, images, attached } => {
+                    self.agent_row(*id, state, raw, *streaming, *last, at, images, attached, &ui, cx)
                 }
                 Row::Activity { first_id, items, collapsed } => {
                     self.activity_row(*first_id, items, *collapsed, &ui, cx)

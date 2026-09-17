@@ -2324,6 +2324,12 @@ impl AcpClient {
                         at: Utc::now(),
                     },
                 );
+                emit_images(
+                    &bus,
+                    sid,
+                    update.get("toolCallId").or_else(|| update.get("id")).and_then(|v| v.as_str()),
+                    extract_image_blocks(update.get("content")),
+                );
             }
             "agent_message_chunk"
             | "agent_message"
@@ -2750,6 +2756,49 @@ fn extract_text_content(content: Option<&Value>) -> Option<String> {
         }
     }
     None
+}
+
+/// Image blocks inside ACP content (tool results, agent messages):
+/// `{type:"image", data, mimeType}` possibly wrapped in `{type:"content", content:{...}}`.
+fn extract_image_blocks(content: Option<&Value>) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    fn walk(v: &Value, out: &mut Vec<(String, String)>) {
+        match v {
+            Value::Array(arr) => arr.iter().for_each(|i| walk(i, out)),
+            Value::Object(map) => {
+                let ty = map.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                if ty == "image" {
+                    if let Some(data) = map.get("data").and_then(|d| d.as_str()) {
+                        let mime = map
+                            .get("mimeType")
+                            .or_else(|| map.get("mime_type"))
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("image/png")
+                            .to_string();
+                        out.push((mime, data.to_string()));
+                    }
+                    return;
+                }
+                if let Some(inner) = map.get("content") {
+                    walk(inner, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(c) = content {
+        walk(c, &mut out);
+    }
+    out
+}
+
+fn emit_images(bus: &EventBus, sid: Uuid, tool_id: Option<&str>, images: Vec<(String, String)>) {
+    for (mime, data) in images {
+        bus.emit(ControlEvent::Raw {
+            session_id: Some(sid),
+            payload: json!({ "channel": "image", "toolId": tool_id, "mimeType": mime, "data": data }),
+        });
+    }
 }
 
 /// Extract streamed agent text from a session update object.

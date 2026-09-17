@@ -221,6 +221,10 @@ impl Thread {
                     };
                     if v.is_null() {
                         self.push(Role::Tool, Body::Text(row.body.clone()), at);
+                    } else if let Some(i) = self.find_tool(&row_.tool_id).filter(|_| !row_.tool_id.is_empty()) {
+                        // Later status of the same call: update, don't stack.
+                        self.entries[i].body = Body::Tool(row_);
+                        self.entries[i].at = at;
                     } else {
                         self.push(Role::Tool, Body::Tool(row_), at);
                     }
@@ -262,6 +266,18 @@ impl Thread {
                 }
                 "error" => {
                     self.push(Role::Error, Body::Text(row.body.clone()), at);
+                }
+                "image" => {
+                    let v: Value = serde_json::from_str(&row.body).unwrap_or(Value::Null);
+                    let (Some(path), mime) = (str_at(&v, "path"), str_at(&v, "mimeType").unwrap_or_else(|| "image/png".into())) else {
+                        continue;
+                    };
+                    if let Ok(bytes) = std::fs::read(&path) {
+                        use base64::Engine;
+                        let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+                        let e = self.push(Role::Agent, Body::Text(String::new()), at);
+                        e.images.push(ImageAttachment { mime_type: mime, data, name: Some(path) });
+                    }
                 }
                 _ => {
                     // Breadcrumbs the old UI needed so the column never looked
@@ -612,6 +628,9 @@ impl Thread {
             }
             SessionStatus::Idle | SessionStatus::Completed => {
                 ch.extend(self.close_streams());
+                // The turn is over: anything still "running" finished without
+                // a terminal update from the agent.
+                self.sweep_tools("completed", &mut ch);
                 let p = &self.presence;
                 if p.turn_active() || p.reply_chars > 0 || p.tool_count > 0 {
                     self.open_tools.clear();
@@ -667,6 +686,15 @@ impl Thread {
                     }
                     _ => Vec::new(),
                 }
+            }
+            "image" => {
+                let Some(data) = str_at(payload, "data") else { return Vec::new() };
+                let mime = str_at(payload, "mimeType").unwrap_or_else(|| "image/png".into());
+                let mut ch = self.close_streams();
+                let e = self.push(Role::Agent, Body::Text(String::new()), Utc::now());
+                e.images.push(ImageAttachment { mime_type: mime, data, name: None });
+                ch.push(Change::Appended(self.entries.len() - 1));
+                ch
             }
             "usage" => {
                 let n = payload
@@ -878,7 +906,7 @@ impl Thread {
             .iter()
             .enumerate()
             .rev()
-            .take(6)
+            .take(12)
             .find(|(_, e)| matches!(&e.body, Body::Tool(t) if t.tool_id == tool_id))
             .map(|(i, _)| i)
     }

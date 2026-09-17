@@ -7,6 +7,7 @@ description = "Bomb Code — framework-free application core (state, services, t
 
 [dependencies]
 anyhow.workspace = true
+base64 = "0.22"
 chrono.workspace = true
 grok_acp = { path = "../grok_acp" }
 grok_cli_wrapper = { path = "../grok_cli_wrapper" }
