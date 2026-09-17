@@ -296,14 +296,19 @@ impl SidebarView {
                 let count = w.threads.len();
                 let expanded = self.expanded.contains(&wid);
                 let mut status = "idle".to_string();
-                let mut providers: Vec<String> = Vec::new();
+                let mut current = grok_persistence::ModelUsage { backend: "grok".into(), model: String::new() };
+                let mut history: Vec<grok_persistence::ModelUsage> = Vec::new();
                 let mut models: Vec<String> = Vec::new();
                 let mut latest = String::new();
                 for tid in &w.threads {
                     if let Some(t) = Uuid::parse_str(tid).ok().and_then(|id| self.model.read(cx).threads.get(&id)) {
                         let tm = t.read(cx);
                         let meta = &tm.meta;
-                        if !providers.contains(&meta.backend) { providers.push(meta.backend.clone()); }
+                        let used = grok_persistence::ModelUsage { backend: meta.backend.clone(), model: meta.model.clone() };
+                        for item in meta.models_used.iter().chain(std::iter::once(&used)) {
+                            if !history.contains(item) { history.push(item.clone()); }
+                        }
+                        if meta.updated_at >= latest { current = used; }
                         if !models.contains(&meta.model) { models.push(meta.model.clone()); }
                         if meta.updated_at > latest { latest = meta.updated_at.clone(); }
                         let s = meta.status.as_str();
@@ -342,7 +347,7 @@ impl SidebarView {
                                 .flex()
                                 .items_center()
                                 .gap(px(Layout::SPACE_SM))
-                                .child(div().flex().items_center().gap_1().children(providers.iter().map(|provider| crate::views::brand::brand_mark(provider, 13., true, ui))))
+                                .child(crate::views::brand::brand_mark(&current.backend, 13., true, ui))
                                 .child(
                                     div()
                                         .flex_1()
@@ -367,7 +372,8 @@ impl SidebarView {
                                 .text_color(ui.subline())
                                 .child(div().size(px(11.)).flex_shrink_0().child(Icon::from(Lucide::GitBranch)))
                                 .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(w.branch.clone())),
-                        ),
+                        )
+                        .child(model_history_stack(&history, &current, ui)),
                 );
                 if count > 1 {
                     let wid = w.id.clone();
@@ -483,6 +489,8 @@ impl SidebarView {
             .and_then(|w| std::path::Path::new(w).file_name())
             .map(|s| s.to_string_lossy().to_string());
         let backend = tm.meta.backend.clone();
+        let current = grok_persistence::ModelUsage { backend: backend.clone(), model: tm.meta.model.clone() };
+        let history = tm.meta.models_used.clone();
         let updated = tm.meta.updated_at.clone();
         let model = self.model.clone();
         let hover = ui.hover;
@@ -604,6 +612,7 @@ impl SidebarView {
                         .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(b)),
                 )
             })
+            .child(model_history_stack(&history, &current, ui))
     }
 
     /// Filtered rows under Today / Yesterday / This week / Earlier labels.
@@ -1029,4 +1038,22 @@ pub fn open_rename_dialog(model: Entity<AppModel>, id: Uuid, current: String, wi
                 true
             })
     });
+}
+
+/// One mark per previously used model; tooltips distinguish models from the same provider.
+fn model_history_stack(history: &[grok_persistence::ModelUsage], current: &grok_persistence::ModelUsage, ui: &Ui) -> AnyElement {
+    let previous: Vec<_> = history.iter().filter(|item| *item != current).collect();
+    if previous.is_empty() { return div().into_any_element(); }
+    let names = previous.iter().map(|item| crate::views::brand::pretty_model(&item.model)).collect::<Vec<_>>().join(" · ");
+    div().id("model-history").flex().items_center().pl(px(21.)).py_1()
+        .tooltip(move |window, cx| Tooltip::new(format!("Previously used: {names}")).build(window, cx))
+        .children(previous.iter().take(4).enumerate().map(|(i,item)| {
+            let label = crate::views::brand::pretty_model(&item.model);
+            div().id(("past-model", i)).size(px(20.)).rounded_full().border_1().border_color(ui.border).bg(ui.bg)
+                .when(i > 0, |el| el.ml(px(-5.))).flex().items_center().justify_center()
+                .child(crate::views::brand::brand_mark(&item.backend, 11., true, ui))
+                .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+        }))
+        .when(previous.len() > 4, |el| el.child(div().pl_1().text_xs().text_color(ui.text_muted).child(format!("+{}", previous.len()-4))))
+        .into_any_element()
 }

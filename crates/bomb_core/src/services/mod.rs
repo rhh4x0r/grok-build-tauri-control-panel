@@ -651,6 +651,8 @@ pub async fn send_prompt(
     plan_mode: Option<bool>,
     always_approve: Option<bool>,
     images: Option<Vec<ImageInput>>,
+    fast_mode: Option<bool>,
+    effort: Option<String>,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
     let _gate = state.workspace_gate.lock().await;
@@ -679,16 +681,8 @@ pub async fn send_prompt(
             .is_some_and(|m| !m.eq_ignore_ascii_case(&cur.model) && cur.model != "mock");
         let needs_read_only = workspace.as_ref().is_some_and(|w| w.inline) && !cur.read_only;
         if needs_read_only || backend_changed || (model_changed && cur.mode == grok_control_core::AgentMode::Acp) {
-            let label = format!(
-                "🔀 switching to {} · {} — prior chat carries over as context",
-                want_backend.unwrap_or(cur.backend).key(),
-                want_model.clone().unwrap_or_else(|| cur.model.clone()),
-            );
             persist_session(state, id).await;
             state.registry.remove_session(id).await.map_err(err)?;
-            let _ = state
-                .persistence
-                .append_message(id, "system", &label, Utc::now());
             resume_saved_session(
                 state,
                 id,
@@ -766,6 +760,17 @@ pub async fn send_prompt(
         });
     }
 
+    if let Some(effort) = effort { state.registry.set_effort(id, &effort).await.map_err(err)?; }
+    if let Some(enabled) = fast_mode {
+        if let Some((option, values, _)) = state.registry.speed_option(id).await.map_err(err)? {
+            let value = speed_value(&values, enabled).ok_or_else(|| "The connected agent does not offer the selected speed. Choose Agent default and try again.".to_string())?;
+            if !state.registry.set_speed_option(id, &option, &value).await.map_err(err)? {
+                return Err("The agent could not apply that speed. Choose Agent default and try again.".into());
+            }
+        } else if enabled {
+            return Err("Fast mode is not exposed for this model by the connected agent. Choose Standard or Agent default and send again.".into());
+        }
+    }
     let prompt_len = prompt.len();
     let acp_images: Vec<grok_acp::PromptImage> = images
         .iter()
@@ -881,6 +886,7 @@ async fn resume_saved_session(
         ..SpawnOptions::default()
     };
     let recorded_backend = extract_backend_from_meta(&rec.metadata_json);
+    model_history::record(&state.persistence, id, recorded_backend.key(), &rec.model);
     opts.backend = override_backend.unwrap_or(recorded_backend);
     let backend_switched = opts.backend != recorded_backend;
     opts.model = override_model.or_else(|| {
@@ -978,6 +984,21 @@ async fn resume_saved_session(
         .persistence
         .append_message(id, "system", msg, Utc::now());
     persist_session(state, id).await;
+    if let Ok(snapshot) = state.registry.get_snapshot(id) {
+        let current = &snapshot.metadata;
+        if recorded_backend != current.backend || !rec.model.eq_ignore_ascii_case(&current.model) {
+            let continuity = match brain {
+                grok_control_core::BrainMode::FullBrain => "Previous agent session restored.",
+                grok_control_core::BrainMode::HistoryOnly => "Recent conversation history and project memory carried over.",
+                grok_control_core::BrainMode::Fresh => "Fresh agent session; no prior history was available.",
+            };
+            let line = format!("Switched model: {} → {} · {}. {continuity}", rec.model, current.backend.key(), current.model);
+            state.persistence.append_message(id, "system", &line, Utc::now()).map_err(err)?;
+            state.event_bus.emit(ControlEvent::Raw { session_id: Some(id), payload: serde_json::json!({
+                "channel":"thread", "kind":"model_switch", "line":line
+            }) });
+        }
+    }
     Ok(())
 }
 
@@ -2005,6 +2026,7 @@ pub async fn shutdown_all(state: &AppState) -> Result<(), String> {
 
 async fn persist_session(state: &AppState, id: Uuid) {
     if let Ok(snap) = state.registry.get_snapshot(id) {
+        model_history::record(&state.persistence, id, snap.metadata.backend.key(), &snap.metadata.model);
         let mode = match snap.metadata.mode {
             grok_control_core::AgentMode::Acp => "acp",
             grok_control_core::AgentMode::Headless => "headless",
@@ -2055,6 +2077,7 @@ fn build_thread_list_all(state: &AppState) -> Vec<ThreadDto> {
             .map(|r| r.message_count)
             .unwrap_or(0);
         out.push(ThreadDto {
+            models_used: model_history::load(&state.persistence, m.id),
             id: m.id.to_string(),
             cwd: m.cwd,
             mode: mode.into(),
@@ -2095,6 +2118,7 @@ fn build_thread_list_all(state: &AppState) -> Vec<ThreadDto> {
             let project_root = extract_meta_string(&rec.metadata_json, "projectRoot")
                 .or_else(|| extract_meta_string(&rec.metadata_json, "project_root"));
             out.push(ThreadDto {
+                models_used: model_history::load(&state.persistence, rec.id),
                 id: rec.id.to_string(),
                 cwd: rec.cwd,
                 mode: rec.mode,
@@ -2504,3 +2528,21 @@ mod image_restore_tests {
 }
 
 pub mod scratch;
+
+pub mod model_history;
+
+fn speed_value(values: &[String], enabled: bool) -> Option<String> {
+    let preferred: &[&str] = if enabled { &["on", "true", "enabled", "fast", "priority"] } else { &["off", "false", "disabled", "standard", "normal", "default"] };
+    preferred.iter().find_map(|choice| values.iter().find(|value| value.eq_ignore_ascii_case(choice)).cloned())
+}
+
+#[cfg(test)]
+mod speed_selection_tests {
+    #[test]
+    fn speed_uses_the_agents_exact_values_and_rejects_unknown_choices() {
+        let values = vec!["off".into(), "on".into()];
+        assert_eq!(super::speed_value(&values, true).as_deref(), Some("on"));
+        assert_eq!(super::speed_value(&values, false).as_deref(), Some("off"));
+        assert!(super::speed_value(&["high".into()], true).is_none());
+    }
+}

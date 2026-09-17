@@ -55,7 +55,7 @@ async fn connect_and_fill(
     {
         Ok(client) => {
             if let Some(effort) = pending_effort.as_deref() {
-                match client.set_config_option("effort", effort).await {
+                match client.set_effort(effort).await {
                     Ok(true) => {}
                     Ok(false) => tracing::debug!("agent has no effort config option"),
                     Err(e) => tracing::warn!(error = %e, "setting effort failed"),
@@ -615,7 +615,7 @@ impl SessionRegistry {
             .get(&id)
             .and_then(|e| e.acp_client.clone())
             .ok_or(CoreError::SessionNotFound(id))?;
-        client.set_config_option("effort", effort).await.map_err(Into::into)
+        client.set_effort(effort).await.map_err(Into::into)
     }
 
     pub async fn set_approval_mode(&self, id: Uuid, mode: ApprovalMode) -> Result<()> {

@@ -51,6 +51,7 @@ pub struct ComposerPrefs {
     pub mcp_servers: Vec<String>,
     /// low | medium | high (Grok only today).
     pub effort: String,
+    pub fast_mode: Option<bool>,
     /// Temporary chat: run in the project checkout with no worktree, and
     /// don't keep the thread when it's deleted. (Today: no worktree.)
     pub temporary: bool,
@@ -65,6 +66,7 @@ impl Default for ComposerPrefs {
             worktree: true,
             mcp_servers: Vec::new(),
             effort: "high".into(),
+            fast_mode: None,
             temporary: false,
         }
     }
@@ -255,6 +257,7 @@ impl AppModel {
 
     pub fn new_workspace_thread(&mut self, cx: &mut Context<Self>) {
         self.new_thread_open = true;
+        self.prefs.fast_mode = None;
         if self.prefs.mode == "yolo" { self.prefs.mode = "plan".into(); }
         self.selected = None;
         cx.notify();
@@ -629,6 +632,7 @@ impl AppModel {
             return;
         }
         self.selected = id;
+        self.prefs.fast_mode = None;
         self.new_thread_open = false;
         self.review = None;
         self.active_workspace = id.and_then(|id| self.workspaces.iter().find(|w| w.threads.contains(&id.to_string())).map(|w| w.id.clone()));
@@ -837,6 +841,8 @@ impl AppModel {
                             None,
                             None,
                             Some(images),
+                            prefs.fast_mode,
+                            Some(prefs.effort),
                         )
                         .await
                     },
@@ -902,6 +908,7 @@ impl AppModel {
                                     m.selected = Some(id);
                                     if !m.threads.contains_key(&id) {
                                         let dto = ThreadDto {
+                                            models_used: Vec::new(),
                                             id: started.id.clone(),
                                             cwd: String::new(),
                                             mode: "acp".into(),
@@ -959,6 +966,8 @@ impl AppModel {
                                                 None,
                                                 None,
                                                 Some(images2),
+                                                prefs2.fast_mode,
+                                                Some(prefs2.effort),
                                             )
                                             .await
                                         },
@@ -1116,6 +1125,7 @@ impl AppModel {
     }
 
     pub fn set_backend(&mut self, backend: &str, model: Option<String>, cx: &mut Context<Self>) {
+        if self.prefs.backend != backend || self.prefs.model != model { self.prefs.fast_mode = None; }
         self.prefs.backend = backend.to_string();
         self.prefs.model = model;
         let (levels, _) = crate::views::brand::effort_levels(backend);

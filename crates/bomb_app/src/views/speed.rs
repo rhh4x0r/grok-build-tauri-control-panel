@@ -1,9 +1,8 @@
 //! Session-advertised speed controls. Never substitute reasoning effort for speed.
 use crate::{
-    models::app::{AppModel, ToastKind},
+    models::app::AppModel,
     runtime::{services, spawn_service},
 };
-use gpui_kit::base::Disableable;
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
     menu::{DropdownMenu, PopupMenuItem},
@@ -33,7 +32,7 @@ impl SpeedSelector {
     }
     fn refresh(&mut self, force: bool, cx: &mut Context<Self>) {
         let m = self.model.read(cx);
-        let key = m.selected.filter(|id| m.threads.get(id).is_some_and(|thread| thread.read(cx).meta.live)).map(|id| (id, m.effective_model()));
+        let key = m.selected.filter(|id| m.threads.get(id).is_some_and(|thread| { let meta = &thread.read(cx).meta; meta.live && meta.backend == m.prefs.backend && meta.model == m.effective_model() })).map(|id| (id, m.effective_model()));
         if self.loading || (!force && self.key == key) {
             return;
         }
@@ -66,32 +65,22 @@ impl SpeedSelector {
 impl Render for SpeedSelector {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.refresh(false, cx);
-        let Some((option, values, current)) = self.option.clone() else {
-            return div().into_any_element();
+        let m = self.model.read(cx);
+        if m.prefs.backend != "codex" && self.option.is_none() { return div().into_any_element(); }
+        let chosen = m.prefs.fast_mode;
+        let current = self.option.as_ref().and_then(|(option, _, value)| value.as_deref().map(|value| speed_label(option, value)));
+        let label = match chosen {
+            Some(true) => "Fast · On".to_string(), Some(false) => "Fast · Off".to_string(),
+            None => match current.as_deref() { Some("Fast" | "Priority") => "Fast · On".into(), Some("Standard") => "Fast · Off".into(), _ => "Fast · Default".into() }
         };
-        let Some((id, _)) = self.key.clone() else {
-            return div().into_any_element();
-        };
-        let weak = cx.entity().downgrade();
         let model = self.model.clone();
-        Button::new("speed-selector").ghost().small().label(format!("Speed · {}", current.as_deref().map(|value| speed_label(&option, value)).unwrap_or_else(|| "Agent default".into())))
-            .disabled(self.loading).dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
-                for value in &values {
-                    let value = value.clone(); let option = option.clone(); let weak = weak.clone(); let model = model.clone();
-                    menu = menu.item(PopupMenuItem::new(speed_label(&option, &value)).on_click(move |_, _, cx| {
-                        let value = value.clone(); let option = option.clone(); let weak = weak.clone(); let model = model.clone();
-                        let _ = weak.update(cx, |this, cx| { this.loading = true; cx.notify(); });
-                        let state = services(cx); let requested = value.clone();
-                        spawn_service(cx, async move { state.registry.set_speed_option(id, &option, &requested).await }, move |result, cx| {
-                            let _ = weak.update(cx, |this, cx| {
-                                this.loading = false;
-                                if matches!(result, Ok(true)) && this.key.as_ref().is_some_and(|(sid,_)| *sid == id) {
-                                    if let Some((_,_,current)) = &mut this.option { *current = Some(value); }
-                                }
-                                cx.notify();
-                            });
-                            if !matches!(result, Ok(true)) { model.update(cx, |m, cx| { m.toast(ToastKind::Error, match result { Err(e) => e.to_string(), _ => "This agent no longer supports that speed option.".into() }); cx.notify(); }); }
-                        });
+        Button::new("speed-selector").ghost().small().label(label).dropdown_caret(true)
+            .tooltip("Applies to your next prompt. Fast mode uses more allowance; availability is checked when the agent connects.")
+            .dropdown_menu(move |mut menu, _, _| {
+                for (label, value) in [("Agent default", None), ("Standard", Some(false)), ("Fast", Some(true))] {
+                    let model = model.clone();
+                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                        model.update(cx, |m, cx| { m.prefs.fast_mode = value; cx.notify(); });
                     }));
                 }
                 menu

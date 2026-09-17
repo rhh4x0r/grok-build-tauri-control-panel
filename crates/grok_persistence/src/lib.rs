@@ -67,10 +67,18 @@ pub struct TranscriptEntry {
     pub seq: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelUsage {
+    pub backend: String,
+    pub model: String,
+}
+
 /// Thread list row (live or restored from disk).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadDto {
+    #[serde(default)]
+    pub models_used: Vec<ModelUsage>,
     pub id: String,
     pub cwd: String,
     pub mode: String,
@@ -301,6 +309,7 @@ impl Persistence {
             params![id.to_string()],
         )?;
         conn.execute("DELETE FROM sessions WHERE id=?1", params![id.to_string()])?;
+        conn.execute("DELETE FROM kv WHERE key=?1", params![format!("thread-models/{id}")])?;
         // Tombstone: late events for this id must not resurrect a ghost row.
         conn.execute(
             "INSERT INTO kv (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",

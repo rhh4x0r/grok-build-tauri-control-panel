@@ -708,7 +708,7 @@ mod tests {
         let rows = list_workspaces(&state).await.unwrap(); let w = rows[0].clone();
         assert!(!w.inline); assert_ne!(w.path, root.display().to_string()); assert!(w.branch.starts_with("bomb/"));
         std::fs::write(Path::new(&w.path).join("dark.txt"), "dark mode").unwrap();
-        super::super::send_prompt(&state, first.id.clone(), "Add dark mode".into(), None, None, None, None, None, None).await.unwrap();
+        super::super::send_prompt(&state, first.id.clone(), "Add dark mode".into(), None, None, None, None, None, None, None, None).await.unwrap();
         assert!(workspace_action(&state, w.id.clone(), "archive".into(), String::new()).await.is_err());
         let overlapping = SpawnOptions { workspace_id: Some(w.id.clone()), ..options.clone() };
         assert!(super::super::start_session(&state, root.display().to_string(), overlapping.clone()).await.is_err());

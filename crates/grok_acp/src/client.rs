@@ -651,6 +651,7 @@ impl AcpClient {
                         // Full brain — don't inject transcript context.
                         *self.pending_context.lock().await = None;
                         info!(%sid, prior, "ACP session/load complete (full brain)");
+                        self.apply_model_after_session(opts).await?;
                         self.apply_mode_after_session(opts).await;
                         if let Some(bus) = &self.event_bus {
                             bus.emit_status(self.control_session_id, SessionStatus::Idle)
@@ -676,6 +677,7 @@ impl AcpClient {
                         *self.brain_mode.write().await = BrainMode::FullBrain;
                         *self.pending_context.lock().await = None;
                         info!(%sid, prior, "ACP session/resume complete (full brain)");
+                        self.apply_model_after_session(opts).await?;
                         self.apply_mode_after_session(opts).await;
                         if let Some(bus) = &self.event_bus {
                             bus.emit_status(self.control_session_id, SessionStatus::Idle)
@@ -847,7 +849,8 @@ impl AcpClient {
         *self.session_id.write().await = Some(sid.clone());
         info!(%sid, "ACP session/new complete");
 
-        self.apply_mode_after_session(opts).await;
+        self.apply_model_after_session(opts).await?;
+                        self.apply_mode_after_session(opts).await;
 
         if let Some(bus) = &self.event_bus {
             bus.emit_status(self.control_session_id, SessionStatus::Idle)
@@ -949,6 +952,7 @@ impl AcpClient {
             .unwrap_or_else(|| value.to_string());
         let Some(sid) = self.session_id().await else { return Ok(false) };
         if self.transport.read().await.is_none() {
+            self.config_current.write().await.insert(id.to_string(), value.clone());
             debug!(%id, %value, "set_config_option (mock/local)");
             return Ok(true);
         }
@@ -998,6 +1002,21 @@ impl AcpClient {
             }
         }
         None
+    }
+
+    async fn apply_model_after_session(&self, opts: &SpawnOptions) -> Result<()> {
+        let Some(model) = opts.model.as_deref().filter(|m| !m.is_empty() && *m != "default" && *m != "mock") else { return Ok(()); };
+        if let Some(values) = self.config_option_values("model").await {
+            let value = values.iter().find(|value| value.eq_ignore_ascii_case(model))
+                .ok_or_else(|| AcpError::Protocol(format!("The agent does not offer model {model}")))?;
+            self.set_config_option("model", value).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn set_effort(&self, effort: &str) -> Result<bool> {
+        let option = if self.config_option_values("reasoning_effort").await.is_some() { "reasoning_effort" } else { "effort" };
+        self.set_config_option(option, effort).await
     }
 
     async fn apply_mode_after_session(&self, opts: &SpawnOptions) {
@@ -2917,6 +2936,22 @@ impl AcpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn codex_model_and_reasoning_use_advertised_config_options() {
+        let client = AcpClient::mock_for_tests("model-config", None);
+        client.capture_config_options(&serde_json::json!({"configOptions":[
+            {"id":"model","currentValue":"old","options":[{"value":"gpt-6-astra"}]},
+            {"id":"reasoning_effort","currentValue":"high","options":[{"value":"medium"}]}
+        ]})).await;
+        let opts = SpawnOptions { model: Some("gpt-6-astra".into()), ..Default::default() };
+        client.apply_model_after_session(&opts).await.unwrap();
+        assert!(client.set_effort("medium").await.unwrap());
+        assert_eq!(client.config_current.read().await.get("model").map(String::as_str), Some("gpt-6-astra"));
+        assert_eq!(client.config_current.read().await.get("reasoning_effort").map(String::as_str), Some("medium"));
+        let unknown = SpawnOptions { model: Some("missing".into()), ..Default::default() };
+        assert!(client.apply_model_after_session(&unknown).await.is_err());
+    }
 
     #[tokio::test]
     async fn codex_hyphenated_fast_mode_tracks_session_updates() {

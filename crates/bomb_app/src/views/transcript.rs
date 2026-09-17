@@ -91,6 +91,7 @@ enum Row {
         /// Images the agent/tool returned inline (decoded).
         attached: Vec<Arc<Image>>,
     },
+    GeneratingImage { id: u64, args: String, running: bool },
     Activity {
         first_id: u64,
         items: Vec<Activity>,
@@ -137,6 +138,7 @@ impl TranscriptView {
                 .rposition(|e| e.role == Role::Agent && e.images.is_empty())
                 .map(|i| entries[i].id);
             let mut rows: Vec<Row> = Vec::with_capacity(entries.len());
+            let turn_start = entries.iter().rposition(|e| e.role == Role::You).unwrap_or(0);
             let mut i = 0;
             while i < entries.len() {
                 let e = &entries[i];
@@ -176,11 +178,20 @@ impl TranscriptView {
                     } else {
                         !running
                     };
+                    let image_rows: Vec<Row> = if t.meta.live && i > turn_start {
+                        items.iter().filter_map(|item| match item {
+                            Activity::Tool { id, row, .. } if generating_image(row) => Some(Row::GeneratingImage {
+                                id: *id, args: row.args.clone(), running: row.status != "pending",
+                            }),
+                            _ => None,
+                        }).collect()
+                    } else { Vec::new() };
                     rows.push(Row::Activity {
                         first_id,
                         items,
                         collapsed,
                     });
+                    rows.extend(image_rows);
                     continue;
                 }
                 match (&e.role, &e.body) {
@@ -632,15 +643,10 @@ impl TranscriptView {
                 el.child(div().text_xs().text_color(ui.danger).child(r.status.clone()))
             });
         let kind = tool_kind(&r.name);
-        let is_image_tool = r.name.to_ascii_lowercase().contains("image");
         let detail = expanded.then(|| {
             let mut blocks: Vec<AnyElement> = Vec::new();
             if kind == "command" {
                 blocks.push(terminal_block(id, &first_line, r.result.as_deref().unwrap_or(""), terminal, failed, ui));
-                return div().flex().flex_col().gap_1().pl_8().pr_2().pb_2().children(blocks);
-            }
-            if is_image_tool && !terminal {
-                blocks.push(image_placeholder(id, ui));
                 return div().flex().flex_col().gap_1().pl_8().pr_2().pb_2().children(blocks);
             }
             if !r.args.trim().is_empty() {
@@ -815,7 +821,9 @@ impl TranscriptView {
         };
         fade_in(
             ("line", id),
-            div().py_1().text_xs().text_color(color).whitespace_normal().child(text.to_string()),
+            div().py_1().text_xs().text_color(color).whitespace_normal()
+                .when(text.starts_with("Switched model:"), |el| el.my_2().p_3().rounded(px(8.)).border_1().border_color(ui.border).bg(ui.ink(0.03)).text_color(ui.text_muted))
+                .child(text.to_string()),
         )
         .into_any_element()
     }
@@ -867,6 +875,7 @@ impl Render for TranscriptView {
                 Row::Activity { first_id, items, collapsed } => {
                     self.activity_row(*first_id, items, *collapsed, &ui, cx)
                 }
+                Row::GeneratingImage { id, args, running } => image_placeholder(*id, args, *running, &ui),
                 Row::Plan { id, state, doc } => self.plan_row(*id, state, doc, &ui, cx),
                 Row::Approval { id, card } => self.approval_row(*id, card, &ui, cx),
                 Row::Line { id, role, text } => self.line_row(*id, *role, text, &ui),
@@ -1089,7 +1098,10 @@ fn terminal_block(id: u64, command: &str, output: &str, done: bool, failed: bool
 
 /// Image generation placeholder: an 8×8 pulsing dot grid holds a square
 /// frame over a soft gradient until the image arrives.
-fn image_placeholder(id: u64, ui: &Ui) -> AnyElement {
+fn image_placeholder(id: u64, args: &str, running: bool, ui: &Ui) -> AnyElement {
+    let (ratio, caption) = generation_frame(args);
+    let height = 320. / ratio;
+
     let dot = ui.text_muted;
     let mut grid = div().absolute().inset_0().flex().flex_col().justify_around().px(px(24.)).py(px(24.));
     for row in 0..8u64 {
@@ -1097,23 +1109,22 @@ fn image_placeholder(id: u64, ui: &Ui) -> AnyElement {
         for col in 0..8u64 {
             let i = row * 8 + col;
             let phase = (i as f32 * 0.09) % 1.0;
-            r = r.child(
-                div()
-                    .size(px(4.))
-                    .rounded_full()
-                    .bg(dot)
-                    .with_animation(
-                        ("gen-dot", id * 100 + i),
-                        Animation::new(std::time::Duration::from_millis(1600))
-                            .repeat()
-                            .with_easing(move |t| pulsating_between(0.15, 0.9)((t + phase) % 1.0))
-                            .with_max_fps(30.),
-                        |el, t| el.opacity(t),
-                    ),
-            );
+            let dot = div().size(px(4.)).rounded_full().bg(dot);
+            let dot = if running {
+                dot.with_animation(
+                    ("gen-dot", id * 100 + i),
+                    Animation::new(std::time::Duration::from_millis(1600)).repeat()
+                        .with_easing(move |t| pulsating_between(0.15, 0.9)((t + phase) % 1.0)).with_max_fps(30.),
+                    |el, t| el.opacity(t),
+                ).into_any_element()
+            } else { dot.opacity(0.25).into_any_element() };
+            r = r.child(dot);
         }
         grid = grid.child(r);
     }
+    let label = if running {
+        crate::views::motion::breathe(("gen-label", id), 0.4, div().child("Generating image…")).into_any_element()
+    } else { div().child("Preparing image…").into_any_element() };
     div()
         .flex()
         .flex_col()
@@ -1121,15 +1132,15 @@ fn image_placeholder(id: u64, ui: &Ui) -> AnyElement {
         .child(
             div()
                 .relative()
-                .size(px(256.))
+                .w(px(320.)).h(px(height))
                 .rounded(px(12.))
                 .overflow_hidden()
                 .border_1()
                 .border_color(ui.border)
                 .bg(linear_gradient(
                     135.,
-                    linear_color_stop(ui.ink(0.10), 0.0),
-                    linear_color_stop(ui.ink(0.02), 1.0),
+                    linear_color_stop(ui.accent.opacity(0.16), 0.0),
+                    linear_color_stop(ui.ink(0.03), 1.0),
                 ))
                 .child(grid),
         )
@@ -1141,9 +1152,27 @@ fn image_placeholder(id: u64, ui: &Ui) -> AnyElement {
                 .text_xs()
                 .font_family(ui.mono.clone())
                 .text_color(ui.text_faint)
-                .child(crate::views::motion::breathe(("gen-label", id), 0.4, div().child("Generating…"))),
+                .child(label),
         )
+        .when_some(caption, |el, caption| el.child(div().max_w(px(320.)).text_xs().text_color(ui.text_muted).child(caption)))
         .into_any_element()
+}
+
+fn generating_image(row: &ToolRow) -> bool {
+    let name = row.name.to_ascii_lowercase().replace('-', "_");
+    let name = name.rsplit([':', '.']).next().unwrap_or(&name);
+    matches!(row.status.as_str(), "pending" | "running" | "in_progress") &&
+        matches!(name, "image_gen" | "imagegen" | "image_edit" | "generate_image" | "edit_image" | "image_generation" | "image generation")
+}
+
+fn generation_frame(args: &str) -> (f32, Option<String>) {
+    let args = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
+    let ratio = args.get("aspect_ratio").and_then(|v| v.as_str()).and_then(|s| s.split_once(':'))
+        .and_then(|(w,h)| Some(w.parse::<f32>().ok()? / h.parse::<f32>().ok()?))
+        .filter(|r| r.is_finite() && *r > 0.).unwrap_or(1.).clamp(0.5, 2.);
+    let caption = args.get("prompt").and_then(|v|v.as_str()).filter(|s| !s.trim().is_empty())
+        .map(|s| { let mut text: String = s.chars().take(140).collect(); if s.chars().count() > 140 { text.push('…'); } text });
+    (ratio, caption)
 }
 
 /// Unified-diff heuristics: hunk headers or +++/--- file markers.
@@ -1464,5 +1493,23 @@ mod approval_display_tests {
     fn read_target_is_concise_but_commands_and_invalid_payloads_remain_visible() {
         assert_eq!(approval_summary(r#"Read /tmp/a.png: {"file_path":"/tmp/a.png"}"#), "/tmp/a.png");
         for text in [r#"Shell: {"command":"rm file","path":"/tmp"}"#, "Read: {broken", r#"Edit: {"path":"a","new_string":"b"}"#] { assert_eq!(approval_summary(text), text); }
+    }
+}
+
+#[cfg(test)]
+mod image_generation_tests {
+    use super::{generating_image, generation_frame, ToolRow};
+    #[test]
+    fn only_active_generation_tools_get_placeholders() {
+        let mut row = ToolRow { tool_id: "1".into(), name: "image_gen".into(), status: "running".into(), args: String::new(), result: None };
+        for name in ["image_gen", "image_edit", "generate_image", "functions.imagegen"] { row.name = name.into(); assert!(generating_image(&row)); }
+        for status in ["completed", "failed", "denied", "cancelled", "restored"] { row.status = status.into(); assert!(!generating_image(&row)); }
+        row.status = "running".into();
+        for name in ["read_image", "view_image", "image_search", "Read /tmp/image.png"] { row.name = name.into(); assert!(!generating_image(&row)); }
+    }
+    #[test]
+    fn frame_uses_real_aspect_ratio_and_handles_partial_arguments() {
+        assert_eq!(generation_frame(r#"{"aspect_ratio":"16:9","prompt":"Lake"}"#), (16./9., Some("Lake".into())));
+        for args in ["", "{partial", r#"{"aspect_ratio":"1:0"}"#] { assert_eq!(generation_frame(args), (1., None)); }
     }
 }

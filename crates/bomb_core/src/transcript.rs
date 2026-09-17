@@ -544,7 +544,7 @@ impl Thread {
         let is_plan_tool =
             te.tool.to_lowercase().contains("plan") || te.args_summary.contains("\"plan\":");
         if !is_plan_tool {
-            let row = ToolRow {
+            let mut row = ToolRow {
                 tool_id: te.id.clone(),
                 name: te.tool.clone(),
                 status: status.clone(),
@@ -554,6 +554,11 @@ impl Thread {
             // One row per tool call: later events update it in place.
             match self.find_tool(&te.id) {
                 Some(i) => {
+                    // ACP status-only updates omit the original name/input.
+                    if let Body::Tool(previous) = &self.entries[i].body {
+                        if row.name == "tool" || row.name.is_empty() { row.name.clone_from(&previous.name); }
+                        if row.args.is_empty() { row.args.clone_from(&previous.args); }
+                    }
                     self.entries[i].body = Body::Tool(row);
                     self.entries[i].at = te.at;
                     ch.push(Change::Updated(i));
@@ -685,6 +690,9 @@ impl Thread {
                 );
                 ch.push(Change::Appended(self.entries.len() - 1));
                 ch
+            }
+            "thread" if str_at(payload, "kind").as_deref() == Some("model_switch") => {
+                str_at(payload, "line").map(|line| self.note_system(&line)).unwrap_or_default()
             }
             "thread" if str_at(payload, "kind").as_deref() == Some("label") => {
                 match str_at(payload, "label") {
@@ -1105,6 +1113,31 @@ mod tests {
             status: s,
             at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn model_switch_notice_is_visible_in_the_live_transcript() {
+        let mut t = Thread::new();
+        t.apply(&ControlEvent::Raw { session_id: Some(sid()), payload: serde_json::json!({
+            "channel":"thread", "kind":"model_switch", "line":"Switched model: Grok → Astra"
+        }) }, Instant::now());
+        assert_eq!(t.entries.len(), 1);
+        assert_eq!(t.entries[0].role, Role::System);
+        assert_eq!(t.entries[0].text(), Some("Switched model: Grok → Astra"));
+    }
+
+    #[test]
+    fn sparse_image_tool_updates_keep_identity_and_arguments() {
+        let mut t = Thread::new(); let now = Instant::now();
+        t.apply(&tool("image-1", "image_gen", ToolCallStatus::Running, r#"{"prompt":"Lake"}"#), now);
+        for status in [ToolCallStatus::Running, ToolCallStatus::Completed] {
+            t.apply(&tool("image-1", "tool", status, ""), now);
+            let Body::Tool(row) = &t.entries[0].body else { panic!() };
+            assert_eq!(row.name, "image_gen");
+            assert_eq!(row.args, r#"{"prompt":"Lake"}"#);
+        }
+        let Body::Tool(row) = &t.entries[0].body else { panic!() };
+        assert!(row.is_terminal());
     }
 
     #[test]
