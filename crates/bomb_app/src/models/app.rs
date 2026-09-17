@@ -503,7 +503,7 @@ impl AppModel {
     }
 
     pub fn usage_for(&self, backend: &str) -> Option<&bomb_core::usage::AccountUsage> {
-        self.usage.iter().find(|u| u.backend == backend && !u.windows.is_empty())
+        self.usage.iter().find(|u| u.backend == backend)
     }
 
     fn ensure_dev_poll(&mut self, cx: &mut Context<Self>) {

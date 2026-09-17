@@ -674,7 +674,11 @@ impl SidebarView {
                         .px_2()
                         .pl(px(30.))
                         .pb_1()
-                        .children(u.windows.iter().enumerate().map(|(ix, w)| usage_bar(&a.backend, ix, w, ui))),
+                        .children(u.windows.iter().enumerate().map(|(ix, w)| usage_bar(&a.backend, ix, w, ui)))
+                        .when_some(u.error.clone(), |el, error| el.child(
+                            div().text_size(px(10.)).text_color(ui.text_faint)
+                                .child(if u.windows.is_empty() { error } else { format!("Last known usage · {error}") })
+                        )),
                 )
             })
     }

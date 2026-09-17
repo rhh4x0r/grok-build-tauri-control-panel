@@ -16,6 +16,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
+#[path = "usage_cache.rs"]
+mod cache;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UsageWindow {
     /// "5h", "Weekly", …
@@ -47,7 +50,7 @@ async fn curl_json(url: &str, headers: &[String]) -> Result<serde_json::Value, S
     for h in headers {
         cmd.arg("-H").arg(h);
     }
-    cmd.arg(url);
+    cmd.arg("--write-out").arg("\n%{http_code}").arg(url);
     let out = tokio::time::timeout(Duration::from_secs(10), cmd.output())
         .await
         .map_err(|_| "timed out".to_string())?
@@ -55,7 +58,17 @@ async fn curl_json(url: &str, headers: &[String]) -> Result<serde_json::Value, S
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
-    serde_json::from_slice(&out.stdout).map_err(|e| format!("bad json: {e}"))
+    parse_usage_response(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn parse_usage_response(response: &str) -> Result<serde_json::Value, String> {
+    let (body, status) = response.rsplit_once('\n').ok_or("Invalid usage response")?;
+    match status.trim() {
+        "200" => serde_json::from_str(body).map_err(|_| "Invalid usage response".into()),
+        "429" => Err("Usage rate limited; retrying later".into()),
+        "401" | "403" => Err("Usage access unavailable; check provider sign-in".into()),
+        code => Err(format!("Usage request failed (HTTP {code})")),
+    }
 }
 
 fn ts(v: Option<&serde_json::Value>) -> Option<DateTime<Utc>> {
@@ -93,8 +106,14 @@ async fn claude_token() -> Option<String> {
 async fn claude() -> AccountUsage {
     let mut u = AccountUsage { backend: "claude".into(), ..Default::default() };
     let Some(token) = claude_token().await else {
+        u.error = Some("Usage unavailable; Claude subscription credentials were not found".into());
         return u;
     };
+    cache::claude(&token, || fetch_claude(&token)).await
+}
+
+async fn fetch_claude(token: &str) -> AccountUsage {
+    let mut u = AccountUsage { backend: "claude".into(), ..Default::default() };
     match curl_json(
         "https://api.anthropic.com/api/oauth/usage",
         &[format!("authorization: Bearer {token}"), "anthropic-beta: oauth-2025-04-20".into()],
@@ -316,5 +335,17 @@ mod tests {
         assert!(ts(Some(&serde_json::json!(1_700_000_000))).is_some());
         assert!(ts(Some(&serde_json::json!("2026-09-17T00:00:00Z"))).is_some());
         assert!(ts(Some(&serde_json::json!(null))).is_none());
+    }
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::parse_usage_response;
+    #[test]
+    fn usage_http_failures_are_explicit_and_do_not_expose_response_bodies() {
+        assert!(parse_usage_response("{\"five_hour\":{}}\n200").is_ok());
+        assert_eq!(parse_usage_response("private response\n429").unwrap_err(), "Usage rate limited; retrying later");
+        assert!(parse_usage_response("private response\n401").unwrap_err().contains("sign-in"));
+        assert_eq!(parse_usage_response("private response\n200").unwrap_err(), "Invalid usage response");
     }
 }
