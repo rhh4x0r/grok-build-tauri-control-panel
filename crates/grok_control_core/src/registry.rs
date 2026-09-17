@@ -31,6 +31,9 @@ struct PendingConnect {
     client_cfg: AcpClientConfig,
     acp_opts: AcpSpawnOptions,
     connect_opts: ConnectOpts,
+    /// Reasoning effort to apply through the agent's `effort` config option
+    /// (the Claude adapter advertises one; Grok/Codex take a CLI flag instead).
+    effort: Option<String>,
 }
 
 /// Run the ACP handshake and fill in (or fail) the placeholder session entry.
@@ -40,6 +43,7 @@ async fn connect_and_fill(
     id: Uuid,
     pending: PendingConnect,
 ) -> Result<()> {
+    let pending_effort = pending.effort.clone();
     match AcpClient::connect_with(
         pending.client_cfg,
         &pending.acp_opts,
@@ -50,6 +54,13 @@ async fn connect_and_fill(
     .await
     {
         Ok(client) => {
+            if let Some(effort) = pending_effort.as_deref() {
+                match client.set_config_option("effort", effort).await {
+                    Ok(true) => {}
+                    Ok(false) => tracing::debug!("agent has no effort config option"),
+                    Err(e) => tracing::warn!(error = %e, "setting effort failed"),
+                }
+            }
             let acp_session_id = client.session_id().await;
             let brain_mode = client.brain_mode().await;
             // Never hold a DashMap guard across an await.
@@ -338,6 +349,17 @@ impl SessionRegistry {
                     client_cfg.args = resolved.args.clone();
                     // `grok agent --reasoning-effort <e> stdio`: the flag belongs
                     // to `agent`, so it goes before the `stdio` subcommand.
+                    // Codex: `codex -c model_reasoning_effort=<e> acp` when we
+                    // launch the CLI itself (the standalone adapter has no flag).
+                    if backend == Backend::Codex && client_cfg.args.iter().any(|a| a == "acp") {
+                        if let Some(effort) = opts.effort.as_deref().filter(|e| !e.is_empty()) {
+                            let at = client_cfg.args.iter().position(|a| a == "acp").unwrap_or(0);
+                            client_cfg.args.splice(
+                                at..at,
+                                ["-c".to_string(), format!("model_reasoning_effort={effort}")],
+                            );
+                        }
+                    }
                     if backend == Backend::Grok {
                         if let Some(effort) = opts.effort.as_deref().filter(|e| !e.is_empty()) {
                             let at = client_cfg
@@ -385,6 +407,7 @@ impl SessionRegistry {
                         client_cfg,
                         acp_opts,
                         connect_opts,
+                        effort: opts.effort.clone(),
                     };
                     if background {
                         let sessions = self.sessions.clone();
@@ -581,6 +604,17 @@ impl SessionRegistry {
     }
 
     /// Switch a live session's approval stance (composer pills).
+    /// Change reasoning effort on a live session, where the agent exposes an
+    /// `effort` config option. Ok(false) when it does not.
+    pub async fn set_effort(&self, id: Uuid, effort: &str) -> Result<bool> {
+        let client = self
+            .sessions
+            .get(&id)
+            .and_then(|e| e.acp_client.clone())
+            .ok_or(CoreError::SessionNotFound(id))?;
+        client.set_config_option("effort", effort).await.map_err(Into::into)
+    }
+
     pub async fn set_approval_mode(&self, id: Uuid, mode: ApprovalMode) -> Result<()> {
         let client = {
             let mut entry = self

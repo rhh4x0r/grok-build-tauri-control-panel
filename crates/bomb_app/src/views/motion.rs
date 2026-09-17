@@ -67,3 +67,16 @@ where
         move |el, t| el.relative().top(px(-amplitude * t)),
     )
 }
+
+/// Image reveal: 700ms fade from transparent (the dot grid holds the frame
+/// until then).
+pub fn reveal<E>(id: impl Into<ElementId>, element: E) -> AnimationElement<E>
+where
+    E: Styled + IntoElement + 'static,
+{
+    element.with_animation(
+        id,
+        Animation::new(Duration::from_millis(700)).with_easing(ease_out_expo),
+        |el, t| el.opacity(t),
+    )
+}

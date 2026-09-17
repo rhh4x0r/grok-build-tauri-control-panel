@@ -9,7 +9,8 @@ use gpui_kit::*;
 
 use crate::actions::{
     CycleApprovalMode, DeleteThread, LandThread, NewMockSession, NewThread, OpenProject, OpenSettings,
-    RevealProject, StopTurn, SyncThread, ToggleDevPreview, ToggleExplainer,
+    FindInThread, OpenCommandPalette, RevealProject, StopTurn, SyncThread, ToggleDevPreview,
+    ToggleExplainer,
 };
 use crate::views::preview::PreviewPanel;
 use crate::models::app::{project_name, AppModel, ToastKind};
@@ -30,7 +31,7 @@ pub struct RootView {
 impl RootView {
     pub fn new(model: Entity<AppModel>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe(&model, |_, _, cx| cx.notify()).detach();
-        let sidebar = cx.new(|cx| SidebarView::new(model.clone(), cx));
+        let sidebar = cx.new(|cx| SidebarView::new(model.clone(), window, cx));
         let thread = cx.new(|cx| ThreadView::new(model.clone(), window, cx));
         let preview = cx.new(|cx| PreviewPanel::new(model.clone(), cx));
         Self {
@@ -174,6 +175,12 @@ impl Render for RootView {
             }))
             .on_action(cx.listener(|_, _: &OpenSettings, _, cx| {
                 crate::views::settings::open_settings_window(cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenCommandPalette, window, cx| {
+                crate::views::palette::open_palette(this.model.clone(), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FindInThread, window, cx| {
+                this.thread.update(cx, |t, cx| t.toggle_search(window, cx));
             }))
             .on_action(cx.listener(|this, _: &ToggleDevPreview, _, cx| {
                 let running = this.model.read(cx).dev_server.as_ref().map(|s| s.running).unwrap_or(false);

@@ -199,7 +199,13 @@ impl Thread {
                     e.images = images;
                 }
                 "agent" => {
-                    self.push(Role::Agent, Body::Text(row.body.clone()), at);
+                    if starts_with_status_glyph(&row.body) || is_noise_agent_text(&row.body) {
+                        for line in row.body.lines() {
+                            self.protocol(line);
+                        }
+                    } else {
+                        self.push(Role::Agent, Body::Text(row.body.clone()), at);
+                    }
                 }
                 "thought" => {
                     self.push(Role::Thought, Body::Text(row.body.clone()), at);
@@ -260,7 +266,7 @@ impl Thread {
                 _ => {
                     // Breadcrumbs the old UI needed so the column never looked
                     // idle; the status line covers that now.
-                    if row.body.starts_with("→ prompt accepted") {
+                    if starts_with_status_glyph(&row.body) || row.body.starts_with("→ prompt accepted") {
                         self.protocol(&row.body);
                     } else {
                         self.push(Role::System, Body::Text(row.body.clone()), at);
@@ -937,6 +943,25 @@ pub fn is_noise_agent_text(text: &str) -> bool {
         || t == "turn complete"
         || t.starts_with("still generating after")
         || t.starts_with("[local/mock]")
+        || starts_with_status_glyph(text)
+}
+
+/// Backend status breadcrumbs are prefixed with a pictograph (🌱 worktree,
+/// 📜 history, 🧠 brain, ◈ memory, ⚙ …). They belong in the protocol log,
+/// not the conversation.
+pub fn starts_with_status_glyph(text: &str) -> bool {
+    match text.trim_start().chars().next() {
+        // 💭 marks a thought chunk, which is agent content.
+        Some('💭') => false,
+        Some(c) => {
+            let u = c as u32;
+            (0x1F300..=0x1FAFF).contains(&u)
+                || (0x2600..=0x27BF).contains(&u)
+                || (0x2B00..=0x2BFF).contains(&u)
+                || matches!(c, '◈' | '→' | '⟳' | '⎇' | '⚠')
+        }
+        None => false,
+    }
 }
 
 /// Rule an "always allow" button installs: narrow enough to be safe, broad

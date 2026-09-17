@@ -569,7 +569,7 @@ pub async fn get_session_transcript(
 
 /// An image attached to a prompt from the composer. `data` is base64 with no
 /// `data:` URI prefix; `name` is only for the transcript breadcrumb.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageInput {
     pub mime_type: String,
@@ -1075,6 +1075,13 @@ pub async fn set_explainer_enabled(
 }
 
 /// Set a live session's approval stance: plan | ask | auto | yolo.
+/// Apply a reasoning effort to a live thread. Ok(false) = the agent does
+/// not expose one (Grok/Codex take it at spawn time instead).
+pub async fn set_session_effort(state: &AppState, id: String, effort: String) -> Result<bool, String> {
+    let id = Uuid::parse_str(&id).map_err(err)?;
+    state.registry.set_effort(id, &effort).await.map_err(err)
+}
+
 pub async fn set_approval_mode(
     state: &AppState,
     id: String,

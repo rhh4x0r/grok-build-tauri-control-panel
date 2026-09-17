@@ -49,6 +49,9 @@ pub struct ComposerPrefs {
     pub mcp_servers: Vec<String>,
     /// low | medium | high (Grok only today).
     pub effort: String,
+    /// Temporary chat: run in the project checkout with no worktree, and
+    /// don't keep the thread when it's deleted. (Today: no worktree.)
+    pub temporary: bool,
 }
 
 impl Default for ComposerPrefs {
@@ -60,6 +63,7 @@ impl Default for ComposerPrefs {
             worktree: true,
             mcp_servers: Vec::new(),
             effort: "high".into(),
+            temporary: false,
         }
     }
 }
@@ -391,9 +395,14 @@ impl AppModel {
             if let Some(t) = self.threads.get(&id) {
                 let meta = t.read(cx).meta.clone();
                 self.active_project = Some(meta.project_root.clone().unwrap_or(meta.cwd.clone()));
-                // The composer follows the thread's own backend/model/mode.
+                // The composer follows the thread's own backend/model/mode,
+                // but never a model id the backend no longer offers.
                 self.prefs.backend = meta.backend.clone();
-                self.prefs.model = if meta.model.is_empty() { None } else { Some(meta.model.clone()) };
+                let known = self
+                    .backend_info(&meta.backend)
+                    .map(|b| b.models.iter().any(|m| *m == meta.model) || b.default_model == meta.model)
+                    .unwrap_or(false);
+                self.prefs.model = if meta.model.is_empty() || !known { None } else { Some(meta.model.clone()) };
                 if let Some(mode) = meta.approval_mode.clone() {
                     self.prefs.mode = mode;
                 }
@@ -412,6 +421,8 @@ impl AppModel {
     /// Deselect: the composer starts a fresh thread in the active project.
     pub fn new_thread(&mut self, cx: &mut Context<Self>) {
         self.selected = None;
+        // Fresh thread → backend default model, never a stale id.
+        self.prefs.model = None;
         cx.notify();
     }
 
@@ -567,42 +578,104 @@ impl AppModel {
                     backend,
                     model: prefs.model.clone(),
                     approval_mode,
-                    isolate_worktree: prefs.worktree,
+                    isolate_worktree: prefs.worktree && !prefs.temporary,
                     project_root: Some(cwd.clone()),
                     mcp_server_names: prefs.mcp_servers.clone(),
                     effort: Some(prefs.effort.clone()),
                     ..Default::default()
                 };
+                // Two steps so the thread is selected (and the prompt visible)
+                // the moment it exists, even if the send then fails.
+                let state2 = state.clone();
+                let text2 = text.clone();
+                let images2 = images.clone();
+                let prefs2 = prefs.clone();
                 spawn_service(
                     cx,
-                    async move {
-                        let started = services::start_session(&state, cwd, opts).await?;
-                        let id = started.id.clone();
-                        services::send_prompt(
-                            &state,
-                            id.clone(),
-                            text,
-                            Some(prefs.backend),
-                            prefs.model,
-                            Some(prefs.mode),
-                            None,
-                            None,
-                            Some(images),
-                        )
-                        .await?;
-                        Ok::<String, String>(id)
-                    },
+                    async move { services::start_session(&state, cwd, opts).await },
                     move |res, cx| {
-                        let _ = this.update(cx, |m, cx| {
-                            m.starting = false;
-                            match res {
-                                Ok(id) => {
-                                    if let Ok(id) = Uuid::parse_str(&id) {
-                                        m.selected = Some(id);
+                        let _ = this.update(cx, |m, cx| match res {
+                            Ok(started) => {
+                                if let Ok(id) = Uuid::parse_str(&started.id) {
+                                    m.selected = Some(id);
+                                    if !m.threads.contains_key(&id) {
+                                        let dto = ThreadDto {
+                                            id: started.id.clone(),
+                                            cwd: String::new(),
+                                            mode: "acp".into(),
+                                            model: prefs2.model.clone().unwrap_or_default(),
+                                            backend: prefs2.backend.clone(),
+                                            status: "starting".into(),
+                                            live: true,
+                                            message_count: 0,
+                                            created_at: chrono::Utc::now().to_rfc3339(),
+                                            updated_at: chrono::Utc::now().to_rfc3339(),
+                                            worktree: None,
+                                            mcp_servers: Vec::new(),
+                                            label: None,
+                                            approval_mode: Some(prefs2.mode.clone()),
+                                            project_root: m.active_project.clone(),
+                                            brain_mode: None,
+                                        };
+                                        let entity = cx.new(|_| ThreadModel::new(dto));
+                                        entity.update(cx, |t, _| { t.hydrated = true; });
+                                        m.threads.insert(id, entity);
+                                        m.thread_order.insert(0, id);
                                     }
+                                    if let Some(t) = m.threads.get(&id) {
+                                        let atts: Vec<ImageAttachment> = images2
+                                            .iter()
+                                            .map(|i| ImageAttachment { mime_type: i.mime_type.clone(), data: i.data.clone(), name: i.name.clone() })
+                                            .collect();
+                                        t.update(cx, |t, cx| {
+                                            let ch = t.thread.note_prompt(&text2, atts, std::time::Instant::now());
+                                            t.absorb(&ch, cx);
+                                        });
+                                    }
+                                    cx.notify();
+                                    let sid = started.id.clone();
+                                    let weak = m.threads.get(&id).map(|t| t.downgrade());
+                                    let this = cx.entity().downgrade();
+                                    spawn_service(
+                                        cx,
+                                        async move {
+                                            services::send_prompt(
+                                                &state2,
+                                                sid,
+                                                text2,
+                                                Some(prefs2.backend),
+                                                prefs2.model,
+                                                Some(prefs2.mode),
+                                                None,
+                                                None,
+                                                Some(images2),
+                                            )
+                                            .await
+                                        },
+                                        move |res, cx| {
+                                            let _ = this.update(cx, |m, cx| {
+                                                m.starting = false;
+                                                if let Err(e) = res {
+                                                    if let Some(w) = &weak {
+                                                        let _ = w.update(cx, |t, cx| {
+                                                            let ch = t.thread.note_system(&format!("send failed: {e}"));
+                                                            t.absorb(&ch, cx);
+                                                        });
+                                                    }
+                                                    m.fail(e, cx);
+                                                }
+                                                m.refresh_threads(cx);
+                                            });
+                                        },
+                                    );
+                                } else {
+                                    m.starting = false;
                                     m.refresh_threads(cx);
                                 }
-                                Err(e) => m.fail(e, cx),
+                            }
+                            Err(e) => {
+                                m.starting = false;
+                                m.fail(e, cx);
                             }
                         });
                     },
@@ -688,12 +761,40 @@ impl AppModel {
 
     pub fn set_effort(&mut self, effort: &str, cx: &mut Context<Self>) {
         self.prefs.effort = effort.to_string();
+        // Live threads whose agent exposes an `effort` option take it now.
+        if let Some(t) = self.selected_thread() {
+            let (id, live) = {
+                let t = t.read(cx);
+                (t.id(), t.meta.live)
+            };
+            if live {
+                let state = svc(cx);
+                let e = effort.to_string();
+                let this = cx.entity().downgrade();
+                spawn_service(
+                    cx,
+                    async move { services::set_session_effort(&state, id, e).await },
+                    move |res, cx| {
+                        if let Ok(true) = res {
+                            let _ = this.update(cx, |m, cx| {
+                                m.toast(ToastKind::Info, "Reasoning effort updated for this thread");
+                                cx.notify();
+                            });
+                        }
+                    },
+                );
+            }
+        }
         cx.notify();
     }
 
     pub fn set_backend(&mut self, backend: &str, model: Option<String>, cx: &mut Context<Self>) {
         self.prefs.backend = backend.to_string();
         self.prefs.model = model;
+        let (levels, _) = crate::views::brand::effort_levels(backend);
+        if !levels.contains(&self.prefs.effort.as_str()) {
+            self.prefs.effort = levels.iter().find(|l| **l == "high").or(levels.last()).map(|s| s.to_string()).unwrap_or_default();
+        }
         cx.notify();
     }
 

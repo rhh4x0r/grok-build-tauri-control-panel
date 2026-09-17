@@ -236,6 +236,9 @@ pub struct AcpClient {
     resume_session_supported: RwLock<bool>,
     /// Mode ids the agent advertised in the session/new//load result.
     available_modes: RwLock<Vec<String>>,
+    /// Session config options the agent advertised (id → selectable values),
+    /// e.g. the Claude adapter's `effort`.
+    config_options: RwLock<HashMap<String, Vec<String>>>,
     current_mode: RwLock<Option<String>>,
     /// Host-side terminals for ACP terminal/* (required for run_terminal_command).
     terminals: TerminalRegistry,
@@ -375,6 +378,7 @@ impl AcpClient {
             load_session_supported: RwLock::new(false),
             resume_session_supported: RwLock::new(false),
             available_modes: RwLock::new(Vec::new()),
+            config_options: RwLock::new(HashMap::new()),
             current_mode: RwLock::new(None),
             terminals: TerminalRegistry::new(default_cwd),
         });
@@ -444,6 +448,7 @@ impl AcpClient {
             load_session_supported: RwLock::new(false),
             resume_session_supported: RwLock::new(false),
             available_modes: RwLock::new(Vec::new()),
+            config_options: RwLock::new(HashMap::new()),
             current_mode: RwLock::new(None),
             terminals: TerminalRegistry::new(PathBuf::from("/tmp")),
         })
@@ -749,6 +754,7 @@ impl AcpClient {
             Err(e) => return Err(e),
         };
         self.capture_modes(&result).await;
+        self.capture_config_options(&result).await;
         Ok(result
             .get("sessionId")
             .or_else(|| result.get("session_id"))
@@ -775,6 +781,7 @@ impl AcpClient {
             .request_timeout("session/resume", Some(params))
             .await?;
         self.capture_modes(&result).await;
+        self.capture_config_options(&result).await;
         Ok(result
             .get("sessionId")
             .or_else(|| result.get("session_id"))
@@ -828,6 +835,7 @@ impl AcpClient {
             .unwrap_or_else(|| Uuid::new_v4().to_string());
 
         self.capture_modes(&result).await;
+        self.capture_config_options(&result).await;
         *self.session_id.write().await = Some(sid.clone());
         info!(%sid, "ACP session/new complete");
 
@@ -869,6 +877,63 @@ impl AcpClient {
         if current.is_some() {
             *self.current_mode.write().await = current;
         }
+    }
+
+    /// Record `configOptions` (ACP session config options) from a
+    /// session/new//load/resume result.
+    async fn capture_config_options(&self, result: &Value) {
+        let Some(arr) = result.get("configOptions").and_then(|v| v.as_array()) else {
+            return;
+        };
+        let mut map = HashMap::new();
+        for opt in arr {
+            let Some(id) = opt.get("id").and_then(|v| v.as_str()) else { continue };
+            let values: Vec<String> = opt
+                .get("options")
+                .and_then(|v| v.as_array())
+                .map(|os| {
+                    os.iter()
+                        .flat_map(|o| match o.get("options").and_then(|v| v.as_array()) {
+                            Some(group) => group.iter().collect::<Vec<_>>(),
+                            None => vec![o],
+                        })
+                        .filter_map(|o| o.get("value").and_then(|v| v.as_str()).map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            map.insert(id.to_string(), values);
+        }
+        if !map.is_empty() {
+            info!(options = ?map.keys().collect::<Vec<_>>(), "ACP agent config options");
+            *self.config_options.write().await = map;
+        }
+    }
+
+    /// Values the agent advertised for a config option, if it has one.
+    pub async fn config_option_values(&self, id: &str) -> Option<Vec<String>> {
+        self.config_options.read().await.get(id).cloned()
+    }
+
+    /// `session/set_config_option`: set an advertised option (e.g. `effort`).
+    /// Returns Ok(false) when the agent has no such option.
+    pub async fn set_config_option(&self, id: &str, value: &str) -> Result<bool> {
+        let Some(values) = self.config_option_values(id).await else {
+            return Ok(false);
+        };
+        let value = values
+            .iter()
+            .find(|v| v.eq_ignore_ascii_case(value))
+            .cloned()
+            .unwrap_or_else(|| value.to_string());
+        let Some(sid) = self.session_id().await else { return Ok(false) };
+        if self.transport.read().await.is_none() {
+            debug!(%id, %value, "set_config_option (mock/local)");
+            return Ok(true);
+        }
+        let params = json!({ "sessionId": sid, "configId": id, "value": value });
+        self.request_timeout("session/set_config_option", Some(params)).await?;
+        info!(%id, %value, "ACP config option set");
+        Ok(true)
     }
 
     /// Find the advertised mode id matching an intent ("plan", "yolo", "default").

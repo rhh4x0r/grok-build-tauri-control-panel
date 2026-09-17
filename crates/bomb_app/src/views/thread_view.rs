@@ -4,6 +4,7 @@
 use std::time::Instant;
 
 use gpui_kit::assets::IconName as Lucide;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::Icon;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -18,15 +19,12 @@ use crate::views::motion::fade_in;
 use crate::views::status_line::{status_line, StatusLineProps};
 use crate::views::transcript::TranscriptView;
 
-const BANNER: &str = r#"┌──────────────────────────────────────────┐
-│  B O M B   C O D E                       │
-│  agent control panel · grok · claude     │
-└──────────────────────────────────────────┘"#;
-
 pub struct ThreadView {
     model: Entity<AppModel>,
     transcript: Option<(String, Entity<TranscriptView>)>,
     composer: Entity<ComposerView>,
+    search_open: bool,
+    search: Entity<InputState>,
 }
 
 impl ThreadView {
@@ -37,10 +35,25 @@ impl ThreadView {
         })
         .detach();
         let composer = cx.new(|cx| ComposerView::new(model.clone(), window, cx));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find in conversation"));
+        cx.subscribe(&search, |this, _, ev: &InputEvent, cx| match ev {
+            InputEvent::Change => this.push_search(cx),
+            InputEvent::PressEnter { shift, .. } => {
+                let delta = if *shift { -1 } else { 1 };
+                if let Some((_, t)) = &this.transcript {
+                    t.update(cx, |t, cx| t.step_search(delta, cx));
+                }
+                cx.notify();
+            }
+            _ => {}
+        })
+        .detach();
         let mut this = Self {
             model,
             transcript: None,
             composer,
+            search_open: false,
+            search,
         };
         this.sync_transcript(cx);
         this
@@ -48,6 +61,82 @@ impl ThreadView {
 
     pub fn focus_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.composer.update(cx, |c, cx| c.focus(window, cx));
+    }
+
+    /// ⌘F: open the find bar (or focus it); Esc / close hides it.
+    pub fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search_open {
+            self.close_search(window, cx);
+        } else {
+            self.search_open = true;
+            self.search.update(cx, |s, cx| s.focus(window, cx));
+            self.push_search(cx);
+            cx.notify();
+        }
+    }
+
+    fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_open = false;
+        if let Some((_, t)) = &self.transcript {
+            t.update(cx, |t, cx| t.set_search(None, cx));
+        }
+        self.focus_composer(window, cx);
+        cx.notify();
+    }
+
+    fn push_search(&mut self, cx: &mut Context<Self>) {
+        let q = self.search.read(cx).value().to_string();
+        if let Some((_, t)) = &self.transcript {
+            t.update(cx, |t, cx| t.set_search(Some(q), cx));
+        }
+        cx.notify();
+    }
+
+    fn find_bar(&self, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
+        let status = self
+            .transcript
+            .as_ref()
+            .and_then(|(_, t)| t.read(cx).search_status())
+            .map(|(i, n)| if n == 0 { "no matches".to_string() } else { format!("{i} of {n}") })
+            .unwrap_or_default();
+        let hover = ui.hover;
+        let icon_button = move |id: &'static str, icon: Lucide, muted: Hsla| {
+            div()
+                .id(id)
+                .size(px(24.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.))
+                .text_color(muted)
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .child(div().size(px(13.)).child(Icon::from(icon)))
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_4()
+            .py_1p5()
+            .border_b_1()
+            .border_color(ui.border)
+            .child(div().w(px(280.)).child(Input::new(&self.search).cleanable(true)))
+            .child(div().text_xs().text_color(ui.text_faint).child(status))
+            .child(icon_button("find-prev", Lucide::ChevronUp, ui.text_muted).on_click(cx.listener(|this, _, _, cx| {
+                if let Some((_, t)) = &this.transcript {
+                    t.update(cx, |t, cx| t.step_search(-1, cx));
+                }
+            })))
+            .child(icon_button("find-next", Lucide::ChevronDown, ui.text_muted).on_click(cx.listener(|this, _, _, cx| {
+                if let Some((_, t)) = &this.transcript {
+                    t.update(cx, |t, cx| t.step_search(1, cx));
+                }
+            })))
+            .child(div().flex_1())
+            .child(icon_button("find-close", Lucide::X, ui.text_muted).on_click(cx.listener(|this, _, window, cx| {
+                this.close_search(window, cx);
+            })))
     }
 
     fn sync_transcript(&mut self, cx: &mut Context<Self>) {
@@ -70,6 +159,8 @@ impl ThreadView {
         }
     }
 
+    /// Empty state: greeting, three ways in, composer front and center
+    /// (assistant-ui). Builds top to bottom with staggered entrances.
     fn welcome(&self, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
         let project = self
             .model
@@ -77,25 +168,124 @@ impl ThreadView {
             .active_project
             .as_deref()
             .map(crate::models::app::project_name);
+        let suggestions: [(&str, &str, Lucide); 3] = [
+            ("Explain this project", "Read the codebase and summarize how it's put together, where the entry points are, and what looks fragile.", Lucide::BookOpen),
+            ("Fix a failing test", "Run the test suite, pick the first failure, find the root cause and fix it. Show me the diff before committing.", Lucide::Bug),
+            ("Start a feature", "I want to build a new feature. Ask me what it should do, propose a plan, then implement it step by step.", Lucide::Sparkles),
+        ];
+        let composer = self.composer.clone();
+        let hover = ui.hover;
         div()
             .size_full()
             .flex()
             .flex_col()
             .items_center()
             .justify_center()
-            .gap_4()
+            .gap_6()
+            .px_6()
+            .child(fade_in(
+                "empty-greeting",
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .child(div().size(px(22.)).text_color(ui.text_muted).child(Icon::from(Lucide::Bomb)))
+                    .child(div().text_size(px(22.)).font_weight(FontWeight::MEDIUM).text_color(ui.text).child("How can I help?"))
+                    .child(self.project_row(project, ui, cx)),
+            ))
             .child(
                 div()
-                    .font_family(ui.mono.clone())
-                    .text_sm()
-                    .text_color(ui.text_faint)
-                    .whitespace_nowrap()
-                    .children(BANNER.lines().map(|l| div().child(l.to_string()))),
+                    .flex()
+                    .flex_wrap()
+                    .justify_center()
+                    .gap_2()
+                    .max_w(px(640.))
+                    .children(suggestions.iter().enumerate().map(|(i, (title, prompt, icon))| {
+                        let composer = composer.clone();
+                        let prompt = prompt.to_string();
+                        crate::views::motion::fade_in(
+                            ("empty-suggestion", i as u64),
+                            div()
+                                .id(("suggestion", i))
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .h(px(34.))
+                                .px_3()
+                                .rounded(px(10.))
+                                .border_1()
+                                .border_color(ui.border)
+                                .text_sm()
+                                .text_color(ui.text_muted)
+                                .cursor_pointer()
+                                .hover(move |s| s.bg(hover))
+                                .on_click(move |_, window, cx| {
+                                    composer.update(cx, |c, cx| c.set_text(&prompt, window, cx));
+                                })
+                                .child(div().size(px(14.)).child(Icon::from(*icon)))
+                                .child(*title),
+                        )
+                    })),
             )
-            .child(div().text_sm().text_color(ui.text_muted).child(match project {
-                Some(p) => format!("New thread in {p}. Type below to start."),
-                None => "Open a project (⌘O) to start a thread.".to_string(),
-            }))
+    }
+
+    /// "in <project ▾> · temporary chat" under the greeting.
+    fn project_row(&self, project: Option<String>, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui_kit::component::button::Button;
+        use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+        use gpui_kit::component::Sizable;
+        let projects = self.model.read(cx).projects.clone();
+        let temporary = self.model.read(cx).prefs.temporary;
+        let app = self.model.clone();
+        let app2 = self.model.clone();
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_sm()
+            .text_color(ui.text_faint)
+            .child("in")
+            .child(
+                Button::new("empty-project")
+                    .outline()
+                    .small()
+                    .compact()
+                    .label(project.unwrap_or_else(|| "choose a project".into()))
+                    .dropdown_caret(true)
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for p in &projects {
+                            let a = app.clone();
+                            let root = p.clone();
+                            menu = menu.item(PopupMenuItem::new(crate::models::app::project_name(p)).on_click(move |_, _, cx| {
+                                a.update(cx, |m, cx| m.set_active_project(root.clone(), cx));
+                            }));
+                        }
+                        menu = menu.separator();
+                        let a = app.clone();
+                        menu.item(PopupMenuItem::new("Open project…").on_click(move |_, _, cx| {
+                            a.update(cx, |m, cx| m.open_project(cx));
+                        }))
+                    }),
+            )
+            .child("·")
+            .child(
+                div()
+                    .id("temporary-chat")
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .cursor_pointer()
+                    .text_color(if temporary { ui.text } else { ui.text_faint })
+                    .on_click(move |_, _, cx| {
+                        app2.update(cx, |m, cx| {
+                            m.prefs.temporary = !m.prefs.temporary;
+                            cx.notify();
+                        })
+                    })
+                    .child(div().size(px(12.)).child(Icon::from(if temporary { Lucide::SquareCheck } else { Lucide::Square })))
+                    .child("temporary chat (no worktree)"),
+            )
     }
 
     fn header(&self, thread: &Entity<ThreadModel>, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
@@ -232,6 +422,7 @@ impl Render for ThreadView {
             .flex()
             .flex_col()
             .child(self.header(&thread, &ui, cx))
+            .when(self.search_open, |el| el.child(self.find_bar(&ui, cx)))
             .child(fade_in(
                 SharedString::from(format!("transcript-{tid}")),
                 div().flex_1().min_h_0().child(transcript),

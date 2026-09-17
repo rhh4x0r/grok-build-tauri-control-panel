@@ -19,12 +19,83 @@ use crate::theme::Ui;
 
 pub struct SidebarView {
     model: Entity<AppModel>,
+    search: Entity<InputState>,
+    /// Keyboard cursor through the filtered list.
+    active_ix: usize,
+}
+
+/// Recency bucket for thread search results.
+fn recency_group(iso: &str) -> &'static str {
+    let Ok(t) = iso.parse::<DateTime<Utc>>() else { return "Earlier" };
+    let now = Utc::now();
+    let days = (now.date_naive() - t.with_timezone(&chrono::Local).date_naive()).num_days();
+    match days {
+        d if d <= 0 => "Today",
+        1 => "Yesterday",
+        d if d < 7 => "This week",
+        _ => "Earlier",
+    }
 }
 
 impl SidebarView {
-    pub fn new(model: Entity<AppModel>, cx: &mut Context<Self>) -> Self {
+    pub fn new(model: Entity<AppModel>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe(&model, |_, _, cx| cx.notify()).detach();
-        Self { model }
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search threads"));
+        cx.subscribe(&search, |this, _, ev: &gpui_kit::component::input::InputEvent, cx| {
+            match ev {
+                gpui_kit::component::input::InputEvent::Change => {
+                    this.active_ix = 0;
+                    cx.notify();
+                }
+                gpui_kit::component::input::InputEvent::PressEnter { .. } => {
+                    this.select_active(cx);
+                }
+                _ => {}
+            }
+        })
+        .detach();
+        Self { model, search, active_ix: 0 }
+    }
+
+    fn query(&self, cx: &App) -> String {
+        self.search.read(cx).value().trim().to_lowercase()
+    }
+
+    /// Threads matching the query (title, project, model), newest first.
+    fn filtered(&self, cx: &App) -> Vec<(Uuid, Entity<ThreadModel>)> {
+        let q = self.query(cx);
+        let m = self.model.read(cx);
+        let mut v: Vec<(Uuid, Entity<ThreadModel>, String)> = m
+            .thread_order
+            .iter()
+            .filter_map(|id| m.threads.get(id).cloned().map(|t| (*id, t)))
+            .filter(|(_, t)| {
+                let t = t.read(cx);
+                let hay = format!(
+                    "{} {} {} {}",
+                    t.title(),
+                    project_name(t.meta.project_root.as_deref().unwrap_or(&t.meta.cwd)),
+                    t.meta.model,
+                    t.meta.backend
+                )
+                .to_lowercase();
+                hay.contains(&q)
+            })
+            .map(|(id, t)| {
+                let at = t.read(cx).meta.updated_at.clone();
+                (id, t, at)
+            })
+            .collect();
+        v.sort_by(|a, b| b.2.cmp(&a.2));
+        v.into_iter().map(|(id, t, _)| (id, t)).collect()
+    }
+
+    fn select_active(&mut self, cx: &mut Context<Self>) {
+        let list = self.filtered(cx);
+        if let Some((id, _)) = list.get(self.active_ix) {
+            let id = *id;
+            self.model.update(cx, |m, cx| m.select(Some(id), cx));
+        }
     }
 
     fn header(&self, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
@@ -256,6 +327,47 @@ impl SidebarView {
             })
     }
 
+    /// Filtered rows under Today / Yesterday / This week / Earlier labels.
+    fn search_results(&self, ui: &Ui, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let list = self.filtered(cx);
+        let selected = self.model.read(cx).selected;
+        let query = self.query(cx);
+        if list.is_empty() {
+            return vec![div()
+                .px_4()
+                .py_3()
+                .text_xs()
+                .text_color(ui.text_faint)
+                .child(format!("No thread matches \"{query}\""))
+                .into_any_element()];
+        }
+        let mut out: Vec<AnyElement> = Vec::new();
+        let mut last_group = "";
+        for (ix, (id, t)) in list.iter().enumerate() {
+            let (group, project) = {
+                let tm = t.read(cx);
+                (recency_group(&tm.meta.updated_at), project_name(tm.meta.project_root.as_deref().unwrap_or(&tm.meta.cwd)))
+            };
+            if group != last_group {
+                out.push(
+                    div()
+                        .px_4()
+                        .pt_2()
+                        .pb_1()
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(ui.text_faint)
+                        .child(group)
+                        .into_any_element(),
+                );
+                last_group = group;
+            }
+            let row = self.thread_row(*id, t, &project, selected == Some(*id) || ix == self.active_ix, ui, cx);
+            out.push(row.into_any_element());
+        }
+        out
+    }
+
     fn service_row(&self, a: &BackendAuth, ui: &Ui) -> impl IntoElement {
         let model = self.model.clone();
         let backend = a.backend.clone();
@@ -352,12 +464,33 @@ impl Render for SidebarView {
         let ui = Ui::of(cx);
         let groups = self.model.read(cx).groups(cx);
         let auth = self.model.read(cx).auth.clone();
+        let query = self.query(cx);
         div()
             .id("sidebar")
             .size_full()
             .flex()
             .flex_col()
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                if !this.search.read(cx).focus_handle(cx).is_focused(window) {
+                    return;
+                }
+                let n = this.filtered(cx).len().max(1);
+                match ev.keystroke.key.as_str() {
+                    "down" => {
+                        this.active_ix = (this.active_ix + 1) % n;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                    "up" => {
+                        this.active_ix = (this.active_ix + n - 1) % n;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                    _ => {}
+                }
+            }))
             .child(self.header(&ui, cx))
+            .child(div().px_3().pb_2().child(Input::new(&self.search).cleanable(true).appearance(true)))
             .child(
                 div()
                     .id("thread-list")
@@ -367,16 +500,22 @@ impl Render for SidebarView {
                     .flex_col()
                     .gap_1()
                     .py_1()
-                    .children(groups.iter().map(|g| self.group(g, &ui, cx)))
-                    .when(groups.iter().all(|g| g.threads.is_empty()), |el| {
-                        el.child(
-                            div()
-                                .px_4()
-                                .py_3()
-                                .text_xs()
-                                .text_color(ui.text_faint)
-                                .child("No threads yet. Press + to start one."),
-                        )
+                    .map(|el| {
+                        if query.is_empty() {
+                            el.children(groups.iter().map(|g| self.group(g, &ui, cx)))
+                                .when(groups.iter().all(|g| g.threads.is_empty()), |el| {
+                                    el.child(
+                                        div()
+                                            .px_4()
+                                            .py_3()
+                                            .text_xs()
+                                            .text_color(ui.text_faint)
+                                            .child("No threads yet. Press + to start one."),
+                                    )
+                                })
+                        } else {
+                            el.children(self.search_results(&ui, cx))
+                        }
                     }),
             )
             .child(

@@ -34,3 +34,94 @@ pub fn brand_mark(backend: &str, size: f32, tinted: bool, ui: &Ui) -> AnyElement
             .into_any_element(),
     }
 }
+
+/// Human-readable model name: `grok-4.6` → "Grok 4.6",
+/// `claude-opus-4-1-20250805` → "Claude Opus 4.1", `gpt-5-codex` → "GPT-5 Codex".
+pub fn pretty_model(id: &str) -> String {
+    let raw: Vec<&str> = id.split(['-', '_']).filter(|t| !t.is_empty()).collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        let t = raw[i];
+        // drop 8-digit date stamps
+        if t.len() == 8 && t.chars().all(|c| c.is_ascii_digit()) {
+            i += 1;
+            continue;
+        }
+        let is_num = |x: &str| !x.is_empty() && x.chars().all(|c| c.is_ascii_digit() || c == '.');
+        if is_num(t) {
+            // join "4" "1" → "4.1"
+            let mut v = t.to_string();
+            while i + 1 < raw.len() && raw[i + 1].len() <= 2 && raw[i + 1].chars().all(|c| c.is_ascii_digit()) {
+                v = format!("{v}.{}", raw[i + 1]);
+                i += 1;
+            }
+            match out.last() {
+                Some(last) if last == "GPT" || last == "o" => {
+                    let l = out.pop().unwrap();
+                    out.push(format!("{l}-{v}"));
+                }
+                _ => out.push(v),
+            }
+            i += 1;
+            continue;
+        }
+        let lower = t.to_ascii_lowercase();
+        let word = match lower.as_str() {
+            "gpt" => "GPT".to_string(),
+            "o1" | "o3" | "o4" => lower.clone(),
+            "ai" => "AI".to_string(),
+            _ => {
+                let mut c = lower.chars();
+                match c.next() {
+                    Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                    None => String::new(),
+                }
+            }
+        };
+        out.push(word);
+        i += 1;
+    }
+    if out.is_empty() {
+        id.to_string()
+    } else {
+        out.join(" ")
+    }
+}
+
+/// Reasoning levels a backend accepts, and whether we can actually apply
+/// them through its ACP adapter.
+pub fn effort_levels(backend: &str) -> (&'static [&'static str], bool) {
+    match backend {
+        "grok" => (&["low", "medium", "high"], true),
+        "codex" => (&["minimal", "low", "medium", "high"], true),
+        "claude" => (&["low", "medium", "high", "max"], true),
+        _ => (&[], false),
+    }
+}
+
+pub fn short_effort(e: &str) -> &'static str {
+    match e {
+        "minimal" => "Min",
+        "low" => "Low",
+        "medium" => "Med",
+        "high" => "High",
+        "xhigh" => "XHigh",
+        "max" => "Max",
+        _ => "",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pretty_model;
+
+    #[test]
+    fn names() {
+        assert_eq!(pretty_model("grok-4.6"), "Grok 4.6");
+        assert_eq!(pretty_model("claude-opus-4-1-20250805"), "Claude Opus 4.1");
+        assert_eq!(pretty_model("claude-sonnet-4-5"), "Claude Sonnet 4.5");
+        assert_eq!(pretty_model("gpt-5-codex"), "GPT-5 Codex");
+        assert_eq!(pretty_model("o3"), "o3");
+    }
+}

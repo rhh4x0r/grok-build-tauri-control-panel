@@ -26,6 +26,33 @@ pub struct TranscriptView {
     scroll: ScrollHandle,
     follow: bool,
     seen_tail: u64,
+    /// Find-in-conversation: query and the active hit (index into `matches`).
+    search: Option<(String, usize)>,
+    matches: Vec<usize>,
+    scrolled_to: Option<usize>,
+}
+
+impl TranscriptView {
+    pub fn set_search(&mut self, query: Option<String>, cx: &mut Context<Self>) {
+        self.search = query.filter(|q| !q.trim().is_empty()).map(|q| (q.to_lowercase(), 0));
+        self.scrolled_to = None;
+        cx.notify();
+    }
+
+    pub fn step_search(&mut self, delta: i32, cx: &mut Context<Self>) {
+        if let Some((_, ix)) = &mut self.search {
+            let n = self.matches.len();
+            if n > 0 {
+                *ix = ((*ix as i32 + delta).rem_euclid(n as i32)) as usize;
+            }
+            self.scrolled_to = None;
+            cx.notify();
+        }
+    }
+
+    pub fn search_status(&self) -> Option<(usize, usize)> {
+        self.search.as_ref().map(|(_, ix)| (if self.matches.is_empty() { 0 } else { ix + 1 }, self.matches.len()))
+    }
 }
 
 /// One folded activity item: a thought or a tool call.
@@ -88,6 +115,9 @@ impl TranscriptView {
             scroll: ScrollHandle::new(),
             follow: true,
             seen_tail: 0,
+            search: None,
+            matches: Vec::new(),
+            scrolled_to: None,
         }
     }
 
@@ -258,6 +288,16 @@ impl TranscriptView {
     ) -> AnyElement {
         let cwd = std::path::PathBuf::from(&self.thread.read(cx).meta.cwd);
         let link_cwd = cwd.clone();
+        let body_text: AnyElement = if streaming {
+            streaming_text(id, raw, ui)
+        } else {
+            TextView::new(state)
+                .selectable(true)
+                .on_link_click(move |href, _, _, cx| {
+                    open_link(href, &link_cwd, cx);
+                })
+                .into_any_element()
+        };
         let body = div()
             .flex()
             .flex_col()
@@ -265,9 +305,7 @@ impl TranscriptView {
             .py_1()
             .text_size(px(Layout::BODY_SIZE))
             .line_height(px(Layout::BODY_LINE))
-            .child(TextView::new(state).selectable(true).on_link_click(move |href, _, _, cx| {
-                open_link(href, &link_cwd, cx);
-            }))
+            .child(body_text)
             .when(!images.is_empty(), |el| {
                 el.child(div().flex().flex_wrap().gap_2().py_2().children(images.iter().enumerate().map(|(ix, p)| {
                     let path = p.clone();
@@ -280,7 +318,10 @@ impl TranscriptView {
                         .border_color(ui.border)
                         .cursor_pointer()
                         .on_click(move |_, _, _| open_path(&path))
-                        .child(img(p.clone()).max_w(px(420.)).max_h(px(420.)).object_fit(ObjectFit::Contain))
+                        .child(crate::views::motion::reveal(
+                            ("reveal", id * 64 + ix as u64),
+                            img(p.clone()).max_w(px(420.)).max_h(px(420.)).object_fit(ObjectFit::Contain),
+                        ))
                 })))
             })
             .when(streaming, |el| {
@@ -560,8 +601,18 @@ impl TranscriptView {
             .when(failed, |el| {
                 el.child(div().text_xs().text_color(ui.danger).child(r.status.clone()))
             });
+        let kind = tool_kind(&r.name);
+        let is_image_tool = r.name.to_ascii_lowercase().contains("image");
         let detail = expanded.then(|| {
             let mut blocks: Vec<AnyElement> = Vec::new();
+            if kind == "command" {
+                blocks.push(terminal_block(id, &first_line, r.result.as_deref().unwrap_or(""), terminal, failed, ui));
+                return div().flex().flex_col().gap_1().pl_8().pr_2().pb_2().children(blocks);
+            }
+            if is_image_tool && !terminal {
+                blocks.push(image_placeholder(id, ui));
+                return div().flex().flex_col().gap_1().pl_8().pr_2().pb_2().children(blocks);
+            }
             if !r.args.trim().is_empty() {
                 blocks.push(if looks_like_diff(&r.args) {
                     diff_block(("args-diff", id), &r.args)
@@ -747,9 +798,29 @@ impl Render for TranscriptView {
         self.seen_tail = tail_version;
 
         let count = rows.len();
+        // Find-in-conversation: which rows contain the query.
+        self.matches = match &self.search {
+            Some((q, _)) => rows
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| match r {
+                    Row::User { text, .. } => text.to_lowercase().contains(q.as_str()),
+                    Row::Agent { raw, .. } => raw.to_lowercase().contains(q.as_str()),
+                    Row::Plan { doc, .. } => doc.markdown.to_lowercase().contains(q.as_str()),
+                    Row::Line { text, .. } => text.to_lowercase().contains(q.as_str()),
+                    _ => false,
+                })
+                .map(|(i, _)| i)
+                .collect(),
+            None => Vec::new(),
+        };
+        let active_match = self.search.as_ref().and_then(|(_, ix)| self.matches.get(*ix).copied());
+        let match_bg = ui.warning;
         let children: Vec<AnyElement> = rows
             .iter()
-            .map(|row| match row {
+            .enumerate()
+            .map(|(i, row)| {
+                let el = match row {
                 Row::User { id, text, images } => self.user_row(*id, text, images, &ui),
                 Row::Agent { id, state, raw, streaming, last, at, images } => {
                     self.agent_row(*id, state, raw, *streaming, *last, at, images, &ui, cx)
@@ -760,13 +831,54 @@ impl Render for TranscriptView {
                 Row::Plan { id, state, doc } => self.plan_row(*id, state, doc, &ui, cx),
                 Row::Approval { id, card } => self.approval_row(*id, card, &ui, cx),
                 Row::Line { id, role, text } => self.line_row(*id, *role, text, &ui),
+                };
+                if self.matches.contains(&i) {
+                    let active = active_match == Some(i);
+                    let mut bg = match_bg;
+                    bg.a = if active { 0.22 } else { 0.10 };
+                    div().rounded(px(8.)).bg(bg).child(el).into_any_element()
+                } else {
+                    el
+                }
             })
             .collect();
 
-        if should_pin && count > 0 {
+        if let Some(target) = active_match {
+            if self.scrolled_to != Some(target) {
+                self.scroll.scroll_to_item(target);
+                self.scrolled_to = Some(target);
+                self.follow = false;
+            }
+        } else if should_pin && count > 0 {
             self.scroll.scroll_to_item(count - 1);
         }
+        let marks: Vec<AnyElement> = if self.search.is_some() && count > 0 {
+            self.matches
+                .iter()
+                .map(|i| {
+                    let active = active_match == Some(*i);
+                    let mut c = match_bg;
+                    c.a = if active { 1.0 } else { 0.45 };
+                    div()
+                        .absolute()
+                        .right(px(2.))
+                        .w(px(6.))
+                        .h(px(3.))
+                        .rounded_full()
+                        .bg(c)
+                        .top(relative(*i as f32 / count as f32))
+                        .into_any_element()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
+        div()
+            .relative()
+            .size_full()
+            .children(marks)
+            .child(
         div()
             .id("transcript")
             .size_full()
@@ -798,8 +910,193 @@ impl Render for TranscriptView {
                     .when(count == 0, |el| {
                         el.child(div().py_4().text_sm().text_color(ui.text_faint).child("Nothing here yet."))
                     }),
+            ),
             )
     }
+}
+
+/// Streaming text: the newest two words land in the accent color, the two
+/// before them settle back to ink over 700ms (assistant-ui / Zeron veil).
+fn streaming_text(id: u64, raw: &str, ui: &Ui) -> AnyElement {
+    let text: SharedString = raw.to_string().into();
+    // Word boundaries by byte offset.
+    let mut words: Vec<(usize, usize)> = Vec::new();
+    let mut start: Option<usize> = None;
+    for (i, ch) in raw.char_indices() {
+        if ch.is_whitespace() {
+            if let Some(s) = start.take() {
+                words.push((s, i));
+            }
+        } else if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(s) = start {
+        words.push((s, raw.len()));
+    }
+    let n = words.len();
+    let accent = ui.accent;
+    let ink = ui.text;
+    let key = ("stream", id * 1_000_003 + n as u64);
+    div()
+        .whitespace_normal()
+        .with_animation(key, Animation::new(std::time::Duration::from_millis(700)), move |el, t| {
+            let mut highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = Vec::new();
+            for (k, (a, b)) in words.iter().enumerate() {
+                let from_end = n - 1 - k;
+                let color = if from_end < 2 {
+                    accent
+                } else if from_end < 4 {
+                    lerp_hsla(accent, ink, t)
+                } else {
+                    continue;
+                };
+                highlights.push((*a..*b, HighlightStyle { color: Some(color), ..Default::default() }));
+            }
+            el.child(StyledText::new(text.clone()).with_highlights(highlights))
+        })
+        .into_any_element()
+}
+
+fn lerp_hsla(a: Hsla, b: Hsla, t: f32) -> Hsla {
+    Hsla {
+        h: a.h + (b.h - a.h) * t,
+        s: a.s + (b.s - a.s) * t,
+        l: a.l + (b.l - a.l) * t,
+        a: a.a + (b.a - a.a) * t,
+    }
+}
+
+/// Terminal block: the command as header with a spinner-or-check, output
+/// lines below with the newest line brightest, exit line at the bottom.
+fn terminal_block(id: u64, command: &str, output: &str, done: bool, failed: bool, ui: &Ui) -> AnyElement {
+    let lines: Vec<&str> = output.lines().collect();
+    let n = lines.len();
+    let mono = ui.mono.clone();
+    div()
+        .flex()
+        .flex_col()
+        .rounded(px(8.))
+        .border_1()
+        .border_color(ui.border)
+        .bg(ui.ink(0.04))
+        .min_h(px(72.))
+        .overflow_hidden()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .h(px(30.))
+                .border_b_1()
+                .border_color(ui.border)
+                .child(div().text_xs().text_color(ui.text_faint).child("$"))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_xs()
+                        .font_family(mono.clone())
+                        .text_color(ui.text)
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(command.to_string()),
+                )
+                .child(if !done {
+                    crate::views::motion::breathe(("term-spin", id), 0.3, div().size(px(6.)).rounded_full().bg(ui.text_muted)).into_any_element()
+                } else {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_xs()
+                        .text_color(if failed { ui.danger } else { ui.success })
+                        .child(div().size(px(12.)).child(Icon::from(if failed { Lucide::X } else { Lucide::Check })))
+                        .child(if failed { "failed" } else { "exit 0" })
+                        .into_any_element()
+                }),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .px_3()
+                .py_2()
+                .max_h(px(320.))
+                .overflow_hidden()
+                .text_xs()
+                .font_family(mono)
+                .when(n == 0, |el| el.child(div().text_color(ui.text_faint).child(if done { "(no output)" } else { "running…" })))
+                .children(lines.iter().enumerate().map(|(i, l)| {
+                    let last = i + 1 == n;
+                    div()
+                        .whitespace_normal()
+                        .text_color(if last { ui.text } else { ui.text_muted })
+                        .child(l.to_string())
+                })),
+        )
+        .into_any_element()
+}
+
+/// Image generation placeholder: an 8×8 pulsing dot grid holds a square
+/// frame over a soft gradient until the image arrives.
+fn image_placeholder(id: u64, ui: &Ui) -> AnyElement {
+    let dot = ui.text_muted;
+    let mut grid = div().absolute().inset_0().flex().flex_col().justify_around().px(px(24.)).py(px(24.));
+    for row in 0..8u64 {
+        let mut r = div().flex().justify_around();
+        for col in 0..8u64 {
+            let i = row * 8 + col;
+            let phase = (i as f32 * 0.09) % 1.0;
+            r = r.child(
+                div()
+                    .size(px(4.))
+                    .rounded_full()
+                    .bg(dot)
+                    .with_animation(
+                        ("gen-dot", id * 100 + i),
+                        Animation::new(std::time::Duration::from_millis(1600))
+                            .repeat()
+                            .with_easing(move |t| pulsating_between(0.15, 0.9)((t + phase) % 1.0))
+                            .with_max_fps(30.),
+                        |el, t| el.opacity(t),
+                    ),
+            );
+        }
+        grid = grid.child(r);
+    }
+    div()
+        .flex()
+        .flex_col()
+        .gap_1p5()
+        .child(
+            div()
+                .relative()
+                .size(px(256.))
+                .rounded(px(12.))
+                .overflow_hidden()
+                .border_1()
+                .border_color(ui.border)
+                .bg(linear_gradient(
+                    135.,
+                    linear_color_stop(ui.ink(0.10), 0.0),
+                    linear_color_stop(ui.ink(0.02), 1.0),
+                ))
+                .child(grid),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_xs()
+                .font_family(ui.mono.clone())
+                .text_color(ui.text_faint)
+                .child(crate::views::motion::breathe(("gen-label", id), 0.4, div().child("Generating…"))),
+        )
+        .into_any_element()
 }
 
 /// Unified-diff heuristics: hunk headers or +++/--- file markers.

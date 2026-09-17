@@ -3,6 +3,7 @@ pub mod composer;
 pub mod login_dialog;
 pub mod meter;
 pub mod motion;
+pub mod palette;
 pub mod preview;
 pub mod root;
 pub mod settings;

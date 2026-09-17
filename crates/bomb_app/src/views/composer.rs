@@ -8,10 +8,12 @@ use std::sync::Arc;
 use base64::Engine;
 use bomb_core::services::ImageInput;
 use gpui_kit::assets::IconName as Lucide;
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
+use gpui_kit::component::progress::ProgressCircle;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -37,6 +39,8 @@ pub struct ComposerView {
     attachments: Vec<Attachment>,
     drag_over: bool,
     model_menu_open: bool,
+    model_search: Entity<InputState>,
+    provider_filter: Option<String>,
 }
 
 impl ComposerView {
@@ -60,11 +64,54 @@ impl ComposerView {
             attachments: Vec::new(),
             drag_over: false,
             model_menu_open: false,
+            model_search: cx.new(|cx| InputState::new(window, cx).placeholder("Search models…")),
+            provider_filter: None,
         }
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |s, cx| s.focus(window, cx));
+    }
+
+    /// Prefill the input (empty-state suggestions) and focus it.
+    pub fn set_text(&self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |s, cx| s.set_value(text.to_string(), window, cx));
+        self.focus(window, cx);
+    }
+
+    /// Context usage ring: tokens used vs the model's window; red past 85%.
+    fn context_ring(&self, ui: &Ui, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let m = self.model.read(cx);
+        let t = m.selected_thread()?;
+        let used = t.read(cx).thread.context_tokens?;
+        let window_tokens = context_window(&m.prefs.backend, &m.effective_model());
+        let frac = (used as f32 / window_tokens as f32).clamp(0.0, 1.0);
+        let pct = (frac * 100.0).round() as u32;
+        let hot = frac >= 0.85;
+        let color = if hot { ui.danger } else { ui.text_muted };
+        Some(
+            div()
+                .id("context-ring")
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .px_1p5()
+                .h(px(26.))
+                .rounded(px(6.))
+                .text_xs()
+                .text_color(color)
+                .child(div().size(px(16.)).child(ProgressCircle::new("ctx-ring").value(pct as f32).color(color)))
+                .child(format!("{pct}%"))
+                .tooltip(move |window, cx| {
+                    Tooltip::new(format!(
+                        "{} of {} tokens ({pct}%)",
+                        bomb_core::presence::format_count(used as usize),
+                        bomb_core::presence::format_count(window_tokens as usize)
+                    ))
+                    .build(window, cx)
+                })
+                .into_any_element(),
+        )
     }
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -239,10 +286,10 @@ impl ComposerView {
         )
     }
 
-    /// Model + reasoning selector: vendors as sections with their models
-    /// (checkmark on the current one), then a segmented reasoning row for
-    /// backends that take an effort. Picking a model closes the popover;
-    /// picking an effort keeps it open so you can compare.
+    /// Model + reasoning selector (assistant-ui style): an outline trigger
+    /// showing mark · readable model · effort · chevron; a popover with search,
+    /// provider filter chips, models grouped by provider (checkmark on the
+    /// current one), and a "Thinking" segmented control at the bottom.
     fn model_selector(&self, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
         let m = self.model.read(cx);
         let backend = m.prefs.backend.clone();
@@ -250,16 +297,25 @@ impl ComposerView {
         let effort = m.prefs.effort.clone();
         let app = self.model.clone();
         let this = cx.entity().clone();
-        let mark = crate::views::brand::brand_mark(&backend, 14., true, ui);
-        let label = if model.is_empty() { backend.clone() } else { model };
+        let search = self.model_search.clone();
+        let trigger_label = if model.is_empty() { backend.clone() } else { crate::views::brand::pretty_model(&model) };
+        let (_, effort_applies) = crate::views::brand::effort_levels(&backend);
+        let eff_short = if effort_applies { crate::views::brand::short_effort(&effort) } else { "" };
         let trigger = Button::new("model-selector")
-            .ghost()
+            .outline()
             .small()
-            .compact()
-            .label(if backend == "grok" { format!("{label}  ·  {effort}") } else { label })
-            .icon(Icon::empty());
+            .dropdown_caret(true)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .child(crate::views::brand::brand_mark(&backend, 14., true, ui))
+                    .child(div().text_size(px(13.)).text_color(ui.text).child(trigger_label))
+                    .when(!eff_short.is_empty(), |el| el.child(div().text_size(px(13.)).text_color(ui.text_faint).child(eff_short))),
+            );
         let popover = Popover::new("model-selector-popover")
-            .anchor(Anchor::BottomRight)
+            .anchor(Anchor::BottomLeft)
             .trigger(trigger)
             .open(self.model_menu_open)
             .on_open_change({
@@ -278,22 +334,77 @@ impl ComposerView {
                     let m = app.read(cx);
                     (m.backends.clone(), m.prefs.backend.clone(), m.effective_model(), m.prefs.effort.clone())
                 };
+                let query = search.read(cx).value().to_lowercase();
+                let filter = this.read(cx).provider_filter.clone();
                 let hover = ui.hover;
-                let mut col = div().flex().flex_col().w(px(300.)).py_1();
-                for b in &backends {
-                    col = col.child(
+                let mut col = div().flex().flex_col().w(px(340.));
+                // search
+                col = col.child(div().px_2().pt_2().pb_1().child(Input::new(&search).cleanable(true)));
+                // provider chips
+                let mut chips = div().flex().flex_wrap().gap_1().px_2().pb_2();
+                for (id, label) in std::iter::once((None, "All".to_string()))
+                    .chain(backends.iter().map(|b| (Some(b.id.clone()), b.display_name.clone())))
+                {
+                    let on = filter == id;
+                    let this = this.clone();
+                    let key = id.clone();
+                    chips = chips.child(
                         div()
+                            .id(SharedString::from(format!("prov-{}", id.clone().unwrap_or_else(|| "all".into()))))
+                            .h(px(22.))
+                            .px_2()
                             .flex()
                             .items_center()
-                            .gap_2()
-                            .px_3()
-                            .pt_2()
-                            .pb_1()
-                            .child(crate::views::brand::brand_mark(&b.id, 13., true, &ui))
-                            .child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(ui.text_muted).child(b.display_name.clone()))
-                            .when(!b.available, |el| el.child(div().text_xs().text_color(ui.text_faint).child("unavailable"))),
+                            .gap_1()
+                            .rounded_full()
+                            .text_xs()
+                            .border_1()
+                            .border_color(if on { ui.text_muted } else { ui.border })
+                            .text_color(if on { ui.text } else { ui.text_muted })
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(hover))
+                            .on_click(move |_, _, cx| {
+                                this.update(cx, |c, cx| {
+                                    c.provider_filter = key.clone();
+                                    cx.notify();
+                                })
+                            })
+                            .when_some(id.clone(), |el, b| el.child(crate::views::brand::brand_mark(&b, 11., true, &ui)))
+                            .child(label),
                     );
+                }
+                col = col.child(chips);
+                let mut any = false;
+                for b in &backends {
+                    if let Some(f) = &filter {
+                        if f != &b.id {
+                            continue;
+                        }
+                    }
                     let models: Vec<String> = if b.models.is_empty() { vec![b.default_model.clone()] } else { b.models.clone() };
+                    let models: Vec<String> = models
+                        .into_iter()
+                        .filter(|md| {
+                            query.is_empty()
+                                || md.to_lowercase().contains(&query)
+                                || crate::views::brand::pretty_model(md).to_lowercase().contains(&query)
+                                || b.display_name.to_lowercase().contains(&query)
+                        })
+                        .collect();
+                    if models.is_empty() {
+                        continue;
+                    }
+                    any = true;
+                    col = col.child(
+                        div()
+                            .px_3()
+                            .pt_1p5()
+                            .pb_0p5()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(ui.text_faint)
+                            .child(format!("{}{}", b.display_name, if b.available { "" } else { " · unavailable" })),
+                    );
                     for md in models {
                         let selected = b.id == cur_backend && md == cur_model;
                         let app = app.clone();
@@ -306,7 +417,7 @@ impl ComposerView {
                                 .flex()
                                 .items_center()
                                 .gap_2()
-                                .h(px(28.))
+                                .h(px(30.))
                                 .mx_1()
                                 .px_2()
                                 .rounded(px(6.))
@@ -321,63 +432,69 @@ impl ComposerView {
                                         });
                                     })
                                 })
-                                .child(div().flex_1().child(md.clone()))
+                                .child(crate::views::brand::brand_mark(&b.id, 14., true, &ui))
+                                .child(div().flex_1().child(crate::views::brand::pretty_model(&md)))
+                                .child(div().text_xs().text_color(ui.text_faint).child(md.clone()))
                                 .when(selected, |el| {
                                     el.child(div().size(px(14.)).text_color(ui.text).child(Icon::from(Lucide::Check)))
                                 }),
                         );
                     }
                 }
-                if cur_backend == "grok" {
-                    let mut seg = div()
-                        .flex()
-                        .items_center()
-                        .p_0p5()
-                        .rounded(px(7.))
-                        .bg(ui.ink(0.06));
-                    for e in ["low", "medium", "high"] {
+                if !any {
+                    col = col.child(div().px_3().py_3().text_sm().text_color(ui.text_faint).child(format!("No model matches \"{query}\"")));
+                }
+                // Thinking
+                let (levels, applies) = crate::views::brand::effort_levels(&cur_backend);
+                if !levels.is_empty() {
+                    let mut seg = div().flex().items_center().p_0p5().rounded(px(8.)).bg(ui.ink(0.06));
+                    for e in levels {
                         let app = app.clone();
-                        let on = cur_effort == e;
+                        let on = cur_effort == *e;
+                        let e: &'static str = e;
                         seg = seg.child(
                             div()
                                 .id(SharedString::from(format!("effort-{e}")))
                                 .flex_1()
-                                .h(px(24.))
+                                .h(px(26.))
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .rounded(px(5.))
+                                .rounded(px(6.))
                                 .text_xs()
                                 .font_weight(if on { FontWeight::MEDIUM } else { FontWeight::NORMAL })
-                                .text_color(if on { ui.text } else { ui.text_muted })
-                                .when(on, |el| el.bg(ui.ink(0.12)))
-                                .cursor_pointer()
-                                .on_click(move |_, _, cx| app.update(cx, |a, cx| a.set_effort(e, cx)))
-                                .child(e),
+                                .text_color(if !applies { ui.text_faint } else if on { ui.text } else { ui.text_muted })
+                                .when(on && applies, |el| el.bg(ui.ink(0.12)))
+                                .when(applies, |el| el.cursor_pointer().on_click(move |_, _, cx| app.update(cx, |a, cx| a.set_effort(e, cx))))
+                                .child(crate::views::brand::short_effort(e)),
                         );
                     }
                     col = col
-                        .child(div().mx_3().my_1().h(px(1.)).bg(ui.border))
+                        .child(div().mx_2().mt_1().h(px(1.)).bg(ui.border))
                         .child(
                             div()
                                 .flex()
-                                .items_center()
-                                .gap_3()
+                                .flex_col()
+                                .gap_2()
                                 .px_3()
                                 .py_2()
-                                .child(div().w(px(72.)).text_xs().text_color(ui.text_muted).child("Reasoning"))
-                                .child(div().flex_1().child(seg)),
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(ui.text).child("Thinking"))
+                                        .child(div().flex_1())
+                                        .child(div().text_xs().text_color(ui.text_faint).child(match cur_backend.as_str() {
+                                            "claude" => "applies now".to_string(),
+                                            _ => "applies to new threads".to_string(),
+                                        })),
+                                )
+                                .child(seg),
                         );
                 }
                 col
             });
-        div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .child(mark)
-            .child(popover)
-            .into_any_element()
+        popover.into_any_element()
     }
 
     fn mcp_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -442,7 +559,7 @@ impl ComposerView {
 impl Render for ComposerView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = Ui::of(cx);
-        let (busy, starting, branch, ctx_tokens, worktree_on, has_thread) = {
+        let (busy, starting, branch, worktree_on, has_thread) = {
             let m = self.model.read(cx);
             let t = m.selected_thread();
             let busy = t
@@ -457,11 +574,7 @@ impl Render for ComposerView {
                     .and_then(|w| std::path::Path::new(w).file_name())
                     .map(|s| s.to_string_lossy().to_string())
             });
-            let ctx = t
-                .as_ref()
-                .and_then(|t| t.read(cx).thread.context_tokens)
-                .map(|n| format!("ctx {}", bomb_core::presence::format_count(n as usize)));
-            (busy, m.starting, branch, ctx, m.prefs.worktree, t.is_some())
+            (busy, m.starting, branch, m.prefs.worktree, t.is_some())
         };
         let has_text = !self.input.read(cx).value().trim().is_empty() || !self.attachments.is_empty();
         let app = self.model.clone();
@@ -508,6 +621,7 @@ impl Render for ComposerView {
         let model_picker = self.model_selector(&ui, cx);
         let mode_picker = self.mode_picker(&ui, cx);
         let mcp_picker = self.mcp_picker(cx);
+        let context_ring = self.context_ring(&ui, cx);
         let hover = ui.hover;
         let _ = danger;
 
@@ -582,6 +696,7 @@ impl Render for ComposerView {
                                             .child(model_picker)
                                             .child(mode_picker)
                                             .children(mcp_picker)
+                                            .children(context_ring)
                                             .child(
                                                 div()
                                                     .id("attach")
@@ -646,7 +761,6 @@ impl Render for ComposerView {
                                 )
                             })
                             .child(div().flex_1())
-                            .when_some(ctx_tokens, |el, c| el.child(c))
                             .when(starting, |el| el.child("starting agent…")),
                     ),
             )
@@ -686,5 +800,18 @@ fn ext_for(f: ImageFormat) -> &'static str {
         ImageFormat::Svg => "svg",
         ImageFormat::Bmp => "bmp",
         _ => "bin",
+    }
+}
+
+/// Best-known context windows (tokens). Unknown models get a conservative
+/// 200k so the ring errs toward warning early.
+fn context_window(backend: &str, model: &str) -> u64 {
+    let m = model.to_ascii_lowercase();
+    match backend {
+        "grok" => 256_000,
+        "claude" => 200_000,
+        "codex" if m.contains("codex") || m.contains("gpt-5") || m.contains("gpt-6") => 400_000,
+        "codex" => 200_000,
+        _ => 200_000,
     }
 }

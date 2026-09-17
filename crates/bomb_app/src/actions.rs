@@ -16,6 +16,8 @@ gpui_kit::actions!(
         SendPrompt,
         StopTurn,
         ToggleDevPreview,
+        FindInThread,
+        OpenCommandPalette,
         LandThread,
         SyncThread,
         DeleteThread,
@@ -31,6 +33,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-o", OpenProject, None),
         KeyBinding::new("cmd-shift-e", ToggleExplainer, None),
         KeyBinding::new("cmd-.", StopTurn, None),
+        KeyBinding::new("cmd-f", FindInThread, None),
+        KeyBinding::new("cmd-k", OpenCommandPalette, None),
     ]);
     cx.set_menus(vec![
         Menu {
@@ -66,7 +70,13 @@ pub fn init(cx: &mut App) {
         },
         Menu {
             name: "View".into(),
-            items: vec![MenuItem::action("Toggle Explainer", ToggleExplainer)],
+            items: vec![
+                MenuItem::action("Command Palette…", OpenCommandPalette),
+                MenuItem::action("Find in Conversation", FindInThread),
+                MenuItem::separator(),
+                MenuItem::action("Toggle Explainer", ToggleExplainer),
+                MenuItem::action("Toggle Dev Preview", ToggleDevPreview),
+            ],
             disabled: false,
         },
     ]);
