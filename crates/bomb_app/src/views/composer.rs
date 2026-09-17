@@ -8,8 +8,8 @@ use std::sync::Arc;
 use base64::Engine;
 use bomb_core::services::ImageInput;
 use gpui_kit::assets::IconName as Lucide;
-use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::progress::ProgressCircle;
@@ -39,6 +39,8 @@ pub struct ComposerView {
     attachments: Vec<Attachment>,
     drag_over: bool,
     model_menu_open: bool,
+    slash_index: usize,
+    slash_dismissed: bool,
     model_search: Entity<InputState>,
     provider_filter: Option<String>,
     speed: Entity<super::speed::SpeedSelector>,
@@ -53,11 +55,19 @@ impl ComposerView {
                 .auto_grow(1, 10)
                 .submit_on_enter(true)
         });
-        cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, window, cx| {
-            if let InputEvent::PressEnter { shift: false, .. } = ev {
-                this.send(window, cx);
-            }
-        })
+        cx.subscribe_in(
+            &input,
+            window,
+            |this, _, ev: &InputEvent, window, cx| match ev {
+                InputEvent::Change => {
+                    this.slash_index = 0;
+                    this.slash_dismissed = false;
+                    cx.notify();
+                }
+                InputEvent::PressEnter { shift: false, .. } => this.send(window, cx),
+                _ => {}
+            },
+        )
         .detach();
         let speed = cx.new(|cx| super::speed::SpeedSelector::new(model.clone(), cx));
         Self {
@@ -67,9 +77,129 @@ impl ComposerView {
             attachments: Vec::new(),
             drag_over: false,
             model_menu_open: false,
+            slash_index: 0,
+            slash_dismissed: false,
             model_search: cx.new(|cx| InputState::new(window, cx).placeholder("Search models…")),
             provider_filter: None,
         }
+    }
+
+    fn slash_catalog(&self, cx: &App) -> serde_json::Value {
+        let m = self.model.read(cx);
+        m.selected_thread()
+            .filter(|t| {
+                let t = t.read(cx);
+                t.meta.backend == m.prefs.backend
+                    && t.meta.model == m.effective_model()
+                    && t.provider_commands.get("backend").and_then(|v| v.as_str())
+                        == Some(m.prefs.backend.as_str())
+            })
+            .map(|t| t.read(cx).provider_commands.clone())
+            .unwrap_or_default()
+    }
+
+    fn slash_matches(&self, cx: &App) -> Vec<SlashCommand> {
+        if self.slash_dismissed {
+            return Vec::new();
+        }
+        slash_matches(
+            self.input.read(cx).value().as_ref(),
+            &self.slash_catalog(cx),
+        )
+    }
+
+    fn choose_slash(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.input
+            .update(cx, |s, cx| s.set_value(format!("/{name} "), window, cx));
+        self.slash_dismissed = true;
+        self.focus(window, cx);
+        cx.notify();
+    }
+
+    fn slash_menu(&self, ui: &Ui, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.slash_dismissed || slash_query(self.input.read(cx).value().as_ref()).is_none() {
+            return None;
+        }
+        let catalog = self.slash_catalog(cx);
+        let commands = self.slash_matches(cx);
+        let selected = self.slash_index.min(commands.len().saturating_sub(1));
+        let backend = self.model.read(cx).prefs.backend.clone();
+        let mut menu = div()
+            .id("provider-slash-menu")
+            .w_full()
+            .max_h(px(260.))
+            .overflow_y_scroll()
+            .mb_2()
+            .p_2()
+            .rounded(px(12.))
+            .border_1()
+            .border_color(ui.border)
+            .bg(ui.bg)
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .text_size(px(11.))
+                    .text_color(ui.text_faint)
+                    .child(super::brand::brand_mark(&backend, 13., true, ui))
+                    .child("Commands · ↑ ↓ to navigate · Tab or Enter to select"),
+            );
+        if commands.is_empty() {
+            menu = menu.child(div().px_2().py_2().text_size(px(12.)).text_color(ui.text_muted)
+                .child(if catalog.is_null() { "Commands load when this provider connects. You can still type a command and send it." } else { "No matching commands" }));
+        }
+        for (index, command) in commands.into_iter().enumerate() {
+            let name = command.name.clone();
+            menu =
+                menu.child(
+                    div()
+                        .id(SharedString::from(format!("slash-{}", command.name)))
+                        .px_2()
+                        .py_2()
+                        .rounded(px(7.))
+                        .cursor_pointer()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .when(index == selected, |el| el.bg(ui.selected_bg()))
+                        .hover(|s| s.bg(ui.hover))
+                        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.choose_slash(&name, window, cx)
+                        }))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .text_size(px(12.))
+                                .text_color(ui.text)
+                                .child(format!("/{}", command.name))
+                                .when(index == selected, |el| el.child("↵")),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(ui.text_muted)
+                                .child(command.description),
+                        )
+                        .when_some(command.hint, |el, hint| {
+                            el.child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(ui.text_faint)
+                                    .child(hint),
+                            )
+                        }),
+                );
+        }
+        Some(menu.into_any_element())
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -78,7 +208,8 @@ impl ComposerView {
 
     /// Prefill the input (empty-state suggestions) and focus it.
     pub fn set_text(&self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.input.update(cx, |s, cx| s.set_value(text.to_string(), window, cx));
+        self.input
+            .update(cx, |s, cx| s.set_value(text.to_string(), window, cx));
         self.focus(window, cx);
     }
 
@@ -90,7 +221,13 @@ impl ComposerView {
         let window_tokens = context_window(&m.prefs.backend, &m.effective_model());
         let frac = (used as f32 / window_tokens as f32).clamp(0.0, 1.0);
         let pct = (frac * 100.0).round() as u32;
-        let color = if frac >= 0.9 { ui.danger } else if frac >= 0.75 { ui.warning } else { ui.text_muted };
+        let color = if frac >= 0.9 {
+            ui.danger
+        } else if frac >= 0.75 {
+            ui.warning
+        } else {
+            ui.text_muted
+        };
         let hover = ui.ink(0.05);
         Some(
             div()
@@ -105,7 +242,13 @@ impl ComposerView {
                 .text_size(px(11.))
                 .text_color(color)
                 .hover(move |s| s.bg(hover))
-                .child(div().size(px(16.)).child(ProgressCircle::new("ctx-ring").value(pct as f32).color(color)))
+                .child(
+                    div().size(px(16.)).child(
+                        ProgressCircle::new("ctx-ring")
+                            .value(pct as f32)
+                            .color(color),
+                    ),
+                )
                 .child(format!("{pct}%"))
                 .tooltip(move |window, cx| {
                     Tooltip::new(format!(
@@ -133,13 +276,22 @@ impl ComposerView {
             .unwrap_or(false);
         if busy || self.model.read(cx).starting {
             self.model.update(cx, |m, cx| {
-                m.toast(ToastKind::Warning, "The agent is still working — stop it first.");
+                m.toast(
+                    ToastKind::Warning,
+                    "The agent is still working — stop it first.",
+                );
                 cx.notify();
             });
             return;
         }
         if !self.model.read(cx).model_ready() {
-            self.model.update(cx, |m, cx| { m.toast(ToastKind::Warning, "Refresh provider models and choose an available model before sending."); cx.notify(); });
+            self.model.update(cx, |m, cx| {
+                m.toast(
+                    ToastKind::Warning,
+                    "Refresh provider models and choose an available model before sending.",
+                );
+                cx.notify();
+            });
             return;
         }
         let images: Vec<ImageInput> = self
@@ -152,7 +304,8 @@ impl ComposerView {
             })
             .collect();
         self.input.update(cx, |s, cx| s.set_value("", window, cx));
-        self.model.update(cx, |m, cx| m.send_prompt(text, images, cx));
+        self.model
+            .update(cx, |m, cx| m.send_prompt(text, images, cx));
         self.focus(window, cx);
     }
 
@@ -168,7 +321,9 @@ impl ComposerView {
             prompt: Some("Attach".into()),
         });
         cx.spawn(async move |weak, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Ok(Ok(Some(paths))) = rx.await else {
+                return;
+            };
             let _ = weak.update(cx, |this, cx| {
                 for p in paths {
                     this.attach_path(&p, cx);
@@ -181,7 +336,10 @@ impl ComposerView {
     fn attach_path(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
         let Some(format) = format_for_path(path) else {
             self.model.update(cx, |m, cx| {
-                m.toast(ToastKind::Warning, format!("Not an image: {}", path.display()));
+                m.toast(
+                    ToastKind::Warning,
+                    format!("Not an image: {}", path.display()),
+                );
                 cx.notify();
             });
             return;
@@ -195,17 +353,34 @@ impl ComposerView {
                 self.attach_bytes(name, format, bytes, cx);
             }
             Err(e) => self.model.update(cx, |m, cx| {
-                m.toast(ToastKind::Error, format!("Could not read {}: {e}", path.display()));
+                m.toast(
+                    ToastKind::Error,
+                    format!("Could not read {}: {e}", path.display()),
+                );
                 cx.notify();
             }),
         }
     }
 
-    fn attach_bytes(&mut self, name: String, format: ImageFormat, bytes: Vec<u8>, cx: &mut Context<Self>) {
-        let total: usize = self.attachments.iter().map(|a| a.bytes.len()).sum::<usize>() + bytes.len();
+    fn attach_bytes(
+        &mut self,
+        name: String,
+        format: ImageFormat,
+        bytes: Vec<u8>,
+        cx: &mut Context<Self>,
+    ) {
+        let total: usize = self
+            .attachments
+            .iter()
+            .map(|a| a.bytes.len())
+            .sum::<usize>()
+            + bytes.len();
         if self.attachments.len() >= MAX_ATTACHMENTS || total > MAX_TOTAL_BYTES {
             self.model.update(cx, |m, cx| {
-                m.toast(ToastKind::Warning, "Attachment limit: 8 images, 12 MB total.");
+                m.toast(
+                    ToastKind::Warning,
+                    "Attachment limit: 8 images, 12 MB total.",
+                );
                 cx.notify();
             });
             return;
@@ -221,13 +396,20 @@ impl ComposerView {
     }
 
     fn paste_from_clipboard(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(item) = cx.read_from_clipboard() else { return false };
+        let Some(item) = cx.read_from_clipboard() else {
+            return false;
+        };
         let mut took = false;
         for entry in item.entries() {
             match entry {
                 ClipboardEntry::Image(img) => {
                     let n = self.attachments.len() + 1;
-                    self.attach_bytes(format!("pasted-{n}.{}", ext_for(img.format())), img.format(), img.bytes().to_vec(), cx);
+                    self.attach_bytes(
+                        format!("pasted-{n}.{}", ext_for(img.format())),
+                        img.format(),
+                        img.bytes().to_vec(),
+                        cx,
+                    );
                     took = true;
                 }
                 ClipboardEntry::ExternalPaths(paths) => {
@@ -276,7 +458,11 @@ impl ComposerView {
                         .border_color(border)
                         .cursor_pointer()
                         .on_click(cx.listener(move |this, _, _, cx| this.remove_attachment(ix, cx)))
-                        .child(img(a.image.clone()).size_full().object_fit(ObjectFit::Cover))
+                        .child(
+                            img(a.image.clone())
+                                .size_full()
+                                .object_fit(ObjectFit::Cover),
+                        )
                         .child(
                             div()
                                 .absolute()
@@ -288,7 +474,12 @@ impl ComposerView {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .child(div().size(px(10.)).text_color(ui.on_solid).child(Icon::from(Lucide::X))),
+                                .child(
+                                    div()
+                                        .size(px(10.))
+                                        .text_color(ui.on_solid)
+                                        .child(Icon::from(Lucide::X)),
+                                ),
                         )
                 }))
                 .into_any_element(),
@@ -307,49 +498,58 @@ impl ComposerView {
         let app = self.model.clone();
         let this = cx.entity().clone();
         let search = self.model_search.clone();
-        let trigger_label = if model.is_empty() { backend.clone() } else { m.model_name(&backend, &model) };
+        let trigger_label = if model.is_empty() {
+            backend.clone()
+        } else {
+            m.model_name(&backend, &model)
+        };
         let (_, effort_applies) = crate::views::brand::effort_levels(&backend);
-        let eff_label = if effort_applies { crate::views::brand::effort_label(&effort) } else { "" };
+        let eff_label = if effort_applies {
+            crate::views::brand::effort_label(&effort)
+        } else {
+            ""
+        };
         let open = self.model_menu_open;
-        let trigger = Button::new("model-selector")
-            .ghost()
-            .compact()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .h(px(32.))
-                    .max_w(px(248.))
-                    .min_w_0()
-                    .gap(px(6.))
-                    .px(px(2.))
-                    .child(crate::views::brand::brand_mark(&backend, 16., true, ui))
-                    .child(
+        let trigger = Button::new("model-selector").ghost().compact().child(
+            div()
+                .flex()
+                .items_center()
+                .h(px(32.))
+                .max_w(px(248.))
+                .min_w_0()
+                .gap(px(6.))
+                .px(px(2.))
+                .child(crate::views::brand::brand_mark(&backend, 16., true, ui))
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(if open {
+                            ui.text
+                        } else {
+                            Ui::alpha(ui.text, 0.9)
+                        })
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(trigger_label),
+                )
+                .when(!eff_label.is_empty(), |el| {
+                    el.child(
                         div()
                             .min_w_0()
+                            .flex_shrink(1000.)
                             .text_size(px(12.))
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(if open { ui.text } else { Ui::alpha(ui.text, 0.9) })
+                            .text_color(Ui::alpha(ui.text_muted, 0.7))
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
-                            .child(trigger_label),
+                            .child(eff_label),
                     )
-                    .when(!eff_label.is_empty(), |el| {
-                        el.child(
-                            div()
-                                .min_w_0()
-                                .flex_shrink(1000.)
-                                .text_size(px(12.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(Ui::alpha(ui.text_muted, 0.7))
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .child(eff_label),
-                        )
-                    }),
-            );
+                }),
+        );
         let popover = Popover::new("model-selector-popover")
             .anchor(Anchor::BottomLeft)
             .trigger(trigger)
@@ -368,7 +568,12 @@ impl ComposerView {
                 let ui = Ui::of(cx);
                 let (backends, cur_backend, cur_model, cur_effort) = {
                     let m = app.read(cx);
-                    (m.backends.clone(), m.prefs.backend.clone(), m.effective_model(), m.prefs.effort.clone())
+                    (
+                        m.backends.clone(),
+                        m.prefs.backend.clone(),
+                        m.effective_model(),
+                        m.prefs.effort.clone(),
+                    )
                 };
                 let query = search.read(cx).value().to_lowercase();
                 // The viewed tab: an explicit pick, else the current backend.
@@ -380,7 +585,12 @@ impl ComposerView {
                 let hairline = ui.hairline(0.08);
                 let ink06 = ui.ink(0.06);
                 let ink05 = ui.ink(0.05);
-                let mut col = div().flex().flex_col().w(px(304.)).text_size(px(13.)).text_color(ui.text);
+                let mut col = div()
+                    .flex()
+                    .flex_col()
+                    .w(px(304.))
+                    .text_size(px(13.))
+                    .text_color(ui.text);
 
                 // ── tab strip ────────────────────────────────────────
                 let mut tabs = div()
@@ -391,7 +601,11 @@ impl ComposerView {
                     .gap(px(2.))
                     .border_b_1()
                     .border_color(hairline);
-                let tab = |id: SharedString, on: bool, child: AnyElement, this: Entity<Self>, key: Option<String>| {
+                let tab = |id: SharedString,
+                           on: bool,
+                           child: AnyElement,
+                           this: Entity<Self>,
+                           key: Option<String>| {
                     div()
                         .id(id)
                         .relative()
@@ -410,14 +624,27 @@ impl ComposerView {
                         })
                         .child(child)
                         .when(on, |el| {
-                            el.child(div().absolute().bottom(px(-4.)).left(px(6.)).right(px(6.)).h(px(2.)).rounded(px(1.)).bg(ui.accent))
+                            el.child(
+                                div()
+                                    .absolute()
+                                    .bottom(px(-4.))
+                                    .left(px(6.))
+                                    .right(px(6.))
+                                    .h(px(2.))
+                                    .rounded(px(1.))
+                                    .bg(ui.accent),
+                            )
                         })
                 };
                 let all_on = viewed.is_none();
                 tabs = tabs.child(tab(
                     "tab-all".into(),
                     all_on,
-                    div().size(px(15.)).text_color(if all_on { ui.text } else { ui.text_muted }).child(Icon::from(Lucide::Star)).into_any_element(),
+                    div()
+                        .size(px(15.))
+                        .text_color(if all_on { ui.text } else { ui.text_muted })
+                        .child(Icon::from(Lucide::Star))
+                        .into_any_element(),
                     this.clone(),
                     None,
                 ));
@@ -429,8 +656,14 @@ impl ComposerView {
                         crate::views::brand::brand_mark(&b.id, 16., false, &ui)
                     };
                     tabs = tabs.child(
-                        tab(SharedString::from(format!("tab-{}", b.id)), on, mark, this.clone(), Some(b.id.clone()))
-                            .when(!b.available, |el| el.opacity(0.35)),
+                        tab(
+                            SharedString::from(format!("tab-{}", b.id)),
+                            on,
+                            mark,
+                            this.clone(),
+                            Some(b.id.clone()),
+                        )
+                        .when(!b.available, |el| el.opacity(0.35)),
                     );
                 }
                 col = col.child(tabs);
@@ -445,12 +678,27 @@ impl ComposerView {
                         .gap(px(8.))
                         .border_b_1()
                         .border_color(hairline)
-                        .child(div().size(px(14.)).text_color(ui.text_muted).child(Icon::from(Lucide::Search)))
-                        .child(div().flex_1().min_w_0().child(Input::new(&search).appearance(false).bordered(false))),
+                        .child(
+                            div()
+                                .size(px(14.))
+                                .text_color(ui.text_muted)
+                                .child(Icon::from(Lucide::Search)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(Input::new(&search).appearance(false).bordered(false)),
+                        ),
                 );
 
                 // ── model rows ───────────────────────────────────────
-                let mut list = div().flex().flex_col().py(px(4.)).px(px(4.)).bg(ui.ink(0.02));
+                let mut list = div()
+                    .flex()
+                    .flex_col()
+                    .py(px(4.))
+                    .px(px(4.))
+                    .bg(ui.ink(0.02));
                 let mut any = false;
                 let mut ix = 0usize;
                 let selected_bg = ui.selected_bg();
@@ -466,7 +714,9 @@ impl ComposerView {
                         .filter(|md| {
                             query.is_empty()
                                 || md.to_lowercase().contains(&query)
-                                || b.model_names.get(md).is_some_and(|name| name.to_lowercase().contains(&query))
+                                || b.model_names
+                                    .get(md)
+                                    .is_some_and(|name| name.to_lowercase().contains(&query))
                                 || b.display_name.to_lowercase().contains(&query)
                         })
                         .collect();
@@ -477,8 +727,16 @@ impl ComposerView {
                         let this = this.clone();
                         let (bid, mdl) = (b.id.clone(), md.clone());
                         let available = b.available;
-                        let blurb = b.model_descriptions.get(&md).cloned().unwrap_or_else(|| md.clone());
-                        let hint = if ix < 9 { Some(format!("⌘{}", ix + 1)) } else { None };
+                        let blurb = b
+                            .model_descriptions
+                            .get(&md)
+                            .cloned()
+                            .unwrap_or_else(|| md.clone());
+                        let hint = if ix < 9 {
+                            Some(format!("⌘{}", ix + 1))
+                        } else {
+                            None
+                        };
                         ix += 1;
                         list = list.child(
                             div().pb(px(2.)).child(
@@ -491,18 +749,26 @@ impl ComposerView {
                                     .py(px(if viewed.is_some() { 5. } else { 6. }))
                                     .rounded(px(8.))
                                     .when(selected, |el| el.bg(selected_bg))
-                                    .when(!selected && available, |el| el.hover(move |s| s.bg(ink05)))
+                                    .when(!selected && available, |el| {
+                                        el.hover(move |s| s.bg(ink05))
+                                    })
                                     .when(!available, |el| el.opacity(0.4))
                                     .when(available, |el| {
                                         el.cursor_pointer().on_click(move |_, _, cx| {
-                                            app.update(cx, |a, cx| a.set_backend(&bid, Some(mdl.clone()), cx));
+                                            app.update(cx, |a, cx| {
+                                                a.set_backend(&bid, Some(mdl.clone()), cx)
+                                            });
                                             this.update(cx, |c, cx| {
                                                 c.model_menu_open = false;
                                                 cx.notify();
                                             });
                                         })
                                     })
-                                    .when(viewed.is_none(), |el| el.child(crate::views::brand::brand_mark(&b.id, 13., true, &ui)))
+                                    .when(viewed.is_none(), |el| {
+                                        el.child(crate::views::brand::brand_mark(
+                                            &b.id, 13., true, &ui,
+                                        ))
+                                    })
                                     .child(
                                         div()
                                             .flex_1()
@@ -516,7 +782,12 @@ impl ComposerView {
                                                     .text_size(px(12.5))
                                                     .font_weight(FontWeight::MEDIUM)
                                                     .text_color(ui.text)
-                                                    .child(b.model_names.get(&md).cloned().unwrap_or_else(|| md.clone())),
+                                                    .child(
+                                                        b.model_names
+                                                            .get(&md)
+                                                            .cloned()
+                                                            .unwrap_or_else(|| md.clone()),
+                                                    ),
                                             )
                                             .child(
                                                 div()
@@ -543,20 +814,62 @@ impl ComposerView {
                                                 .child(h),
                                         )
                                     })
-                                    .when(selected, |el| el.child(div().size(px(14.)).flex_shrink_0().text_color(ui.text).child(Icon::from(Lucide::Check)))),
+                                    .when(selected, |el| {
+                                        el.child(
+                                            div()
+                                                .size(px(14.))
+                                                .flex_shrink_0()
+                                                .text_color(ui.text)
+                                                .child(Icon::from(Lucide::Check)),
+                                        )
+                                    }),
                             ),
                         );
                     }
                 }
                 if !any {
                     let loading = app.read(cx).models_loading;
-                    let message = if loading { "Loading models from providers…".into() }
-                        else if !query.is_empty() { format!("No model matches \"{query}\"") }
-                        else { backends.iter().filter(|b| viewed.as_ref().is_none_or(|id|id == &b.id))
-                            .filter_map(|b| b.model_error.as_ref().or(b.reason.as_ref())).cloned().collect::<Vec<_>>().join("\n") };
-                    list = list.child(div().px_2().py_2().text_xs().text_color(ui.text_muted).whitespace_normal().child(if message.is_empty() {"No provider models available.".into()} else {message}));
+                    let message = if loading {
+                        "Loading models from providers…".into()
+                    } else if !query.is_empty() {
+                        format!("No model matches \"{query}\"")
+                    } else {
+                        backends
+                            .iter()
+                            .filter(|b| viewed.as_ref().is_none_or(|id| id == &b.id))
+                            .filter_map(|b| b.model_error.as_ref().or(b.reason.as_ref()))
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    };
+                    list = list.child(
+                        div()
+                            .px_2()
+                            .py_2()
+                            .text_xs()
+                            .text_color(ui.text_muted)
+                            .whitespace_normal()
+                            .child(if message.is_empty() {
+                                "No provider models available.".into()
+                            } else {
+                                message
+                            }),
+                    );
                 }
-                list = list.child(Button::new("refresh-models").ghost().small().label(if app.read(cx).models_loading { "Refreshing models…" } else { "Refresh provider models" }).on_click({let app=app.clone(); move |_,_,cx| app.update(cx,|m,cx|m.refresh_backends(cx))}));
+                list = list.child(
+                    Button::new("refresh-models")
+                        .ghost()
+                        .small()
+                        .label(if app.read(cx).models_loading {
+                            "Refreshing models…"
+                        } else {
+                            "Refresh provider models"
+                        })
+                        .on_click({
+                            let app = app.clone();
+                            move |_, _, cx| app.update(cx, |m, cx| m.refresh_backends(cx))
+                        }),
+                );
                 col = col.child(list);
 
                 // ── reasoning ────────────────────────────────────────
@@ -595,19 +908,57 @@ impl ComposerView {
                                 .px(px(8.))
                                 .rounded(px(8.))
                                 .text_size(px(13.))
-                                .text_color(if !applies { ui.text_faint } else if on { ui.text } else { Ui::alpha(ui.text, 0.9) })
+                                .text_color(if !applies {
+                                    ui.text_faint
+                                } else if on {
+                                    ui.text
+                                } else {
+                                    Ui::alpha(ui.text, 0.9)
+                                })
                                 .when(on && applies, |el| el.bg(selected_bg))
                                 .when(!on && applies, |el| el.hover(move |s| s.bg(selected_bg)))
-                                .when(applies, |el| el.cursor_pointer().on_click(move |_, _, cx| app.update(cx, |a, cx| a.set_effort(e, cx))))
-                                .child(div().flex_1().min_w_0().child(crate::views::brand::effort_label(e)))
-                                .when(e == default_level, |el| {
-                                    el.child(div().flex_shrink_0().text_size(px(10.)).font_weight(FontWeight::SEMIBOLD).text_color(ui.text_muted).child("Default"))
+                                .when(applies, |el| {
+                                    el.cursor_pointer().on_click(move |_, _, cx| {
+                                        app.update(cx, |a, cx| a.set_effort(e, cx))
+                                    })
                                 })
-                                .when(on, |el| el.child(div().size(px(14.)).flex_shrink_0().text_color(ui.text).child(Icon::from(Lucide::Check)))),
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(crate::views::brand::effort_label(e)),
+                                )
+                                .when(e == default_level, |el| {
+                                    el.child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_size(px(10.))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(ui.text_muted)
+                                            .child("Default"),
+                                    )
+                                })
+                                .when(on, |el| {
+                                    el.child(
+                                        div()
+                                            .size(px(14.))
+                                            .flex_shrink_0()
+                                            .text_color(ui.text)
+                                            .child(Icon::from(Lucide::Check)),
+                                    )
+                                }),
                         );
                     }
                     if cur_backend != "claude" {
-                        tray = tray.child(div().px(px(8.)).pt(px(2.)).pb(px(4.)).text_size(px(10.)).text_color(ui.text_faint).child("Applies to new conversations"));
+                        tray = tray.child(
+                            div()
+                                .px(px(8.))
+                                .pt(px(2.))
+                                .pb(px(4.))
+                                .text_size(px(10.))
+                                .text_color(ui.text_faint)
+                                .child("Applies to new conversations"),
+                        );
                     }
                     col = col.child(tray);
                 }
@@ -624,7 +975,11 @@ impl ComposerView {
         let names = m.mcp_names.clone();
         let chosen = m.prefs.mcp_servers.clone();
         let app = self.model.clone();
-        let label = if chosen.is_empty() { "mcp".to_string() } else { format!("mcp: {}", chosen.len()) };
+        let label = if chosen.is_empty() {
+            "mcp".to_string()
+        } else {
+            format!("mcp: {}", chosen.len())
+        };
         Some(
             Button::new("mcp-picker")
                 .ghost()
@@ -641,14 +996,18 @@ impl ComposerView {
                         .child(label),
                 )
                 .dropdown_menu(move |mut menu, _, _| {
-                    menu = menu.label("Attach to the new thread (auto-attach servers are always included)");
+                    menu = menu.label(
+                        "Attach to the new thread (auto-attach servers are always included)",
+                    );
                     for n in &names {
                         let app = app.clone();
                         let name = n.clone();
                         let on = chosen.contains(n);
-                        menu = menu.item(PopupMenuItem::new(n.clone()).checked(on).on_click(move |_, _, cx| {
-                            app.update(cx, |a, cx| a.toggle_mcp_pref(&name, cx));
-                        }));
+                        menu = menu.item(PopupMenuItem::new(n.clone()).checked(on).on_click(
+                            move |_, _, cx| {
+                                app.update(cx, |a, cx| a.toggle_mcp_pref(&name, cx));
+                            },
+                        ));
                     }
                     menu
                 })
@@ -660,9 +1019,11 @@ impl ComposerView {
         let mode = self.model.read(cx).prefs.mode.clone();
         let app = self.model.clone();
         let options = self.model.read(cx).provider_mode_options(cx);
-        let (label, icon, description) = provider_mode_presentation(&mode, &options).unwrap_or_else(|| {
-            let (label, icon, desc) = mode_presentation(&mode); (label.into(), icon, desc.into())
-        });
+        let (label, icon, description) = provider_mode_presentation(&mode, &options)
+            .unwrap_or_else(|| {
+                let (label, icon, desc) = mode_presentation(&mode);
+                (label.into(), icon, desc.into())
+            });
         Button::new("mode-picker")
             .ghost()
             .compact()
@@ -676,76 +1037,189 @@ impl ComposerView {
                     .gap(px(6.))
                     .px(px(6.))
                     .rounded(px(6.))
-                    .bg(Ui::alpha(if mode == "yolo" { ui.warning } else { ui.text }, 0.06))
+                    .bg(Ui::alpha(
+                        if mode == "yolo" { ui.warning } else { ui.text },
+                        0.06,
+                    ))
                     .text_size(px(12.))
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(if mode == "yolo" { ui.warning } else { ui.text_muted })
+                    .text_color(if mode == "yolo" {
+                        ui.warning
+                    } else {
+                        ui.text_muted
+                    })
                     .child(Icon::from(icon).size(px(14.)))
                     .child(label)
                     .child(Icon::from(Lucide::ChevronDown).size(px(12.))),
             )
             .dropdown_menu(move |mut menu, _, _| {
-                menu = menu.min_w(px(320.)).max_w(px(340.)).check_side(Side::Right)
+                menu = menu
+                    .min_w(px(320.))
+                    .max_w(px(340.))
+                    .check_side(Side::Right)
                     .item(PopupMenuItem::label("Approval mode"));
                 for m in APPROVAL_CYCLE {
-                    if m == "yolo" { menu = menu.separator().item(PopupMenuItem::label("Advanced · explicit opt-in")); }
+                    if m == "yolo" {
+                        menu = menu
+                            .separator()
+                            .item(PopupMenuItem::label("Advanced · explicit opt-in"));
+                    }
                     let app = app.clone();
-                    let Some((label, icon, description)) = provider_mode_presentation(m, &options) else { continue; };
-                    menu = menu.item(PopupMenuItem::element(move |_, cx| {
-                        let ui = Ui::of(cx);
-                        div().flex().items_start().gap(px(10.)).py(px(6.)).w(px(260.))
-                            .child(div().mt(px(2.)).size(px(16.)).text_color(if m == "yolo" { ui.warning } else { ui.text_muted })
-                                .child(Icon::from(icon).size(px(16.))))
-                            .child(div().flex_1().min_w_0().flex().flex_col().gap(px(3.))
-                                .child(div().text_size(px(12.)).line_height(px(16.)).font_weight(FontWeight::MEDIUM)
-                                    .text_color(if m == "yolo" { ui.warning } else { ui.text }).child(label.clone()))
-                                .child(div().text_size(px(11.)).line_height(px(15.)).text_color(ui.text_muted)
-                                    .whitespace_normal().child(description.clone())))
-                    }).checked(m == mode).on_click(move |_, window, cx| {
-                        super::approval_mode::request(app.clone(), m, window, cx);
-                    }));
+                    let Some((label, icon, description)) = provider_mode_presentation(m, &options)
+                    else {
+                        continue;
+                    };
+                    menu = menu.item(
+                        PopupMenuItem::element(move |_, cx| {
+                            let ui = Ui::of(cx);
+                            div()
+                                .flex()
+                                .items_start()
+                                .gap(px(10.))
+                                .py(px(6.))
+                                .w(px(260.))
+                                .child(
+                                    div()
+                                        .mt(px(2.))
+                                        .size(px(16.))
+                                        .text_color(if m == "yolo" {
+                                            ui.warning
+                                        } else {
+                                            ui.text_muted
+                                        })
+                                        .child(Icon::from(icon).size(px(16.))),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(3.))
+                                        .child(
+                                            div()
+                                                .text_size(px(12.))
+                                                .line_height(px(16.))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(if m == "yolo" {
+                                                    ui.warning
+                                                } else {
+                                                    ui.text
+                                                })
+                                                .child(label.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .line_height(px(15.))
+                                                .text_color(ui.text_muted)
+                                                .whitespace_normal()
+                                                .child(description.clone()),
+                                        ),
+                                )
+                        })
+                        .checked(m == mode)
+                        .on_click(move |_, window, cx| {
+                            super::approval_mode::request(app.clone(), m, window, cx);
+                        }),
+                    );
                 }
-                menu.separator().item(PopupMenuItem::label("Shift+Tab cycles available modes"))
+                menu.separator()
+                    .item(PopupMenuItem::label("Shift+Tab cycles available modes"))
             })
             .into_any_element()
     }
-
 }
 
 /// Keep host approval enforcement while showing the connected provider's actual mode names.
-pub(crate) fn provider_mode_presentation(mode: &str, catalog: &serde_json::Value) -> Option<(String, Lucide, String)> {
+pub(crate) fn provider_mode_presentation(
+    mode: &str,
+    catalog: &serde_json::Value,
+) -> Option<(String, Lucide, String)> {
     let (label, icon, description) = mode_presentation(mode);
-    let Some(options) = catalog.get("options").and_then(|v|v.as_array()) else {
-        return Some((label.into(), icon, format!("{description} Provider mode is resolved on connection.")));
+    let Some(options) = catalog.get("options").and_then(|v| v.as_array()) else {
+        return Some((
+            label.into(),
+            icon,
+            format!("{description} Provider mode is resolved on connection."),
+        ));
     };
     let candidates: &[&str] = match mode {
         "plan" => &["plan", "planning", "read-only", "readonly"],
         "auto" => &["auto", "acceptEdits", "accept_edits", "agent"],
-        "yolo" => &["always_approve", "alwaysallow", "always_allow", "bypassPermissions", "yolo", "dontAsk", "agent-full-access"],
+        "yolo" => &[
+            "always_approve",
+            "alwaysallow",
+            "always_allow",
+            "bypassPermissions",
+            "yolo",
+            "dontAsk",
+            "agent-full-access",
+        ],
         _ => &["default", "normal", "ask", "code", "agent"],
     };
-    let find = |id: &str| options.iter().find(|o|o.get("value").and_then(|v|v.as_str()).is_some_and(|v|v.eq_ignore_ascii_case(id)));
-    let current = if mode == "auto" { catalog.get("auto_value").or_else(|| catalog.get("current")) } else { catalog.get("current") }.and_then(|v|v.as_str());
-    let option = current.filter(|id| candidates.iter().any(|c|c.eq_ignore_ascii_case(id))).and_then(find)
-        .or_else(||candidates.iter().find_map(|id|find(id)))?;
-    let native = option.get("name").and_then(|v|v.as_str()).unwrap_or(label);
-    let desc = option.get("description").and_then(|v|v.as_str()).unwrap_or(description);
+    let find = |id: &str| {
+        options.iter().find(|o| {
+            o.get("value")
+                .and_then(|v| v.as_str())
+                .is_some_and(|v| v.eq_ignore_ascii_case(id))
+        })
+    };
+    let current = if mode == "auto" {
+        catalog.get("auto_value").or_else(|| catalog.get("current"))
+    } else {
+        catalog.get("current")
+    }
+    .and_then(|v| v.as_str());
+    let option = current
+        .filter(|id| candidates.iter().any(|c| c.eq_ignore_ascii_case(id)))
+        .and_then(find)
+        .or_else(|| candidates.iter().find_map(|id| find(id)))?;
+    let native = option.get("name").and_then(|v| v.as_str()).unwrap_or(label);
+    let desc = option
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or(description);
     // Full access remains an explicit opt-in regardless of native terminology.
-    let value = option.get("value").and_then(|v|v.as_str()).unwrap_or_default();
-    let display = if mode == "yolo" { "Full access" }
-        else if mode == "ask" && value == "agent" { "Ask first" }
-        else if mode == "plan" { "Plan" }
-        else { native };
+    let value = option
+        .get("value")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let display = if mode == "yolo" {
+        "Full access"
+    } else if mode == "ask" && value == "agent" {
+        "Ask first"
+    } else if mode == "plan" {
+        "Plan"
+    } else {
+        native
+    };
     Some((display.into(), icon, format!("{desc} {description}")))
 }
 
 /// UI names are separate from the backend's stable approval-mode identifiers.
 fn mode_presentation(mode: &str) -> (&'static str, Lucide, &'static str) {
     match mode {
-        "plan" => ("Plan", Lucide::BookOpen, "Investigate and propose changes before execution."),
-        "auto" => ("Auto", Lucide::Zap, "Use the agent’s automatic approval policy."),
-        "yolo" => ("Full access", Lucide::ShieldAlert, "Approve tools automatically. Deny rules still apply."),
-        _ => ("Ask first", Lucide::ShieldCheck, "Request approval before running tools."),
+        "plan" => (
+            "Plan",
+            Lucide::BookOpen,
+            "Investigate and propose changes before execution.",
+        ),
+        "auto" => (
+            "Auto",
+            Lucide::Zap,
+            "Use the agent’s automatic approval policy.",
+        ),
+        "yolo" => (
+            "Full access",
+            Lucide::ShieldAlert,
+            "Approve tools automatically. Deny rules still apply.",
+        ),
+        _ => (
+            "Ask first",
+            Lucide::ShieldCheck,
+            "Request approval before running tools.",
+        ),
     }
 }
 
@@ -767,11 +1241,31 @@ impl Render for ComposerView {
                     .and_then(|w| std::path::Path::new(w).file_name())
                     .map(|s| s.to_string_lossy().to_string())
             });
-            (busy, m.starting, branch, m.prefs.worktree && !m.prefs.temporary, t.is_some())
+            (
+                busy,
+                m.starting,
+                branch,
+                m.prefs.worktree && !m.prefs.temporary,
+                t.is_some(),
+            )
         };
         let new_target = self.model.read(cx).active_workspace.is_none();
-        let location_label = self.model.read(cx).active_workspace.as_deref().and_then(|id| self.model.read(cx).workspaces.iter().find(|w| w.id == id)).map(|w| if w.inline { "Questions · files unchanged".into() } else { w.name.clone() }).unwrap_or_else(|| "New conversation".into());
-        let has_text = !self.input.read(cx).value().trim().is_empty() || !self.attachments.is_empty();
+        let location_label = self
+            .model
+            .read(cx)
+            .active_workspace
+            .as_deref()
+            .and_then(|id| self.model.read(cx).workspaces.iter().find(|w| w.id == id))
+            .map(|w| {
+                if w.inline {
+                    "Questions · files unchanged".into()
+                } else {
+                    w.name.clone()
+                }
+            })
+            .unwrap_or_else(|| "New conversation".into());
+        let has_text =
+            !self.input.read(cx).value().trim().is_empty() || !self.attachments.is_empty();
         let app = self.model.clone();
         let (solid, on_solid, danger) = (ui.solid, ui.on_solid, ui.danger);
 
@@ -807,11 +1301,21 @@ impl Render for ComposerView {
                         .hover(|s| s.opacity(0.85))
                         .on_click(cx.listener(|this, _, window, cx| this.send(window, cx)))
                 })
-                .child(div().size(px(14.)).text_color(on_solid).child(Icon::from(Lucide::ArrowUp)))
+                .child(
+                    div()
+                        .size(px(14.))
+                        .text_color(on_solid)
+                        .child(Icon::from(Lucide::ArrowUp)),
+                )
                 .into_any_element()
         };
 
-        let drag_border = if self.drag_over { ui.accent } else { ui.pill_border() };
+        let drag_border = if self.drag_over {
+            ui.accent
+        } else {
+            ui.pill_border()
+        };
+        let slash_menu = self.slash_menu(&ui, cx);
         let tray = self.tray(&ui, cx);
         let model_picker = self.model_selector(&ui, cx);
         let mode_picker = self.mode_picker(&ui, cx);
@@ -834,6 +1338,32 @@ impl Render for ComposerView {
                 this.model.update(cx, |m, cx| m.cycle_mode(cx));
                 cx.stop_propagation();
             }))
+            .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                if !this.input.read(cx).focus_handle(cx).is_focused(window)
+                    || ev.keystroke.modifiers.shift
+                {
+                    return;
+                }
+                let commands = this.slash_matches(cx);
+                if commands.is_empty() {
+                    return;
+                }
+                match ev.keystroke.key.as_str() {
+                    "down" => this.slash_index = (this.slash_index + 1) % commands.len(),
+                    "up" => {
+                        this.slash_index = (this.slash_index + commands.len() - 1) % commands.len()
+                    }
+                    "enter" | "tab" => {
+                        let command = &commands[this.slash_index.min(commands.len() - 1)];
+                        this.choose_slash(&command.name, window, cx);
+                    }
+                    "escape" => this.slash_dismissed = true,
+                    _ => return,
+                }
+                cx.stop_propagation();
+                window.prevent_default();
+                cx.notify();
+            }))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
                 let k = &ev.keystroke;
                 if k.modifiers.platform && k.key == "v" && this.paste_from_clipboard(cx) {
@@ -846,6 +1376,7 @@ impl Render for ComposerView {
                     .max_w(px(Layout::COMPOSER_MAX))
                     .flex()
                     .flex_col()
+                    .when_some(slash_menu, |el, menu| el.child(menu))
                     .child(
                         div()
                             .id("composer-frame")
@@ -881,7 +1412,11 @@ impl Render for ComposerView {
                                             .py(px(5.))
                                             .text_size(px(14.))
                                             .line_height(px(22.75))
-                                            .child(Textarea::new(&self.input).appearance(false).bordered(false)),
+                                            .child(
+                                                Textarea::new(&self.input)
+                                                    .appearance(false)
+                                                    .bordered(false),
+                                            ),
                                     )
                                     .child(
                                         div()
@@ -904,8 +1439,14 @@ impl Render for ComposerView {
                                                     .text_color(ui.text_muted)
                                                     .cursor_pointer()
                                                     .hover(move |s| s.bg(attach_hover))
-                                                    .on_click(cx.listener(|this, _, _, cx| this.pick_files(cx)))
-                                                    .child(div().size(px(16.)).child(Icon::from(Lucide::Paperclip))),
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.pick_files(cx)
+                                                    }))
+                                                    .child(
+                                                        div()
+                                                            .size(px(16.))
+                                                            .child(Icon::from(Lucide::Paperclip)),
+                                                    ),
                                             )
                                             .child(div().w(px(6.)))
                                             .child(send_button),
@@ -920,23 +1461,63 @@ impl Render for ComposerView {
                             .gap(px(Layout::SPACE_XS))
                             .px(px(10.))
                             .child(footer_label(Lucide::MessageCircle, location_label, &ui))
-                            .when(worktree_on, |el| el.child(footer_label(Lucide::GitBranch, "Isolated branch".into(), &ui)))
-                            .when_some(branch, |el, b| el.child(footer_label(Lucide::GitBranch, b, &ui)))
+                            .when(worktree_on, |el| {
+                                el.child(footer_label(
+                                    Lucide::GitBranch,
+                                    "Isolated branch".into(),
+                                    &ui,
+                                ))
+                            })
+                            .when_some(branch, |el, b| {
+                                el.child(footer_label(Lucide::GitBranch, b, &ui))
+                            })
                             .when(!has_thread && new_target, |el| {
                                 el.child(
                                     Button::new("conversation-intent")
-                                        .ghost().small().compact()
-                                        .label(if worktree_on { "Make changes" } else { "Ask a question" })
+                                        .ghost()
+                                        .small()
+                                        .compact()
+                                        .label(if worktree_on {
+                                            "Make changes"
+                                        } else {
+                                            "Ask a question"
+                                        })
                                         .dropdown_caret(true)
                                         .dropdown_menu(move |menu, _, _| {
-                                            let questions = app.clone(); let changes = app.clone();
-                                            menu.item(PopupMenuItem::new("Ask a question — leave files unchanged").on_click(move |_, _, cx| questions.update(cx, |m, cx| m.set_new_intent(true, cx))))
-                                                .item(PopupMenuItem::new("Make changes — isolated branch").on_click(move |_, _, cx| changes.update(cx, |m, cx| m.set_new_intent(false, cx))))
-                                        })
+                                            let questions = app.clone();
+                                            let changes = app.clone();
+                                            menu.item(
+                                                PopupMenuItem::new(
+                                                    "Ask a question — leave files unchanged",
+                                                )
+                                                .on_click(move |_, _, cx| {
+                                                    questions.update(cx, |m, cx| {
+                                                        m.set_new_intent(true, cx)
+                                                    })
+                                                }),
+                                            )
+                                            .item(
+                                                PopupMenuItem::new(
+                                                    "Make changes — isolated branch",
+                                                )
+                                                .on_click(move |_, _, cx| {
+                                                    changes.update(cx, |m, cx| {
+                                                        m.set_new_intent(false, cx)
+                                                    })
+                                                }),
+                                            )
+                                        }),
                                 )
                             })
                             .child(div().flex_1())
-                            .when(starting, |el| el.child(div().text_size(px(11.)).text_color(ui.text_faint).child("starting agent…")))
+                            .when(starting, |el| {
+                                el.child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(ui.text_faint)
+                                        .child("starting agent…"),
+                                )
+                            })
                             .children(context_ring),
                     ),
             )
@@ -944,7 +1525,12 @@ impl Render for ComposerView {
 }
 
 fn format_for_path(p: &std::path::Path) -> Option<ImageFormat> {
-    match p.extension()?.to_string_lossy().to_ascii_lowercase().as_str() {
+    match p
+        .extension()?
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "png" => Some(ImageFormat::Png),
         "jpg" | "jpeg" => Some(ImageFormat::Jpeg),
         "webp" => Some(ImageFormat::Webp),
@@ -1021,7 +1607,14 @@ fn footer_label(icon: Lucide, text: String, ui: &Ui) -> AnyElement {
         .font_weight(FontWeight::MEDIUM)
         .text_color(color)
         .child(div().size(px(12.)).flex_shrink_0().child(Icon::from(icon)))
-        .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(text))
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(text),
+        )
         .into_any_element()
 }
 
@@ -1033,8 +1626,73 @@ mod provider_mode_tests {
         let options = serde_json::json!({"current":"default","auto_value":"acceptEdits","options":[
             {"value":"default","name":"Manual"}, {"value":"acceptEdits","name":"Accept edits"}, {"value":"plan","name":"Plan"}
         ]});
-        assert_eq!(provider_mode_presentation("auto", &options).unwrap().0, "Accept edits");
-        assert_eq!(provider_mode_presentation("ask", &options).unwrap().0, "Manual");
+        assert_eq!(
+            provider_mode_presentation("auto", &options).unwrap().0,
+            "Accept edits"
+        );
+        assert_eq!(
+            provider_mode_presentation("ask", &options).unwrap().0,
+            "Manual"
+        );
         assert!(provider_mode_presentation("yolo", &options).is_none());
+    }
+}
+
+#[derive(Clone)]
+struct SlashCommand {
+    name: String,
+    description: String,
+    hint: Option<String>,
+}
+fn slash_query(text: &str) -> Option<&str> {
+    let query = text.strip_prefix('/')?;
+    (!query.chars().any(char::is_whitespace)).then_some(query)
+}
+fn slash_matches(text: &str, catalog: &serde_json::Value) -> Vec<SlashCommand> {
+    let Some(query) = slash_query(text).map(str::to_lowercase) else {
+        return Vec::new();
+    };
+    catalog
+        .get("commands")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| {
+            let name = v.get("name")?.as_str()?.trim_start_matches('/');
+            if name.is_empty() || name.chars().any(char::is_whitespace) {
+                return None;
+            }
+            let description = v.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            if !name.to_lowercase().contains(&query) && !description.to_lowercase().contains(&query)
+            {
+                return None;
+            }
+            Some(SlashCommand {
+                name: name.into(),
+                description: description.into(),
+                hint: v
+                    .pointer("/input/hint")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod slash_tests {
+    use super::slash_matches;
+    #[test]
+    fn filters_only_provider_commands_at_start_of_draft() {
+        let catalog = serde_json::json!({"commands":[{"name":"compact","description":"Summarize context","input":{"hint":"Optional focus"}}, {"name":"review","description":"Review changes"}]});
+        assert_eq!(slash_matches("/COM", &catalog)[0].name, "compact");
+        assert_eq!(slash_matches("/", &catalog).len(), 2);
+        assert_eq!(
+            slash_matches("/com", &catalog)[0].hint.as_deref(),
+            Some("Optional focus")
+        );
+        assert!(slash_matches("explain /compact", &catalog).is_empty());
+        assert!(slash_matches("/compact focus", &catalog).is_empty());
+        assert!(slash_matches("/", &serde_json::Value::Null).is_empty());
     }
 }

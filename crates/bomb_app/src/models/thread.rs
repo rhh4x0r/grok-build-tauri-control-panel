@@ -19,6 +19,7 @@ pub struct ThreadModel {
     /// Transcript rows have been loaded from SQLite at least once.
     pub hydrated: bool,
     pub provider_modes: serde_json::Value,
+    pub provider_commands: serde_json::Value,
     pub loading: bool,
     /// Markdown render state per entry id; the streaming tail gets `push_str`.
     pub markdown: HashMap<u64, Entity<TextViewState>>,
@@ -43,6 +44,7 @@ impl ThreadModel {
             thread: Thread::new(),
             hydrated: false,
             provider_modes: serde_json::Value::Null,
+            provider_commands: serde_json::Value::Null,
             loading: false,
             markdown: HashMap::new(),
             images: HashMap::new(),
@@ -98,7 +100,9 @@ impl ThreadModel {
                 e.images
                     .iter()
                     .filter_map(|a| {
-                        let bytes = base64::engine::general_purpose::STANDARD.decode(&a.data).ok()?;
+                        let bytes = base64::engine::general_purpose::STANDARD
+                            .decode(&a.data)
+                            .ok()?;
                         let format = match a.mime_type.as_str() {
                             "image/png" => ImageFormat::Png,
                             "image/jpeg" => ImageFormat::Jpeg,
@@ -133,10 +137,19 @@ impl ThreadModel {
 
     pub fn apply(&mut self, ev: &ControlEvent, cx: &mut Context<Self>) -> Vec<Change> {
         if let ControlEvent::Raw { payload, .. } = ev {
-            if payload.get("channel").and_then(|v|v.as_str()) == Some("provider_modes") {
-                if payload.get("backend") != self.provider_modes.get("backend") { self.provider_modes = payload.clone(); }
-                else if let (Some(target), Some(source)) = (self.provider_modes.as_object_mut(), payload.as_object()) {
-                    for (key, value) in source { target.insert(key.clone(), value.clone()); }
+            if payload.get("channel").and_then(|v| v.as_str()) == Some("provider_commands") {
+                self.provider_commands = payload.clone();
+                cx.notify();
+            }
+            if payload.get("channel").and_then(|v| v.as_str()) == Some("provider_modes") {
+                if payload.get("backend") != self.provider_modes.get("backend") {
+                    self.provider_modes = payload.clone();
+                } else if let (Some(target), Some(source)) =
+                    (self.provider_modes.as_object_mut(), payload.as_object())
+                {
+                    for (key, value) in source {
+                        target.insert(key.clone(), value.clone());
+                    }
                 }
                 cx.notify();
             }
@@ -166,9 +179,7 @@ impl ThreadModel {
                 Change::Updated(index) => {
                     // A rewritten text body must be re-parsed, not appended.
                     if let Some(e) = self.thread.entries.get(*index) {
-                        if let (Body::Text(t), Some(state)) =
-                            (&e.body, self.markdown.get(&e.id))
-                        {
+                        if let (Body::Text(t), Some(state)) = (&e.body, self.markdown.get(&e.id)) {
                             if matches!(e.role, Role::Agent | Role::Thought | Role::Plan) {
                                 let t = t.clone();
                                 state.update(cx, |s, cx| s.set_text(&t, cx));
@@ -206,22 +217,20 @@ impl ThreadModel {
             return;
         }
         self.ticking = true;
-        self.tick_task = Some(cx.spawn(async move |weak, cx| {
-            loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
-                let keep = weak
-                    .update(cx, |t, cx| {
-                        let active = t.thread.presence.turn_active();
-                        if !active {
-                            t.ticking = false;
-                        }
-                        cx.notify();
-                        active
-                    })
-                    .unwrap_or(false);
-                if !keep {
-                    break;
-                }
+        self.tick_task = Some(cx.spawn(async move |weak, cx| loop {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            let keep = weak
+                .update(cx, |t, cx| {
+                    let active = t.thread.presence.turn_active();
+                    if !active {
+                        t.ticking = false;
+                    }
+                    cx.notify();
+                    active
+                })
+                .unwrap_or(false);
+            if !keep {
+                break;
             }
         }));
     }

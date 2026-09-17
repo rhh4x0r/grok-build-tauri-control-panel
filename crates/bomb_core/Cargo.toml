@@ -29,5 +29,8 @@ tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
+portable-pty = "0.9"
+vt100 = "0.16"
+
 [dev-dependencies]
 tempfile.workspace = true

@@ -5,6 +5,7 @@
 mod client;
 mod error;
 mod messages;
+mod provider_paths;
 mod terminals;
 mod transport;
 

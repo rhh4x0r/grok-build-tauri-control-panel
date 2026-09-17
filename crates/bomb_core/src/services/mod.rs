@@ -1,7 +1,7 @@
 //! Service layer: every former Tauri command as a plain async fn over `&AppState`.
 
-pub mod workspaces;
 pub mod project_overview;
+pub mod workspaces;
 
 use std::path::PathBuf;
 
@@ -13,14 +13,16 @@ use uuid::Uuid;
 use grok_config::{DiscoveryReport, GrokConfig};
 use grok_control_core::{AgentHandleSnapshot, SpawnOptions};
 use grok_diff::{DiffCapture, DiffEngine, DiffSummary};
+use grok_events::ControlEvent;
 use grok_extensions::ExtensionEntry;
 use grok_mcp::{
     AddMcpRequest, DoctorReport, McpCatalogEntry, McpCredential, McpServerConfigExt, McpToolInfo,
     UpdateMcpRequest,
 };
 use grok_memory::MemoryEntry;
-use grok_permissions::{builtin_presets, PermissionController, PermissionDecision, PermissionPreset};
-use grok_events::ControlEvent;
+use grok_permissions::{
+    builtin_presets, PermissionController, PermissionDecision, PermissionPreset,
+};
 use grok_persistence::{SessionRecord, ThreadDto, TranscriptEntry};
 use grok_scheduler::{ScheduleKind, ScheduledJob};
 use grok_worktree::{CreateWorktreeRequest, WorktreeInfo};
@@ -174,9 +176,7 @@ pub async fn submit_grok_login_code(
     state.login.submit_code(&code).await.map_err(err)
 }
 
-pub async fn open_grok_login_url(
-    state: &AppState,
-) -> Result<Option<String>, String> {
+pub async fn open_grok_login_url(state: &AppState) -> Result<Option<String>, String> {
     state.login.open_login_url().await.map_err(err)
 }
 
@@ -250,24 +250,14 @@ pub async fn get_runtime_status(state: &AppState) -> Result<RuntimeStatus, Strin
             ),
         )
     } else if !auth.logged_in && !xai {
-        (
-            false,
-            "Not signed in — use Log in with Grok.".into(),
-        )
+        (false, "Not signed in — use Log in with Grok.".into())
     } else {
-        let who = auth
-            .email
-            .clone()
-            .unwrap_or_else(|| "Grok".into());
+        let who = auth.email.clone().unwrap_or_else(|| "Grok".into());
         (
             true,
-            format!(
-                "Ready · {who} · {}",
-                version.as_deref().unwrap_or("?")
-            ),
+            format!("Ready · {who} · {}", version.as_deref().unwrap_or("?")),
         )
     };
-
 
     Ok(RuntimeStatus {
         grok_binary: binary.display().to_string(),
@@ -313,7 +303,10 @@ pub async fn create_project_folder(
     let path = parent_dir.join(&slug);
     let created = if path.exists() {
         if !path.is_dir() {
-            return Err(format!("path exists and is not a directory: {}", path.display()));
+            return Err(format!(
+                "path exists and is not a directory: {}",
+                path.display()
+            ));
         }
         false
     } else {
@@ -418,7 +411,9 @@ pub async fn start_session(
     let mut workspace_record = None;
     if let Some(wid) = opts.workspace_id.clone() {
         let w = workspaces::workspace(state, &wid)?;
-        if w.archived_at.is_some() { return Err("This thread is archived".into()); }
+        if w.archived_at.is_some() {
+            return Err("This thread is archived".into());
+        }
         workspaces::ensure_idle(state, &w)?;
         spawn_cwd = w.path.clone();
         opts.project_root = Some(w.project_root.clone());
@@ -428,47 +423,104 @@ pub async fn start_session(
         workspace_record = Some(w);
     } else if opts.mode == grok_control_core::AgentMode::Acp {
         let root = std::path::Path::new(&cwd);
-        if !root.is_absolute() || !root.is_dir() { return Err("Choose an existing absolute project folder".into()); }
+        if !root.is_absolute() || !root.is_dir() {
+            return Err("Choose an existing absolute project folder".into());
+        }
         let inline = !opts.isolate_worktree;
         if !inline && !grok_worktree::is_git_repo(root).await {
             return Err("Create a Git repository before starting a thread, or choose Inline to ask read-only questions".into());
         }
-        let base = workspaces::workspace_base(root).await.unwrap_or_else(|_| "HEAD".into());
-        let name = opts.prompt.as_deref().map(prompt_slug).filter(|s| !s.is_empty()).unwrap_or_else(|| "New thread".into());
+        let base = workspaces::workspace_base(root)
+            .await
+            .unwrap_or_else(|_| "HEAD".into());
+        let name = opts
+            .prompt
+            .as_deref()
+            .map(prompt_slug)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "New thread".into());
         let branch;
         if !inline {
-            let slug: String = name.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).take(35).collect();
-            let wt = state.worktrees.create(root, CreateWorktreeRequest {
-                name: format!("{}-{}", slug.trim_matches('-'), &id.to_string()[..8]), base_ref: Some(base.clone()), prefer_grok_cli: false,
-            }).await.map_err(|e| format!("Could not create thread: {e}. The project folder was not changed."))?;
+            let slug: String = name
+                .to_lowercase()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .take(35)
+                .collect();
+            let wt = state
+                .worktrees
+                .create(
+                    root,
+                    CreateWorktreeRequest {
+                        name: format!("{}-{}", slug.trim_matches('-'), &id.to_string()[..8]),
+                        base_ref: Some(base.clone()),
+                        prefer_grok_cli: false,
+                    },
+                )
+                .await
+                .map_err(|e| {
+                    format!("Could not create thread: {e}. The project folder was not changed.")
+                })?;
             spawn_cwd = wt.path.display().to_string();
             branch = wt.branch.unwrap_or_default();
             opts.worktree = Some(wt.name);
-            isolation_note = Some(format!("Thread created · {branch} · automatic checkpoints on"));
+            isolation_note = Some(format!(
+                "Thread created · {branch} · automatic checkpoints on"
+            ));
         } else {
-            branch = state.worktrees.current_branch(root).await.unwrap_or_default();
+            branch = state
+                .worktrees
+                .current_branch(root)
+                .await
+                .unwrap_or_default();
             opts.read_only = true;
         }
         opts.project_root = Some(cwd.clone());
-        let existing = state.persistence.list_workspaces().map_err(err)?.into_iter().find(|w| w.path == spawn_cwd);
+        let existing = state
+            .persistence
+            .list_workspaces()
+            .map_err(err)?
+            .into_iter()
+            .find(|w| w.path == spawn_cwd);
         workspace_record = Some(existing.unwrap_or(grok_persistence::WorkspaceRecord {
-            id: Uuid::new_v4().to_string(), project_root: cwd.clone(), name: if inline { "Inline (read-only)".into() } else { name },
-            path: spawn_cwd.clone(), branch, base_ref: base, created_at: Utc::now().to_rfc3339(), archived_at: None, inline, threads: vec![],
+            id: Uuid::new_v4().to_string(),
+            project_root: cwd.clone(),
+            name: if inline {
+                "Inline (read-only)".into()
+            } else {
+                name
+            },
+            path: spawn_cwd.clone(),
+            branch,
+            base_ref: base,
+            created_at: Utc::now().to_rfc3339(),
+            archived_at: None,
+            inline,
+            threads: vec![],
         }));
     }
-    if opts.read_only { enforce_inline(&mut opts); }
-    if opts.mode == grok_control_core::AgentMode::Acp { opts.prompt = None; }
+    if opts.read_only {
+        enforce_inline(&mut opts);
+    }
+    if opts.mode == grok_control_core::AgentMode::Acp {
+        opts.prompt = None;
+    }
 
     // Durable memory rides along: global notes + this project's notes are
     // injected with the thread's first prompt.
     let memory_context = build_memory_context(state, &requested_cwd).await;
-    let source_id = opts.source_thread.as_deref().and_then(|id| Uuid::parse_str(id).ok());
+    let source_id = opts
+        .source_thread
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok());
     let connect_opts = grok_control_core::ConnectOpts {
         resume_acp_session_id: None,
         transcript_context: source_id.and_then(|source| build_transcript_context(state, source)),
         memory_context,
     };
-    if let Some(w) = &workspace_record { state.persistence.save_workspace(w).map_err(err)?; }
+    if let Some(w) = &workspace_record {
+        state.persistence.save_workspace(w).map_err(err)?;
+    }
     state
         .registry
         .spawn_agent_preallocated(id, &spawn_cwd, opts, connect_opts)
@@ -498,16 +550,16 @@ pub async fn start_session(
     persist_session(state, id).await;
     if let Some(source) = source_id {
         for entry in state.persistence.transcript_entries(source).map_err(err)? {
-            let _ = state.persistence.append_message(id, &entry.role, entry.body, Utc::now());
+            let _ = state
+                .persistence
+                .append_message(id, &entry.role, entry.body, Utc::now());
         }
     }
     if let Some(w) = workspace_record {
         state.persistence.save_workspace(&w).map_err(err)?;
         state.persistence.attach_workspace(id, &w.id).map_err(err)?;
     }
-    Ok(SessionIdResponse {
-        id: id.to_string(),
-    })
+    Ok(SessionIdResponse { id: id.to_string() })
 }
 
 pub async fn start_mock_session(
@@ -517,9 +569,7 @@ pub async fn start_mock_session(
     let id = state.registry.spawn_mock(&cwd).await.map_err(err)?;
     let _ = state.persistence.set_kv("last_cwd", &cwd);
     persist_session(state, id).await;
-    Ok(SessionIdResponse {
-        id: id.to_string(),
-    })
+    Ok(SessionIdResponse { id: id.to_string() })
 }
 
 pub async fn list_sessions(
@@ -533,10 +583,7 @@ pub async fn list_threads(state: &AppState) -> Result<Vec<ThreadDto>, String> {
     Ok(build_thread_list(state))
 }
 
-pub async fn get_session(
-    state: &AppState,
-    id: String,
-) -> Result<AgentHandleSnapshot, String> {
+pub async fn get_session(state: &AppState, id: String) -> Result<AgentHandleSnapshot, String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
     state.registry.get_snapshot(id).map_err(err)
 }
@@ -564,22 +611,37 @@ pub struct ImageInput {
 /// threads answer `true` so the composer never blocks attaching pre-emptively.
 pub async fn agent_supports_images(state: &AppState, id: String) -> Result<bool, String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
-    Ok(state.registry.image_prompts_supported(id).await.unwrap_or(true))
+    Ok(state
+        .registry
+        .image_prompts_supported(id)
+        .await
+        .unwrap_or(true))
 }
 
 #[allow(clippy::too_many_arguments)]
 /// Block until a freshly spawned session has finished connecting (Idle) or
 /// died (Failed). `send_prompt` refuses a session that is still Starting, so
 /// the new-thread flow calls this between `start_session` and the first send.
-pub async fn wait_until_idle(state: &AppState, id: &str, timeout: std::time::Duration) -> Result<(), String> {
+pub async fn wait_until_idle(
+    state: &AppState,
+    id: &str,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
     use grok_events::SessionStatus;
     let id = Uuid::parse_str(id).map_err(err)?;
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        let status = state.registry.get_snapshot(id).map_err(err)?.metadata.status;
+        let status = state
+            .registry
+            .get_snapshot(id)
+            .map_err(err)?
+            .metadata
+            .status;
         match status {
             SessionStatus::Starting => {}
-            SessionStatus::Failed => return Err("the agent failed to start — check Services".into()),
+            SessionStatus::Failed => {
+                return Err("the agent failed to start — check Services".into())
+            }
             _ if state.registry.is_ready(id) => return Ok(()),
             _ => {}
         }
@@ -622,7 +684,9 @@ pub async fn send_prompt(
     let _gate = state.workspace_gate.lock().await;
     let workspace = state.persistence.workspace_for_session(id).map_err(err)?;
     if let Some(w) = &workspace {
-        if w.archived_at.is_some() { return Err("This thread is archived".into()); }
+        if w.archived_at.is_some() {
+            return Err("This thread is archived".into());
+        }
         workspaces::ensure_idle(state, w)?;
     }
     let images = images.unwrap_or_default();
@@ -644,7 +708,10 @@ pub async fn send_prompt(
             .as_deref()
             .is_some_and(|m| !m.eq_ignore_ascii_case(&cur.model) && cur.model != "mock");
         let needs_read_only = workspace.as_ref().is_some_and(|w| w.inline) && !cur.read_only;
-        if needs_read_only || backend_changed || (model_changed && cur.mode == grok_control_core::AgentMode::Acp) {
+        if needs_read_only
+            || backend_changed
+            || (model_changed && cur.mode == grok_control_core::AgentMode::Acp)
+        {
             persist_session(state, id).await;
             state.registry.retire_session(id).await.map_err(err)?;
             resume_saved_session(
@@ -724,11 +791,18 @@ pub async fn send_prompt(
         });
     }
 
-    if let Some(effort) = effort { state.registry.set_effort(id, &effort).await.map_err(err)?; }
+    if let Some(effort) = effort {
+        state.registry.set_effort(id, &effort).await.map_err(err)?;
+    }
     if let Some(enabled) = fast_mode {
         if let Some((option, values, _)) = state.registry.speed_option(id).await.map_err(err)? {
             let value = speed_value(&values, enabled).ok_or_else(|| "The connected agent does not offer the selected speed. Refresh provider models and try again.".to_string())?;
-            if !state.registry.set_speed_option(id, &option, &value).await.map_err(err)? {
+            if !state
+                .registry
+                .set_speed_option(id, &option, &value)
+                .await
+                .map_err(err)?
+            {
                 return Err("The agent could not apply the selected speed. Refresh provider models and try again.".into());
             }
         } else if enabled {
@@ -744,7 +818,10 @@ pub async fn send_prompt(
         })
         .collect();
     let mut completion = state.event_bus.subscribe();
-    let turn_guard = workspace.as_ref().map(|w| workspaces::WorkspaceTurn::new(state.workspace_turns.clone(), &w.id)).transpose()?;
+    let turn_guard = workspace
+        .as_ref()
+        .map(|w| workspaces::WorkspaceTurn::new(state.workspace_turns.clone(), &w.id))
+        .transpose()?;
     state
         .registry
         .send_prompt_with_images(id, &prompt, &acp_images)
@@ -761,24 +838,46 @@ pub async fn send_prompt(
             let mut completed = false;
             loop {
                 match completion.recv().await {
-                    Ok(ControlEvent::Raw { session_id: Some(sid), payload }) if sid == id && payload.get("turn_complete").and_then(|v| v.as_bool()) == Some(true) => { completed = true; }
-                    Ok(ControlEvent::SessionStatusChanged { session_id, status, .. }) if session_id == id && matches!(status, grok_events::SessionStatus::Idle | grok_events::SessionStatus::Failed | grok_events::SessionStatus::Cancelled) => {
+                    Ok(ControlEvent::Raw {
+                        session_id: Some(sid),
+                        payload,
+                    }) if sid == id
+                        && payload.get("turn_complete").and_then(|v| v.as_bool()) == Some(true) =>
+                    {
+                        completed = true;
+                    }
+                    Ok(ControlEvent::SessionStatusChanged {
+                        session_id, status, ..
+                    }) if session_id == id
+                        && matches!(
+                            status,
+                            grok_events::SessionStatus::Idle
+                                | grok_events::SessionStatus::Failed
+                                | grok_events::SessionStatus::Cancelled
+                        ) =>
+                    {
                         let _guard = gate.lock().await;
                         if completed && status == grok_events::SessionStatus::Idle {
                             let message = format!("{}\n\nBomb-Thread: {id}", summary);
-                            match manager.commit_all(std::path::Path::new(&w.path), &message).await {
+                            match manager
+                                .commit_all(std::path::Path::new(&w.path), &message)
+                                .await
+                            {
                                 Ok(true) => {
                                     let note = format!("Checkpoint saved: {summary}");
                                     let _ = db.append_message(id, "system", &note, Utc::now());
                                     bus.emit(ControlEvent::Raw { session_id: Some(id), payload: serde_json::json!({"channel":"thread", "kind":"checkpoint", "line":note}) });
                                 }
-                                Ok(false) => {},
-                                Err(e) => bus.emit_error(Some(id), format!("Checkpoint failed; your files are still saved: {e}")),
+                                Ok(false) => {}
+                                Err(e) => bus.emit_error(
+                                    Some(id),
+                                    format!("Checkpoint failed; your files are still saved: {e}"),
+                                ),
                             }
                         }
                         break;
                     }
-                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                     Err(_) => break,
                 }
             }
@@ -795,7 +894,9 @@ pub async fn send_prompt(
             .enumerate()
             .map(|(n, i)| i.name.clone().unwrap_or_else(|| format!("image {}", n + 1)))
             .collect();
-        format!("{prompt}\n\n[attached: {}]", names.join(", ")).trim().to_string()
+        format!("{prompt}\n\n[attached: {}]", names.join(", "))
+            .trim()
+            .to_string()
     };
     let _ = state
         .persistence
@@ -834,10 +935,7 @@ async fn resume_saved_session(
         return Err("cannot resume: saved thread has no project path".into());
     }
     if !PathBuf::from(&rec.cwd).is_dir() {
-        return Err(format!(
-            "cannot resume: project path missing — {}",
-            rec.cwd
-        ));
+        return Err(format!("cannot resume: project path missing — {}", rec.cwd));
     }
 
     let mut opts = SpawnOptions {
@@ -909,10 +1007,7 @@ async fn resume_saved_session(
     }
 
     let transcript_context = build_transcript_context(state, id);
-    let memory_root = opts
-        .project_root
-        .clone()
-        .unwrap_or_else(|| rec.cwd.clone());
+    let memory_root = opts.project_root.clone().unwrap_or_else(|| rec.cwd.clone());
     let connect_opts = grok_control_core::ConnectOpts {
         // A prior ACP session id from another agent can't be loaded/resumed.
         resume_acp_session_id: if backend_switched {
@@ -924,7 +1019,12 @@ async fn resume_saved_session(
         memory_context: build_memory_context(state, &memory_root).await,
     };
 
-    if state.persistence.workspace_for_session(id).map_err(err)?.is_some_and(|w| w.inline) {
+    if state
+        .persistence
+        .workspace_for_session(id)
+        .map_err(err)?
+        .is_some_and(|w| w.inline)
+    {
         enforce_inline(&mut opts);
     }
     let brain = state
@@ -953,14 +1053,30 @@ async fn resume_saved_session(
         if recorded_backend != current.backend || !rec.model.eq_ignore_ascii_case(&current.model) {
             let continuity = match brain {
                 grok_control_core::BrainMode::FullBrain => "Previous agent session restored.",
-                grok_control_core::BrainMode::HistoryOnly => "Recent conversation history and project memory carried over.",
-                grok_control_core::BrainMode::Fresh => "Fresh agent session; no prior history was available.",
+                grok_control_core::BrainMode::HistoryOnly => {
+                    "Recent conversation history and project memory carried over."
+                }
+                grok_control_core::BrainMode::Fresh => {
+                    "Fresh agent session; no prior history was available."
+                }
             };
-            let line = format!("Switched model: {} → {} · {}. {continuity}", rec.model, current.backend.key(), current.model);
-            state.persistence.append_message(id, "system", &line, Utc::now()).map_err(err)?;
-            state.event_bus.emit(ControlEvent::Raw { session_id: Some(id), payload: serde_json::json!({
-                "channel":"thread", "kind":"model_switch", "line":line
-            }) });
+            let line = format!(
+                "Switched model: {} · {} → {} · {}. {continuity}",
+                recorded_backend.key(),
+                rec.model,
+                current.backend.key(),
+                current.model
+            );
+            state
+                .persistence
+                .append_message(id, "system", &line, Utc::now())
+                .map_err(err)?;
+            state.event_bus.emit(ControlEvent::Raw {
+                session_id: Some(id),
+                payload: serde_json::json!({
+                    "channel":"thread", "kind":"model_switch", "line":line
+                }),
+            });
         }
     }
     Ok(())
@@ -997,7 +1113,10 @@ fn emit_thread_label(state: &AppState, id: Uuid, label: &str) {
 pub(crate) fn project_memory_scope(project_root: &str) -> String {
     use std::hash::{Hash, Hasher};
     let clean = project_root.trim_end_matches('/');
-    let base = clean.split('/').rfind(|s| !s.is_empty()).unwrap_or("project");
+    let base = clean
+        .split('/')
+        .rfind(|s| !s.is_empty())
+        .unwrap_or("project");
     let mut h = std::collections::hash_map::DefaultHasher::new();
     clean.hash(&mut h);
     format!("{base}-{:06x}", h.finish() & 0xff_ffff)
@@ -1076,7 +1195,13 @@ pub async fn remove_session(
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
     // Capture worktree context before the records disappear.
-    let wt_ctx = if remove_worktree.unwrap_or(false) && state.persistence.workspace_for_session(id).map_err(err)?.is_none() {
+    let wt_ctx = if remove_worktree.unwrap_or(false)
+        && state
+            .persistence
+            .workspace_for_session(id)
+            .map_err(err)?
+            .is_none()
+    {
         thread_worktree_context(state, id).await.ok()
     } else {
         None
@@ -1099,28 +1224,23 @@ pub async fn remove_session(
     Ok(())
 }
 
-pub async fn set_plan_mode(
-    state: &AppState,
-    id: String,
-    enabled: bool,
-) -> Result<(), String> {
+pub async fn set_plan_mode(state: &AppState, id: String, enabled: bool) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
-    if !enabled && state.persistence.workspace_for_session(id).map_err(err)?.is_some_and(|w| w.inline) {
+    if !enabled
+        && state
+            .persistence
+            .workspace_for_session(id)
+            .map_err(err)?
+            .is_some_and(|w| w.inline)
+    {
         return Err("Inline is read-only. Create a thread to make changes.".into());
     }
-    state
-        .registry
-        .set_plan_mode(id, enabled)
-        .await
-        .map_err(err)
+    state.registry.set_plan_mode(id, enabled).await.map_err(err)
 }
 
 // ── Explainer (right-panel ELI12 narrator) ───────────────────────────────
 
-pub async fn explainer_focus(
-    state: &AppState,
-    id: Option<String>,
-) -> Result<(), String> {
+pub async fn explainer_focus(state: &AppState, id: Option<String>) -> Result<(), String> {
     let uuid = match id.as_deref().filter(|s| !s.is_empty()) {
         Some(s) => Some(Uuid::parse_str(s).map_err(err)?),
         None => None,
@@ -1151,10 +1271,7 @@ pub async fn set_explainer_provider(
     Ok(())
 }
 
-pub async fn set_explainer_enabled(
-    state: &AppState,
-    enabled: bool,
-) -> Result<bool, String> {
+pub async fn set_explainer_enabled(state: &AppState, enabled: bool) -> Result<bool, String> {
     state.explainer.set_enabled(enabled);
     {
         let mut cfg = state.config.write().await;
@@ -1167,18 +1284,24 @@ pub async fn set_explainer_enabled(
 /// Set a live session's approval stance: plan | ask | auto | yolo.
 /// Apply a reasoning effort to a live thread. Ok(false) = the agent does
 /// not expose one (Grok/Codex take it at spawn time instead).
-pub async fn set_session_effort(state: &AppState, id: String, effort: String) -> Result<bool, String> {
+pub async fn set_session_effort(
+    state: &AppState,
+    id: String,
+    effort: String,
+) -> Result<bool, String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
     state.registry.set_effort(id, &effort).await.map_err(err)
 }
 
-pub async fn set_approval_mode(
-    state: &AppState,
-    id: String,
-    mode: String,
-) -> Result<(), String> {
+pub async fn set_approval_mode(state: &AppState, id: String, mode: String) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
-    if mode != "plan" && state.persistence.workspace_for_session(id).map_err(err)?.is_some_and(|w| w.inline) {
+    if mode != "plan"
+        && state
+            .persistence
+            .workspace_for_session(id)
+            .map_err(err)?
+            .is_some_and(|w| w.inline)
+    {
         return Err("Inline is read-only. Create a thread to make changes.".into());
     }
     let mode = match mode.to_lowercase().as_str() {
@@ -1189,16 +1312,32 @@ pub async fn set_approval_mode(
         other => return Err(format!("unknown approval mode: {other}")),
     };
     if state.registry.is_live(id) {
-        state.registry.set_approval_mode(id, mode).await.map_err(err)?;
+        state
+            .registry
+            .set_approval_mode(id, mode)
+            .await
+            .map_err(err)?;
         persist_session(state, id).await;
     } else {
         let mut record = state.persistence.get_session(id).map_err(err)?;
-        let mut snapshot: serde_json::Value = serde_json::from_str(&record.metadata_json).map_err(err)?;
-        let metadata = snapshot.get_mut("metadata").and_then(serde_json::Value::as_object_mut)
+        let mut snapshot: serde_json::Value =
+            serde_json::from_str(&record.metadata_json).map_err(err)?;
+        let metadata = snapshot
+            .get_mut("metadata")
+            .and_then(serde_json::Value::as_object_mut)
             .ok_or("Saved thread metadata is missing")?;
-        metadata.insert("approvalMode".into(), serde_json::to_value(mode).map_err(err)?);
-        metadata.insert("planMode".into(), (mode == grok_control_core::ApprovalMode::Plan).into());
-        metadata.insert("alwaysApprove".into(), (mode == grok_control_core::ApprovalMode::Yolo).into());
+        metadata.insert(
+            "approvalMode".into(),
+            serde_json::to_value(mode).map_err(err)?,
+        );
+        metadata.insert(
+            "planMode".into(),
+            (mode == grok_control_core::ApprovalMode::Plan).into(),
+        );
+        metadata.insert(
+            "alwaysApprove".into(),
+            (mode == grok_control_core::ApprovalMode::Yolo).into(),
+        );
         record.metadata_json = serde_json::to_string(&snapshot).map_err(err)?;
         record.updated_at = Utc::now();
         state.persistence.upsert_session(&record).map_err(err)?;
@@ -1232,13 +1371,15 @@ pub async fn add_session_allow_rule(
     Ok(())
 }
 
-pub async fn set_always_approve(
-    state: &AppState,
-    id: String,
-    enabled: bool,
-) -> Result<(), String> {
+pub async fn set_always_approve(state: &AppState, id: String, enabled: bool) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
-    if enabled && state.persistence.workspace_for_session(id).map_err(err)?.is_some_and(|w| w.inline) {
+    if enabled
+        && state
+            .persistence
+            .workspace_for_session(id)
+            .map_err(err)?
+            .is_some_and(|w| w.inline)
+    {
         return Err("Inline is read-only. Create a thread to make changes.".into());
     }
 
@@ -1266,11 +1407,7 @@ pub async fn respond_approval(
 /// Rename a thread (manual override of the smart name). Works for live and
 /// saved threads; manual names are never overwritten by the auto-titler
 /// (which only fires when a thread has no label at its first prompt).
-pub async fn rename_thread(
-    state: &AppState,
-    id: String,
-    label: String,
-) -> Result<(), String> {
+pub async fn rename_thread(state: &AppState, id: String, label: String) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
     let label = label.trim();
     if label.is_empty() {
@@ -1326,10 +1463,7 @@ pub async fn add_project(state: &AppState, path: String) -> Result<Vec<String>, 
     Ok(list)
 }
 
-pub async fn remove_project(
-    state: &AppState,
-    path: String,
-) -> Result<Vec<String>, String> {
+pub async fn remove_project(state: &AppState, path: String) -> Result<Vec<String>, String> {
     let mut list = list_projects(state).await?;
     list.retain(|p| p != &path);
     state
@@ -1390,13 +1524,14 @@ async fn thread_worktree_context(
 }
 
 /// Merge the thread's worktree branch back into the project's current branch.
-pub async fn land_thread(
-    state: &AppState,
-    id: String,
-) -> Result<ThreadMergeResult, String> {
+pub async fn land_thread(state: &AppState, id: String) -> Result<ThreadMergeResult, String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
     let (worktree, root, branch, label) = thread_worktree_context(state, id).await?;
-    let title = if label.is_empty() { branch.clone() } else { label.clone() };
+    let title = if label.is_empty() {
+        branch.clone()
+    } else {
+        label.clone()
+    };
 
     let _ = state
         .worktrees
@@ -1420,7 +1555,9 @@ pub async fn land_thread(
     {
         grok_worktree::MergeOutcome::Merged => {
             let msg = format!("⬆ landed into {target_branch} ✓");
-            let _ = state.persistence.append_message(id, "system", &msg, Utc::now());
+            let _ = state
+                .persistence
+                .append_message(id, "system", &msg, Utc::now());
             state.event_bus.emit(grok_events::ControlEvent::Raw {
                 session_id: Some(id),
                 payload: serde_json::json!({ "channel": "term", "stream": "worktree", "line": msg }),
@@ -1439,7 +1576,9 @@ pub async fn land_thread(
                 "⚠ landing hit conflicts in {} — run Sync so this thread's agent can resolve them, then land again",
                 files.join(", ")
             );
-            let _ = state.persistence.append_message(id, "system", &msg, Utc::now());
+            let _ = state
+                .persistence
+                .append_message(id, "system", &msg, Utc::now());
             state.event_bus.emit(grok_events::ControlEvent::Raw {
                 session_id: Some(id),
                 payload: serde_json::json!({ "channel": "term", "stream": "worktree", "line": msg }),
@@ -1456,13 +1595,14 @@ pub async fn land_thread(
 
 /// Merge the project's current branch INTO the thread's worktree. Conflicts
 /// stay in the worktree where the thread's own agent can resolve them.
-pub async fn sync_thread(
-    state: &AppState,
-    id: String,
-) -> Result<ThreadMergeResult, String> {
+pub async fn sync_thread(state: &AppState, id: String) -> Result<ThreadMergeResult, String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
     let (worktree, root, branch, label) = thread_worktree_context(state, id).await?;
-    let title = if label.is_empty() { branch.clone() } else { label.clone() };
+    let title = if label.is_empty() {
+        branch.clone()
+    } else {
+        label.clone()
+    };
     let target_branch = state.worktrees.current_branch(&root).await.map_err(err)?;
 
     let _ = state
@@ -1483,7 +1623,9 @@ pub async fn sync_thread(
     {
         grok_worktree::MergeOutcome::Merged => {
             let msg = format!("⟳ synced from {target_branch} ✓");
-            let _ = state.persistence.append_message(id, "system", &msg, Utc::now());
+            let _ = state
+                .persistence
+                .append_message(id, "system", &msg, Utc::now());
             state.event_bus.emit(grok_events::ControlEvent::Raw {
                 session_id: Some(id),
                 payload: serde_json::json!({ "channel": "term", "stream": "worktree", "line": msg }),
@@ -1500,7 +1642,9 @@ pub async fn sync_thread(
                 "⚠ merge conflicts from {target_branch} left in this worktree: {} — ask this thread's agent to resolve and commit them",
                 files.join(", ")
             );
-            let _ = state.persistence.append_message(id, "system", &msg, Utc::now());
+            let _ = state
+                .persistence
+                .append_message(id, "system", &msg, Utc::now());
             state.event_bus.emit(grok_events::ControlEvent::Raw {
                 session_id: Some(id),
                 payload: serde_json::json!({ "channel": "term", "stream": "worktree", "line": msg }),
@@ -1517,10 +1661,7 @@ pub async fn sync_thread(
 
 // ── Phase 2: Worktrees & Permissions ─────────────────────────────────────
 
-pub async fn list_worktrees(
-    state: &AppState,
-    repo: String,
-) -> Result<Vec<WorktreeInfo>, String> {
+pub async fn list_worktrees(state: &AppState, repo: String) -> Result<Vec<WorktreeInfo>, String> {
     state
         .worktrees
         .list(PathBuf::from(repo).as_path())
@@ -1563,10 +1704,7 @@ pub async fn remove_worktree(
         .map_err(err)
 }
 
-pub async fn prune_worktrees(
-    state: &AppState,
-    repo: String,
-) -> Result<String, String> {
+pub async fn prune_worktrees(state: &AppState, repo: String) -> Result<String, String> {
     state
         .worktrees
         .prune(PathBuf::from(repo).as_path())
@@ -1574,10 +1712,7 @@ pub async fn prune_worktrees(
         .map_err(err)
 }
 
-pub async fn worktree_diff(
-    state: &AppState,
-    path: String,
-) -> Result<String, String> {
+pub async fn worktree_diff(state: &AppState, path: String) -> Result<String, String> {
     state
         .worktrees
         .diff(PathBuf::from(path).as_path())
@@ -1663,26 +1798,17 @@ pub async fn remove_mcp(state: &AppState, name: String) -> Result<(), String> {
     state.mcp.remove(&name).await.map_err(err)
 }
 
-pub async fn toggle_mcp(
-    state: &AppState,
-    name: String,
-    enabled: bool,
-) -> Result<(), String> {
+pub async fn toggle_mcp(state: &AppState, name: String, enabled: bool) -> Result<(), String> {
     state.mcp.set_enabled(&name, enabled).await.map_err(err)
 }
 
 // ── Full MCP manager surface ─────────────────────────────────────────────
 
-pub async fn list_mcp_servers(
-    state: &AppState,
-) -> Result<Vec<McpServerConfigExt>, String> {
+pub async fn list_mcp_servers(state: &AppState) -> Result<Vec<McpServerConfigExt>, String> {
     Ok(state.mcp.list().await)
 }
 
-pub async fn get_mcp_server(
-    state: &AppState,
-    name: String,
-) -> Result<McpServerConfigExt, String> {
+pub async fn get_mcp_server(state: &AppState, name: String) -> Result<McpServerConfigExt, String> {
     state.mcp.get(&name).await.map_err(err)
 }
 
@@ -1708,11 +1834,7 @@ pub async fn doctor_mcp_server(
     state: &AppState,
     name: Option<String>,
 ) -> Result<Vec<DoctorReport>, String> {
-    state
-        .mcp
-        .doctor(name.as_deref())
-        .await
-        .map_err(err)
+    state.mcp.doctor(name.as_deref()).await.map_err(err)
 }
 
 pub async fn list_mcp_tools(
@@ -1734,16 +1856,11 @@ pub async fn set_mcp_credential(
     state.mcp.set_credential(&key, &value).await.map_err(err)
 }
 
-pub async fn list_mcp_credentials(
-    state: &AppState,
-) -> Result<Vec<McpCredential>, String> {
+pub async fn list_mcp_credentials(state: &AppState) -> Result<Vec<McpCredential>, String> {
     state.mcp.list_credentials_masked().await.map_err(err)
 }
 
-pub async fn remove_mcp_credential(
-    state: &AppState,
-    key: String,
-) -> Result<(), String> {
+pub async fn remove_mcp_credential(state: &AppState, key: String) -> Result<(), String> {
     state.mcp.credentials().remove(&key).map_err(err)
 }
 
@@ -1830,10 +1947,7 @@ pub async fn memory_flush(state: &AppState, scope: String) -> Result<String, Str
 
 /// Digest: LLM-summarize a scope's notes into one compact entry (tagged
 /// `digest`). Originals stay — the user deletes what's superseded.
-pub async fn memory_digest(
-    state: &AppState,
-    scope: String,
-) -> Result<MemoryEntry, String> {
+pub async fn memory_digest(state: &AppState, scope: String) -> Result<MemoryEntry, String> {
     let pack = state
         .memory
         .context_pack(&scope, 6000)
@@ -1964,17 +2078,12 @@ pub async fn diff_capture_after(capture: DiffCapture) -> Result<DiffCapture, Str
     DiffEngine::capture_after(capture).await.map_err(err)
 }
 
-pub async fn export_session_markdown(
-    state: &AppState,
-    id: String,
-) -> Result<String, String> {
+pub async fn export_session_markdown(state: &AppState, id: String) -> Result<String, String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
     state.persistence.export_markdown(id).map_err(err)
 }
 
-pub async fn list_persisted_sessions(
-    state: &AppState,
-) -> Result<Vec<SessionRecord>, String> {
+pub async fn list_persisted_sessions(state: &AppState) -> Result<Vec<SessionRecord>, String> {
     state.persistence.list_sessions().map_err(err)
 }
 
@@ -1990,7 +2099,12 @@ pub async fn shutdown_all(state: &AppState) -> Result<(), String> {
 
 async fn persist_session(state: &AppState, id: Uuid) {
     if let Ok(snap) = state.registry.get_snapshot(id) {
-        model_history::record(&state.persistence, id, snap.metadata.backend.key(), &snap.metadata.model);
+        model_history::record(
+            &state.persistence,
+            id,
+            snap.metadata.backend.key(),
+            &snap.metadata.model,
+        );
         let mode = match snap.metadata.mode {
             grok_control_core::AgentMode::Acp => "acp",
             grok_control_core::AgentMode::Headless => "headless",
@@ -2242,13 +2356,8 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
                 let _ = db.update_session_status(*session_id, "waitingapproval");
                 // Durable as an approval row so it renders as a card (inert
                 // after restart — the live request died with the process).
-                db.append_message(
-                    *session_id,
-                    "approval",
-                    format!("{tool} — {summary}"),
-                    *at,
-                )
-                .map(|_| ())
+                db.append_message(*session_id, "approval", format!("{tool} — {summary}"), *at)
+                    .map(|_| ())
             }
         }
         ApprovalResolved {
@@ -2267,7 +2376,8 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
                     option_id.as_deref().unwrap_or("selected")
                 )
             };
-            db.append_message(*session_id, "system", body, *at).map(|_| ())
+            db.append_message(*session_id, "system", body, *at)
+                .map(|_| ())
         }
         // Plan documents lifted out of plan-presenting tool calls
         // (ExitPlanMode etc.) — durable as real plan rows.
@@ -2290,7 +2400,10 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
             let Some(data) = payload.get("data").and_then(|v| v.as_str()) else {
                 return Ok(());
             };
-            let mime = payload.get("mimeType").and_then(|v| v.as_str()).unwrap_or("image/png");
+            let mime = payload
+                .get("mimeType")
+                .and_then(|v| v.as_str())
+                .unwrap_or("image/png");
             let ext = match mime {
                 "image/jpeg" => "jpg",
                 "image/webp" => "webp",
@@ -2313,8 +2426,10 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
             if std::fs::write(&path, &bytes).is_err() {
                 return Ok(());
             }
-            let row = serde_json::json!({ "path": path.display().to_string(), "mimeType": mime }).to_string();
-            db.append_message(*session_id, "image", row, Utc::now()).map(|_| ())
+            let row = serde_json::json!({ "path": path.display().to_string(), "mimeType": mime })
+                .to_string();
+            db.append_message(*session_id, "image", row, Utc::now())
+                .map(|_| ())
         }
         // Raw ACP protocol lines: persist (merged into bounded multiline
         // rows) so the View toggle can reveal history across restarts.
@@ -2329,14 +2444,8 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
             if line.trim().is_empty() {
                 return Ok(());
             }
-            db.append_message_merged(
-                *session_id,
-                "term",
-                &format!("{line}\n"),
-                Utc::now(),
-                10,
-            )
-            .map(|_| ())
+            db.append_message_merged(*session_id, "term", &format!("{line}\n"), Utc::now(), 10)
+                .map(|_| ())
         }
         Error {
             session_id: Some(session_id),
@@ -2358,7 +2467,11 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
 
 // ── Dev server / live preview ────────────────────────────────────────────
 
-fn resolve_preview_cwd(state: &AppState, cwd: Option<String>, session_id: Option<String>) -> Result<PathBuf, String> {
+fn resolve_preview_cwd(
+    state: &AppState,
+    cwd: Option<String>,
+    session_id: Option<String>,
+) -> Result<PathBuf, String> {
     // A thread's own directory wins (it may be a worktree). Live threads carry
     // it in the registry; a saved thread has no live snapshot but its cwd is
     // still on disk — falling straight through to "session not found" made
@@ -2414,7 +2527,9 @@ pub async fn start_dev_server(
     open_browser: Option<bool>,
 ) -> Result<crate::devserver::DevServerStatus, String> {
     let path = resolve_preview_cwd(state, cwd, session_id)?;
-    let _ = state.persistence.set_kv("last_cwd", &path.display().to_string());
+    let _ = state
+        .persistence
+        .set_kv("last_cwd", &path.display().to_string());
     state
         .dev_server
         .start(&path, open_browser.unwrap_or(true))
@@ -2470,10 +2585,13 @@ mod image_restore_tests {
         let data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
         {
             let db = grok_persistence::Persistence::open(&path).unwrap();
-            persist_control_event(&db, &ControlEvent::Raw {
-                session_id: Some(id),
-                payload: serde_json::json!({"channel":"image", "mimeType":"image/png", "data":data}),
-            });
+            persist_control_event(
+                &db,
+                &ControlEvent::Raw {
+                    session_id: Some(id),
+                    payload: serde_json::json!({"channel":"image", "mimeType":"image/png", "data":data}),
+                },
+            );
         }
         let db = grok_persistence::Persistence::open(path).unwrap();
         let rows = db.transcript_entries(id).unwrap();
@@ -2482,7 +2600,10 @@ mod image_restore_tests {
         let mut thread = crate::transcript::Thread::new();
         thread.hydrate(&rows);
         assert_eq!(thread.entries.len(), 1);
-        assert!(matches!(thread.entries[0].role, crate::transcript::Role::Agent));
+        assert!(matches!(
+            thread.entries[0].role,
+            crate::transcript::Role::Agent
+        ));
         let images = &thread.entries[0].images;
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].mime_type, "image/png");
@@ -2496,8 +2617,17 @@ pub mod scratch;
 pub mod model_history;
 
 fn speed_value(values: &[String], enabled: bool) -> Option<String> {
-    let preferred: &[&str] = if enabled { &["on", "true", "enabled", "fast", "priority"] } else { &["off", "false", "disabled", "standard", "normal", "default"] };
-    preferred.iter().find_map(|choice| values.iter().find(|value| value.eq_ignore_ascii_case(choice)).cloned())
+    let preferred: &[&str] = if enabled {
+        &["on", "true", "enabled", "fast", "priority"]
+    } else {
+        &["off", "false", "disabled", "standard", "normal", "default"]
+    };
+    preferred.iter().find_map(|choice| {
+        values
+            .iter()
+            .find(|value| value.eq_ignore_ascii_case(choice))
+            .cloned()
+    })
 }
 
 #[cfg(test)]

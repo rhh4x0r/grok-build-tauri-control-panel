@@ -4,10 +4,10 @@
 use std::time::Instant;
 
 use gpui_kit::assets::IconName as Lucide;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::{Icon, Sizable};
-use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
@@ -26,6 +26,8 @@ pub struct ThreadView {
     transcript: Option<(String, Entity<TranscriptView>)>,
     composer: Entity<ComposerView>,
     search_open: bool,
+    terminals: std::collections::HashMap<String, Entity<super::terminal::TerminalPanel>>,
+    terminals_open: std::collections::HashSet<String>,
     search: Entity<InputState>,
 }
 
@@ -55,10 +57,32 @@ impl ThreadView {
             transcript: None,
             composer,
             search_open: false,
+            terminals: std::collections::HashMap::new(),
+            terminals_open: std::collections::HashSet::new(),
             search,
         };
         this.sync_transcript(cx);
         this
+    }
+
+    fn toggle_terminal(
+        &mut self,
+        id: String,
+        cwd: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.terminals_open.remove(&id) {
+            cx.notify();
+            return;
+        }
+        let panel = self
+            .terminals
+            .entry(id.clone())
+            .or_insert_with(|| cx.new(|cx| super::terminal::TerminalPanel::new(cwd.into(), cx)));
+        panel.update(cx, |panel, cx| panel.focus(window, cx));
+        self.terminals_open.insert(id);
+        cx.notify();
     }
 
     pub fn focus_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -99,7 +123,13 @@ impl ThreadView {
             .transcript
             .as_ref()
             .and_then(|(_, t)| t.read(cx).search_status())
-            .map(|(i, n)| if n == 0 { "no matches".to_string() } else { format!("{i} of {n}") })
+            .map(|(i, n)| {
+                if n == 0 {
+                    "no matches".to_string()
+                } else {
+                    format!("{i} of {n}")
+                }
+            })
             .unwrap_or_default();
         let hover = ui.hover;
         let icon_button = move |id: &'static str, icon: Lucide, muted: Hsla| {
@@ -123,25 +153,47 @@ impl ThreadView {
             .py_1p5()
             .border_b_1()
             .border_color(ui.border)
-            .child(div().w(px(280.)).child(Input::new(&self.search).cleanable(true)))
+            .child(
+                div()
+                    .w(px(280.))
+                    .child(Input::new(&self.search).cleanable(true)),
+            )
             .child(div().text_xs().text_color(ui.text_faint).child(status))
-            .child(icon_button("find-prev", Lucide::ChevronUp, ui.text_muted).on_click(cx.listener(|this, _, _, cx| {
-                if let Some((_, t)) = &this.transcript {
-                    t.update(cx, |t, cx| t.step_search(-1, cx));
-                }
-            })))
-            .child(icon_button("find-next", Lucide::ChevronDown, ui.text_muted).on_click(cx.listener(|this, _, _, cx| {
-                if let Some((_, t)) = &this.transcript {
-                    t.update(cx, |t, cx| t.step_search(1, cx));
-                }
-            })))
+            .child(
+                icon_button("find-prev", Lucide::ChevronUp, ui.text_muted).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        if let Some((_, t)) = &this.transcript {
+                            t.update(cx, |t, cx| t.step_search(-1, cx));
+                        }
+                    },
+                )),
+            )
+            .child(
+                icon_button("find-next", Lucide::ChevronDown, ui.text_muted).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        if let Some((_, t)) = &this.transcript {
+                            t.update(cx, |t, cx| t.step_search(1, cx));
+                        }
+                    },
+                )),
+            )
             .child(div().flex_1())
-            .child(icon_button("find-close", Lucide::X, ui.text_muted).on_click(cx.listener(|this, _, window, cx| {
-                this.close_search(window, cx);
-            })))
+            .child(
+                icon_button("find-close", Lucide::X, ui.text_muted).on_click(cx.listener(
+                    |this, _, window, cx| {
+                        this.close_search(window, cx);
+                    },
+                )),
+            )
     }
 
     fn sync_transcript(&mut self, cx: &mut Context<Self>) {
+        let model = self.model.read(cx);
+        self.terminals.retain(|id, _| {
+            uuid::Uuid::parse_str(id).is_ok_and(|id| model.threads.contains_key(&id))
+        });
+        self.terminals_open
+            .retain(|id| self.terminals.contains_key(id));
         let selected = self.model.read(cx).selected_thread();
         match selected {
             None => self.transcript = None,
@@ -194,8 +246,35 @@ impl ThreadView {
                     .flex_col()
                     .items_center()
                     .gap_2()
-                    .child(div().size(px(22.)).text_color(ui.text_muted).child(Icon::from(Lucide::Bomb)))
-                    .child(div().text_size(px(22.)).font_weight(FontWeight::MEDIUM).text_color(ui.text).child(self.model.read(cx).active_workspace.as_deref().and_then(|id| self.model.read(cx).workspaces.iter().find(|w| w.id == id)).map(|w| if w.inline { "Ask about this project".into() } else { format!("New conversation in {}", w.name) }).unwrap_or_else(|| "How can I help?".into())))
+                    .child(
+                        div()
+                            .size(px(22.))
+                            .text_color(ui.text_muted)
+                            .child(Icon::from(Lucide::Bomb)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(22.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(ui.text)
+                            .child(
+                                self.model
+                                    .read(cx)
+                                    .active_workspace
+                                    .as_deref()
+                                    .and_then(|id| {
+                                        self.model.read(cx).workspaces.iter().find(|w| w.id == id)
+                                    })
+                                    .map(|w| {
+                                        if w.inline {
+                                            "Ask about this project".into()
+                                        } else {
+                                            format!("New conversation in {}", w.name)
+                                        }
+                                    })
+                                    .unwrap_or_else(|| "How can I help?".into()),
+                            ),
+                    )
                     .child(self.project_row(project, ui, cx)),
             ))
             .child(
@@ -205,37 +284,49 @@ impl ThreadView {
                     .justify_center()
                     .gap_2()
                     .max_w(px(640.))
-                    .children(suggestions.iter().enumerate().map(|(i, (title, prompt, icon))| {
-                        let composer = composer.clone();
-                        let prompt = prompt.to_string();
-                        crate::views::motion::fade_in(
-                            ("empty-suggestion", i as u64),
-                            div()
-                                .id(("suggestion", i))
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .h(px(34.))
-                                .px_3()
-                                .rounded(px(10.))
-                                .border_1()
-                                .border_color(ui.border)
-                                .text_sm()
-                                .text_color(ui.text_muted)
-                                .cursor_pointer()
-                                .hover(move |s| s.bg(hover))
-                                .on_click(move |_, window, cx| {
-                                    composer.update(cx, |c, cx| c.set_text(&prompt, window, cx));
-                                })
-                                .child(div().size(px(14.)).child(Icon::from(*icon)))
-                                .child(*title),
-                        )
-                    })),
+                    .children(
+                        suggestions
+                            .iter()
+                            .enumerate()
+                            .map(|(i, (title, prompt, icon))| {
+                                let composer = composer.clone();
+                                let prompt = prompt.to_string();
+                                crate::views::motion::fade_in(
+                                    ("empty-suggestion", i as u64),
+                                    div()
+                                        .id(("suggestion", i))
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .h(px(34.))
+                                        .px_3()
+                                        .rounded(px(10.))
+                                        .border_1()
+                                        .border_color(ui.border)
+                                        .text_sm()
+                                        .text_color(ui.text_muted)
+                                        .cursor_pointer()
+                                        .hover(move |s| s.bg(hover))
+                                        .on_click(move |_, window, cx| {
+                                            composer.update(cx, |c, cx| {
+                                                c.set_text(&prompt, window, cx)
+                                            });
+                                        })
+                                        .child(div().size(px(14.)).child(Icon::from(*icon)))
+                                        .child(*title),
+                                )
+                            }),
+                    ),
             )
     }
 
     /// "in <project ▾> · temporary chat" under the greeting.
-    fn project_row(&self, project: Option<String>, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
+    fn project_row(
+        &self,
+        project: Option<String>,
+        ui: &Ui,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         use gpui_kit::component::button::Button;
         use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
         use gpui_kit::component::Sizable;
@@ -261,23 +352,50 @@ impl ThreadView {
                         for p in &projects {
                             let a = app.clone();
                             let root = p.clone();
-                            menu = menu.item(PopupMenuItem::new(crate::models::app::project_name(p)).on_click(move |_, _, cx| {
-                                a.update(cx, |m, cx| m.set_active_project(root.clone(), cx));
-                            }));
+                            menu = menu.item(
+                                PopupMenuItem::new(crate::models::app::project_name(p)).on_click(
+                                    move |_, _, cx| {
+                                        a.update(cx, |m, cx| {
+                                            m.set_active_project(root.clone(), cx)
+                                        });
+                                    },
+                                ),
+                            );
                         }
                         menu = menu.separator();
                         let a = app.clone();
-                        menu.item(PopupMenuItem::new("Open project…").on_click(move |_, _, cx| {
-                            a.update(cx, |m, cx| m.open_project(cx));
-                        }))
+                        menu.item(
+                            PopupMenuItem::new("Open project…").on_click(move |_, _, cx| {
+                                a.update(cx, |m, cx| m.open_project(cx));
+                            }),
+                        )
                     }),
             )
             .child("·")
-            .child(div().text_xs().child(if temporary { "Ask questions · your files stay unchanged" } else { "Make changes · saved in a thread" }))
-            .when(temporary, |el| el.child(Button::new("question-make-changes").outline().small().label("Make changes…").on_click(move |_, _, cx| app2.update(cx, |m, cx| m.workspace_from_inline(cx)))))
+            .child(div().text_xs().child(if temporary {
+                "Ask questions · your files stay unchanged"
+            } else {
+                "Make changes · saved in a thread"
+            }))
+            .when(temporary, |el| {
+                el.child(
+                    Button::new("question-make-changes")
+                        .outline()
+                        .small()
+                        .label("Make changes…")
+                        .on_click(move |_, _, cx| {
+                            app2.update(cx, |m, cx| m.workspace_from_inline(cx))
+                        }),
+                )
+            })
     }
 
-    fn header(&self, thread: &Entity<ThreadModel>, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
+    fn header(
+        &self,
+        thread: &Entity<ThreadModel>,
+        ui: &Ui,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let t = thread.read(cx);
         let id = Uuid::parse_str(&t.meta.id).ok();
         let backend = t.meta.backend.clone();
@@ -296,8 +414,18 @@ impl ThreadView {
             .map(|r| format!("Changes · {}", r.files.len()))
             .unwrap_or_else(|| "Changes".into());
         let changes_hint = review
-            .map(|r| format!("View file changes · {} · {} commits ahead, {} behind", r.branch, r.ahead, r.behind))
-            .unwrap_or_else(|| format!("View file changes in {}", branch.unwrap_or_else(|| "this thread".into())));
+            .map(|r| {
+                format!(
+                    "View file changes · {} · {} commits ahead, {} behind",
+                    r.branch, r.ahead, r.behind
+                )
+            })
+            .unwrap_or_else(|| {
+                format!(
+                    "View file changes in {}",
+                    branch.unwrap_or_else(|| "this thread".into())
+                )
+            });
         let action = |id: &'static str, label: &str, icon: Lucide| {
             Button::new(id)
                 .ghost()
@@ -308,10 +436,19 @@ impl ThreadView {
                 .font_weight(FontWeight::NORMAL)
                 .text_color(ui.text_muted)
                 .icon(Icon::from(icon).size(px(14.)))
-                .accessibility_label(if label.is_empty() { "More thread actions" } else { label })
-                .when(!label.is_empty(), |button| button.child(
-                    div().text_size(px(12.)).font_weight(FontWeight::NORMAL).child(label.to_string()),
-                ))
+                .accessibility_label(if label.is_empty() {
+                    "More thread actions"
+                } else {
+                    label
+                })
+                .when(!label.is_empty(), |button| {
+                    button.child(
+                        div()
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::NORMAL)
+                            .child(label.to_string()),
+                    )
+                })
         };
 
         div()
@@ -333,51 +470,80 @@ impl ThreadView {
                     .child(if model.is_empty() { backend } else { model }),
             )
             .child(div().flex_1())
-            .child(action("new-workspace-thread", "New chat", Lucide::Plus)
-                .tooltip("Start a new conversation in this thread")
-                .on_click({
-                    let app = app.clone();
-                    move |_, _, cx| app.update(cx, |m, cx| m.new_workspace_thread(cx))
-                }))
-            .when(!has_worktree, |el| el.child(
-                action("inline-convert", "Make changes", Lucide::GitBranch)
-                    .tooltip("Create a thread to make changes to this project")
+            .child(
+                action("new-workspace-thread", "New chat", Lucide::Plus)
+                    .tooltip("Start a new conversation in this thread")
                     .on_click({
                         let app = app.clone();
-                        move |_, _, cx| app.update(cx, |m, cx| m.workspace_from_inline(cx))
+                        move |_, _, cx| app.update(cx, |m, cx| m.new_workspace_thread(cx))
                     }),
-            ))
-            .when(has_worktree, |el| el.child(
-                action("workspace-review", &changes_label, Lucide::GitBranch)
-                    .tooltip(changes_hint)
-                    .on_click({
-                        let app = app.clone();
-                        move |_, _, cx| {
-                            if let Some(id) = id {
-                                app.update(cx, |m, cx| m.land_thread(id, cx));
-                            }
-                        }
-                    }),
-            ))
-            .child(div().w(px(1.)).h(px(14.)).mx_1().bg(ui.border))
-            .child(action("dev-preview", "Dev sidebar", Lucide::PanelRight)
-                .tooltip("Show or hide the development preview and server controls")
-                .on_click(|_, window, cx| {
-                    window.dispatch_action(Box::new(crate::actions::ToggleDevPreview), cx)
-                }))
-            .when_some(id, |el, thread_id| el.child(
-                action("thread-more", "", Lucide::Ellipsis)
-                    .tooltip("More thread actions")
-                    .dropdown_menu(move |mut menu, _, cx| {
-                        if has_worktree {
+            )
+            .when(!has_worktree, |el| {
+                el.child(
+                    action("inline-convert", "Make changes", Lucide::GitBranch)
+                        .tooltip("Create a thread to make changes to this project")
+                        .on_click({
                             let app = app.clone();
-                            menu = menu.item(PopupMenuItem::new("Merge latest default branch into thread")
-                                .on_click(move |_, _, cx| app.update(cx, |m, cx| m.sync_thread(thread_id, cx))));
-                        }
-                        let archived = app.read(cx).archived.contains(&thread_id);
-                        super::sidebar::thread_lifecycle_menu(menu, app.clone(), thread_id, archived)
+                            move |_, _, cx| app.update(cx, |m, cx| m.workspace_from_inline(cx))
+                        }),
+                )
+            })
+            .when(has_worktree, |el| {
+                el.child(
+                    action("workspace-review", &changes_label, Lucide::GitBranch)
+                        .tooltip(changes_hint)
+                        .on_click({
+                            let app = app.clone();
+                            move |_, _, cx| {
+                                if let Some(id) = id {
+                                    app.update(cx, |m, cx| m.land_thread(id, cx));
+                                }
+                            }
+                        }),
+                )
+            })
+            .child(div().w(px(1.)).h(px(14.)).mx_1().bg(ui.border))
+            .child(
+                action("thread-terminal", "Terminal", Lucide::Terminal)
+                    .tooltip("Show or hide terminals for this thread")
+                    .on_click({
+                        let meta = thread.read(cx).meta.clone();
+                        cx.listener(move |this, _, window, cx| {
+                            this.toggle_terminal(meta.id.clone(), meta.cwd.clone(), window, cx)
+                        })
                     }),
-            ))
+            )
+            .child(
+                action("dev-preview", "Dev sidebar", Lucide::PanelRight)
+                    .tooltip("Show or hide the development preview and server controls")
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(crate::actions::ToggleDevPreview), cx)
+                    }),
+            )
+            .when_some(id, |el, thread_id| {
+                el.child(
+                    action("thread-more", "", Lucide::Ellipsis)
+                        .tooltip("More thread actions")
+                        .dropdown_menu(move |mut menu, _, cx| {
+                            if has_worktree {
+                                let app = app.clone();
+                                menu = menu.item(
+                                    PopupMenuItem::new("Merge latest default branch into thread")
+                                        .on_click(move |_, _, cx| {
+                                            app.update(cx, |m, cx| m.sync_thread(thread_id, cx))
+                                        }),
+                                );
+                            }
+                            let archived = app.read(cx).archived.contains(&thread_id);
+                            super::sidebar::thread_lifecycle_menu(
+                                menu,
+                                app.clone(),
+                                thread_id,
+                                archived,
+                            )
+                        }),
+                )
+            })
     }
 }
 
@@ -389,19 +555,40 @@ impl Render for ThreadView {
 
         let Some(thread) = thread else {
             let m = self.model.read(cx);
-            let ready = m.auth.iter().any(|a| a.backend == m.prefs.backend && a.logged_in && a.runnable);
-            let first_conversation_ready = m.threads.is_empty() && !m.new_thread_open && !m.prefs.temporary
-                && m.active_project.as_ref().and_then(|root| m.project_overviews.get(root))
-                    .is_some_and(|r| r.as_ref().is_ok_and(|o| o.git_detected && !o.branches.is_empty()));
-            if m.active_project.is_none() || (m.new_thread_open && !ready) || first_conversation_ready {
+            let ready = m
+                .auth
+                .iter()
+                .any(|a| a.backend == m.prefs.backend && a.logged_in && a.runnable);
+            let first_conversation_ready = m.threads.is_empty()
+                && !m.new_thread_open
+                && !m.prefs.temporary
+                && m.active_project
+                    .as_ref()
+                    .and_then(|root| m.project_overviews.get(root))
+                    .is_some_and(|r| {
+                        r.as_ref()
+                            .is_ok_and(|o| o.git_detected && !o.branches.is_empty())
+                    });
+            if m.active_project.is_none()
+                || (m.new_thread_open && !ready)
+                || first_conversation_ready
+            {
                 return super::welcome::setup(self.model.clone(), &ui, cx);
             }
 
-            let needs_overview = self.model.read(cx).active_project.as_ref().is_some_and(|root| {
-                let m = self.model.read(cx);
-                !m.project_overviews.contains_key(root) && !m.overview_loading.contains(root)
-            });
-            if needs_overview { self.model.update(cx, |m, cx| m.refresh_project_overview(cx)); }
+            let needs_overview = self
+                .model
+                .read(cx)
+                .active_project
+                .as_ref()
+                .is_some_and(|root| {
+                    let m = self.model.read(cx);
+                    !m.project_overviews.contains_key(root) && !m.overview_loading.contains(root)
+                });
+            if needs_overview {
+                self.model
+                    .update(cx, |m, cx| m.refresh_project_overview(cx));
+            }
 
             return div()
                 .size_full()
@@ -409,9 +596,17 @@ impl Render for ThreadView {
                 .overflow_hidden()
                 .flex()
                 .flex_col()
-                .child(div().flex_1().min_h_0().child(if !self.model.read(cx).new_thread_open && self.model.read(cx).active_project.is_some() && self.model.read(cx).active_workspace.is_none() && !self.model.read(cx).prefs.temporary {
-                    crate::views::workspaces::project_page(self.model.clone(), &ui, cx)
-                } else { self.welcome(&ui, cx).into_any_element() }))
+                .child(div().flex_1().min_h_0().child(
+                    if !self.model.read(cx).new_thread_open
+                        && self.model.read(cx).active_project.is_some()
+                        && self.model.read(cx).active_workspace.is_none()
+                        && !self.model.read(cx).prefs.temporary
+                    {
+                        crate::views::workspaces::project_page(self.model.clone(), &ui, cx)
+                    } else {
+                        self.welcome(&ui, cx).into_any_element()
+                    },
+                ))
                 .child(composer)
                 .into_any_element();
         };
@@ -482,6 +677,29 @@ impl Render for ThreadView {
                     ),
             )
             .child(composer)
+            .when(self.terminals_open.contains(&tid), |el| {
+                if let Some(panel) = self.terminals.get(&tid) {
+                    el.child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                Button::new("hide-terminal-panel")
+                                    .ghost()
+                                    .small()
+                                    .label("Hide terminal panel ×")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.terminals_open.remove(&tid);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(panel.clone()),
+                    )
+                } else {
+                    el
+                }
+            })
             .into_any_element()
     }
 }

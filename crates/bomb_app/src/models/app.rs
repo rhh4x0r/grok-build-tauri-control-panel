@@ -798,6 +798,12 @@ impl AppModel {
                     cx.notify();
                 }
                 ControlEvent::McpChanged { .. } => self.refresh_mcp_names(cx),
+                ControlEvent::Raw { payload, .. }
+                    if payload.get("channel").and_then(|c| c.as_str()) == Some("provider_commands") =>
+                {
+                    // The composer observes AppModel; refresh its advertised command menu.
+                    cx.notify();
+                }
                 ControlEvent::Raw { payload, session_id: Some(_) }
                     if payload.get("channel").and_then(|c| c.as_str()) == Some("thread") =>
                 {

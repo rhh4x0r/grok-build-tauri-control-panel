@@ -257,8 +257,14 @@ impl AcpClient {
         event_bus: Option<Arc<EventBus>>,
         control_session_id: Uuid,
     ) -> Result<Arc<Self>> {
-        Self::connect_with(config, opts, event_bus, control_session_id, ConnectOpts::default())
-            .await
+        Self::connect_with(
+            config,
+            opts,
+            event_bus,
+            control_session_id,
+            ConnectOpts::default(),
+        )
+        .await
     }
 
     pub async fn connect_with(
@@ -268,22 +274,51 @@ impl AcpClient {
         control_session_id: Uuid,
         connect_opts: ConnectOpts,
     ) -> Result<Arc<Self>> {
-        Self::connect_internal(config, opts, event_bus, control_session_id, connect_opts, false).await
+        Self::connect_internal(
+            config,
+            opts,
+            event_bus,
+            control_session_id,
+            connect_opts,
+            false,
+        )
+        .await
     }
 
     /// Metadata-only session: no prompts, tools, login flow, or registered UI thread.
     pub async fn discover_models(mut config: AcpClientConfig) -> Result<crate::ModelCatalog> {
         config.read_only = true;
-        let opts = SpawnOptions { plan_mode: true, approval_mode: ApprovalMode::Plan, ..Default::default() };
-        let client = Self::connect_internal(config, &opts, None, Uuid::new_v4(), ConnectOpts::default(), true).await?;
+        let opts = SpawnOptions {
+            plan_mode: true,
+            approval_mode: ApprovalMode::Plan,
+            ..Default::default()
+        };
+        let client = Self::connect_internal(
+            config,
+            &opts,
+            None,
+            Uuid::new_v4(),
+            ConnectOpts::default(),
+            true,
+        )
+        .await?;
         let catalog = client.model_catalog().await;
         client.shutdown().await?;
         Ok(catalog)
     }
 
-    pub async fn model_catalog(&self) -> crate::ModelCatalog { self.model_catalog.read().await.clone() }
+    pub async fn model_catalog(&self) -> crate::ModelCatalog {
+        self.model_catalog.read().await.clone()
+    }
 
-    async fn connect_internal(config: AcpClientConfig, opts: &SpawnOptions, event_bus: Option<Arc<EventBus>>, control_session_id: Uuid, connect_opts: ConnectOpts, catalog_only: bool) -> Result<Arc<Self>> {
+    async fn connect_internal(
+        config: AcpClientConfig,
+        opts: &SpawnOptions,
+        event_bus: Option<Arc<EventBus>>,
+        control_session_id: Uuid,
+        connect_opts: ConnectOpts,
+        catalog_only: bool,
+    ) -> Result<Arc<Self>> {
         if !config.cwd.is_absolute() {
             return Err(AcpError::Spawn("cwd must be absolute".into()));
         }
@@ -305,9 +340,12 @@ impl AcpClient {
 
         // GUI apps need an explicit PATH so grok can find tools/npx/git.
         // Prefer full inheritance; still force PATH/HOME for Finder launches.
-        cmd.env("PATH", std::env::var("PATH").unwrap_or_else(|_| {
-            "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin".into()
-        }));
+        cmd.env(
+            "PATH",
+            std::env::var("PATH").unwrap_or_else(|_| {
+                "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin".into()
+            }),
+        );
         if let Ok(home) = std::env::var("HOME") {
             cmd.env("HOME", home);
         }
@@ -645,7 +683,10 @@ impl AcpClient {
                             info!(method_id = %alt, "ACP authenticate complete (fallback)");
                             return Ok(());
                         }
-                        Err(AcpError::Rpc { code: c, message: m }) => {
+                        Err(AcpError::Rpc {
+                            code: c,
+                            message: m,
+                        }) => {
                             warn!(code = c, %m, method = %alt, "auth fallback failed");
                         }
                         Err(e) => return Err(e),
@@ -721,7 +762,10 @@ impl AcpClient {
                     }
                 }
             } else if !load_ok {
-                info!(prior, "agent does not advertise loadSession/resume — history-only resume");
+                info!(
+                    prior,
+                    "agent does not advertise loadSession/resume — history-only resume"
+                );
             }
         }
 
@@ -813,9 +857,7 @@ impl AcpClient {
         if let Some(m) = model {
             params["model"] = json!(m);
         }
-        let result = self
-            .request_timeout("session/resume", Some(params))
-            .await?;
+        let result = self.request_timeout("session/resume", Some(params)).await?;
         self.capture_modes(&result).await;
         self.capture_config_options(&result).await;
         Ok(result
@@ -876,7 +918,7 @@ impl AcpClient {
         info!(%sid, "ACP session/new complete");
 
         self.apply_model_after_session(opts).await?;
-                        self.apply_mode_after_session(opts).await;
+        self.apply_mode_after_session(opts).await;
 
         if let Some(bus) = &self.event_bus {
             bus.emit_status(self.control_session_id, SessionStatus::Idle)
@@ -911,7 +953,10 @@ impl AcpClient {
             info!(?available, ?current, "ACP agent session modes");
             *self.available_modes.write().await = available;
         }
-        if let Some(options) = modes.and_then(|m| m.get("availableModes")).and_then(Value::as_array) {
+        if let Some(options) = modes
+            .and_then(|m| m.get("availableModes"))
+            .and_then(Value::as_array)
+        {
             let options: Vec<Value> = options.iter().map(|m| json!({"value":m.get("id").or_else(||m.get("modeId")), "name":m.get("name"), "description":m.get("description")})).collect();
             self.emit_mode_options(json!(options), current.as_deref());
         }
@@ -922,7 +967,11 @@ impl AcpClient {
 
     async fn record_effective_mode(&self, mode: &str) {
         if *self.approval_mode.read().await == ApprovalMode::Auto
-            && matches!(mode.to_ascii_lowercase().as_str(), "acceptedits" | "accept_edits") {
+            && matches!(
+                mode.to_ascii_lowercase().as_str(),
+                "acceptedits" | "accept_edits"
+            )
+        {
             *self.auto_mode_override.write().await = Some(mode.into());
             if let Some(bus) = &self.event_bus {
                 bus.emit(ControlEvent::Raw { session_id: Some(self.control_session_id), payload: json!({
@@ -934,24 +983,32 @@ impl AcpClient {
 
     fn emit_mode_options(&self, options: Value, current: Option<&str>) {
         if let Some(bus) = &self.event_bus {
-            bus.emit(ControlEvent::Raw { session_id: Some(self.control_session_id),
+            bus.emit(ControlEvent::Raw {
+                session_id: Some(self.control_session_id),
                 payload: json!({"channel":"provider_modes", "backend":self.config.backend_label,
-                    "options":options, "current":current}) });
+                    "options":options, "current":current}),
+            });
         }
     }
 
     /// Record `configOptions` (ACP session config options) from a
     /// session/new//load/resume result.
     async fn capture_config_options(&self, result: &Value) {
-        if let Some(catalog) = crate::ModelCatalog::from_response(result) { *self.model_catalog.write().await = catalog; }
+        if let Some(catalog) = crate::ModelCatalog::from_response(result) {
+            *self.model_catalog.write().await = catalog;
+        }
         let Some(arr) = result.get("configOptions").and_then(|v| v.as_array()) else {
             return;
         };
         let mut map = HashMap::new();
         let mut current = HashMap::new();
         for opt in arr {
-            let Some(id) = opt.get("id").and_then(|v| v.as_str()) else { continue };
-            if let Some(value) = opt.get("currentValue").and_then(Value::as_str) { current.insert(id.to_string(), value.to_string()); }
+            let Some(id) = opt.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if let Some(value) = opt.get("currentValue").and_then(Value::as_str) {
+                current.insert(id.to_string(), value.to_string());
+            }
             let values: Vec<String> = opt
                 .get("options")
                 .and_then(|v| v.as_array())
@@ -968,7 +1025,10 @@ impl AcpClient {
             if id == "mode" || opt.get("category").and_then(Value::as_str) == Some("mode") {
                 *self.available_modes.write().await = values.clone();
                 let active = opt.get("currentValue").and_then(Value::as_str);
-                if let Some(active) = active { *self.current_mode.write().await = Some(active.into()); self.record_effective_mode(active).await; }
+                if let Some(active) = active {
+                    *self.current_mode.write().await = Some(active.into());
+                    self.record_effective_mode(active).await;
+                }
                 self.emit_mode_options(opt.get("options").cloned().unwrap_or(json!([])), active);
             }
             map.insert(id.to_string(), values);
@@ -988,9 +1048,20 @@ impl AcpClient {
     /// Only expose speed settings explicitly advertised by this session's agent.
     pub async fn speed_option(&self) -> Option<(String, Vec<String>, Option<String>)> {
         let options = self.config_options.read().await;
-        for id in ["fast-mode", "service_tier", "fast_mode", "fastMode", "fast", "speed"] {
+        for id in [
+            "fast-mode",
+            "service_tier",
+            "fast_mode",
+            "fastMode",
+            "fast",
+            "speed",
+        ] {
             if let Some(values) = options.get(id).filter(|v| !v.is_empty()) {
-                return Some((id.into(), values.clone(), self.config_current.read().await.get(id).cloned()));
+                return Some((
+                    id.into(),
+                    values.clone(),
+                    self.config_current.read().await.get(id).cloned(),
+                ));
             }
         }
         None
@@ -1007,16 +1078,26 @@ impl AcpClient {
             .find(|v| v.eq_ignore_ascii_case(value))
             .cloned()
             .unwrap_or_else(|| value.to_string());
-        let Some(sid) = self.session_id().await else { return Ok(false) };
+        let Some(sid) = self.session_id().await else {
+            return Ok(false);
+        };
         if self.transport.read().await.is_none() {
-            self.config_current.write().await.insert(id.to_string(), value.clone());
+            self.config_current
+                .write()
+                .await
+                .insert(id.to_string(), value.clone());
             debug!(%id, %value, "set_config_option (mock/local)");
             return Ok(true);
         }
         let params = json!({ "sessionId": sid, "configId": id, "value": value });
-        let result = self.request_timeout("session/set_config_option", Some(params)).await?;
+        let result = self
+            .request_timeout("session/set_config_option", Some(params))
+            .await?;
         self.capture_config_options(&result).await;
-        self.config_current.write().await.insert(id.to_string(), value.clone());
+        self.config_current
+            .write()
+            .await
+            .insert(id.to_string(), value.clone());
         info!(%id, %value, "ACP config option set");
         Ok(true)
     }
@@ -1028,7 +1109,15 @@ impl AcpClient {
             return Some(wanted.to_string());
         }
         if wanted == "auto" {
-            if let Some(value) = self.auto_mode_override.read().await.as_ref().filter(|v| advertised.contains(v)) { return Some(value.clone()); }
+            if let Some(value) = self
+                .auto_mode_override
+                .read()
+                .await
+                .as_ref()
+                .filter(|v| advertised.contains(v))
+            {
+                return Some(value.clone());
+            }
         }
         if let Some(exact) = advertised.iter().find(|m| m.eq_ignore_ascii_case(wanted)) {
             return Some(exact.clone());
@@ -1065,23 +1154,48 @@ impl AcpClient {
     }
 
     async fn apply_model_after_session(&self, opts: &SpawnOptions) -> Result<()> {
-        let Some(model) = opts.model.as_deref().filter(|m| !m.is_empty() && *m != "mock") else { return Ok(()); };
+        let Some(model) = opts
+            .model
+            .as_deref()
+            .filter(|m| !m.is_empty() && *m != "mock")
+        else {
+            return Ok(());
+        };
         let catalog = self.model_catalog().await;
         if !catalog.models.is_empty() {
-            let selected = catalog.models.iter().find(|m| m.id.eq_ignore_ascii_case(model))
-                .ok_or_else(|| AcpError::Protocol(format!("The agent does not offer model {model}; refresh the provider model list")))?;
+            let selected = catalog
+                .models
+                .iter()
+                .find(|m| m.id.eq_ignore_ascii_case(model))
+                .ok_or_else(|| {
+                    AcpError::Protocol(format!(
+                        "The agent does not offer model {model}; refresh the provider model list"
+                    ))
+                })?;
             if let Some(config_id) = catalog.config_id {
                 self.set_config_option(&config_id, &selected.id).await?;
             } else if catalog.current.as_deref() != Some(&selected.id) {
                 let sid = self.session_id().await.ok_or(AcpError::SessionNotReady)?;
-                self.request_timeout("session/set_model", Some(json!({"sessionId":sid,"modelId":selected.id}))).await?;
+                self.request_timeout(
+                    "session/set_model",
+                    Some(json!({"sessionId":sid,"modelId":selected.id})),
+                )
+                .await?;
             }
         }
         Ok(())
     }
 
     pub async fn set_effort(&self, effort: &str) -> Result<bool> {
-        let option = if self.config_option_values("reasoning_effort").await.is_some() { "reasoning_effort" } else { "effort" };
+        let option = if self
+            .config_option_values("reasoning_effort")
+            .await
+            .is_some()
+        {
+            "reasoning_effort"
+        } else {
+            "effort"
+        };
         self.set_config_option(option, effort).await
     }
 
@@ -1201,7 +1315,10 @@ impl AcpClient {
         // Emulated plan mode: prepend planning instructions to the message —
         // the agent's restrictive mode blocks writes, this sets the
         // investigate → clarify → propose-a-plan behavior.
-        if self.plan_emulation.load(std::sync::atomic::Ordering::Relaxed) {
+        if self
+            .plan_emulation
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
             text = format!("{PLAN_EMULATION_PREAMBLE}\n\n{text}");
         }
 
@@ -1225,7 +1342,13 @@ impl AcpClient {
                         at: Utc::now(),
                     };
                     sleep(Duration::from_millis(400)).await;
-                    for chunk in ["💭Looking at the request", "💭 (", "💭mock", "💭 agent, ", "💭no real work)."] {
+                    for chunk in [
+                        "💭Looking at the request",
+                        "💭 (",
+                        "💭mock",
+                        "💭 agent, ",
+                        "💭no real work).",
+                    ] {
                         bus.emit(say(chunk));
                         sleep(Duration::from_millis(120)).await;
                     }
@@ -1263,7 +1386,10 @@ impl AcpClient {
                         bus.emit(say(word));
                         sleep(Duration::from_millis(25)).await;
                     }
-                    bus.emit(ControlEvent::Raw { session_id: Some(sid), payload: json!({"turn_complete":true}) });
+                    bus.emit(ControlEvent::Raw {
+                        session_id: Some(sid),
+                        payload: json!({"turn_complete":true}),
+                    });
                     bus.emit_status(sid, SessionStatus::Idle).await;
                 });
             }
@@ -1342,7 +1468,9 @@ impl AcpClient {
 
         tokio::spawn(async move {
             let response = tokio::time::timeout(prompt_timeout, rx).await;
-            if generation.load(std::sync::atomic::Ordering::SeqCst) != turn { return; }
+            if generation.load(std::sync::atomic::Ordering::SeqCst) != turn {
+                return;
+            }
             match response {
                 Ok(Ok(resp)) => match NdjsonTransport::unwrap_response(resp) {
                     Ok(result) => {
@@ -1426,7 +1554,8 @@ impl AcpClient {
     }
 
     pub async fn cancel(&self) -> Result<()> {
-        self.turn_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.turn_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // Cancelled turns must resolve pending permission requests (ACP spec).
         self.drain_pending_permissions().await;
         // Mock / offline clients have no transport — treat cancel as local status update.
@@ -1445,9 +1574,13 @@ impl AcpClient {
             // in OUR terminal host — kill them so Stop actually stops work.
             self.terminals.kill_all().await;
         }
-        if !self.shutting_down.load(std::sync::atomic::Ordering::Relaxed) {
+        if !self
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
             if let Some(bus) = &self.event_bus {
-                bus.emit_status(self.control_session_id, SessionStatus::Cancelled).await;
+                bus.emit_status(self.control_session_id, SessionStatus::Cancelled)
+                    .await;
             }
         }
         Ok(())
@@ -1468,7 +1601,9 @@ impl AcpClient {
             std::sync::atomic::Ordering::Relaxed,
         );
         let current = self.current_mode.read().await.clone();
-        if let Some(current) = current { self.record_effective_mode(&current).await; }
+        if let Some(current) = current {
+            self.record_effective_mode(&current).await;
+        }
     }
 
     pub async fn approval_mode(&self) -> ApprovalMode {
@@ -1536,7 +1671,9 @@ impl AcpClient {
             Ok(result) => result,
             Err(error) => {
                 let mut current = self.current_mode.write().await;
-                if current.as_deref() == Some(&mode_id) { *current = previous_mode; }
+                if current.as_deref() == Some(&mode_id) {
+                    *current = previous_mode;
+                }
                 return Err(error);
             }
         };
@@ -1559,7 +1696,8 @@ impl AcpClient {
     /// True while plan mode runs via emulation (restrictive mode + injected
     /// planning instructions) rather than a native agent plan mode.
     pub fn plan_emulation_active(&self) -> bool {
-        self.plan_emulation.load(std::sync::atomic::Ordering::Relaxed)
+        self.plan_emulation
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Answer a parked `session/request_permission`. `option_id: None` = cancel.
@@ -1623,14 +1761,20 @@ impl AcpClient {
     /// The agent process died out from under us — surface it instead of
     /// leaving the thread stuck on "running".
     async fn report_process_death(&self) {
-        if self.shutting_down.load(std::sync::atomic::Ordering::Relaxed) {
+        if self
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
             return;
         }
         self.drain_pending_permissions().await;
         if let Some(bus) = &self.event_bus {
             bus.emit_error(
                 Some(self.control_session_id),
-                format!("{} agent process exited unexpectedly", self.config.backend_label),
+                format!(
+                    "{} agent process exited unexpectedly",
+                    self.config.backend_label
+                ),
             );
             bus.emit_status(self.control_session_id, SessionStatus::Failed)
                 .await;
@@ -1711,14 +1855,28 @@ impl AcpClient {
         let method = req.method.as_str();
         info!(%method, "ACP agent→client request");
         if self.config.read_only {
-            if matches!(method, "session/request_permission" | "session/requestPermission") {
-                return transport.send_response(req.id, json!({"outcome": {"outcome": "cancelled"}})).await;
+            if matches!(
+                method,
+                "session/request_permission" | "session/requestPermission"
+            ) && !self.provider_support_request(&req.params)
+            {
+                return transport
+                    .send_response(req.id, json!({"outcome": {"outcome": "cancelled"}}))
+                    .await;
             }
-            if matches!(method, "fs/write_text_file" | "fs/writeTextFile" | "terminal/create") {
-                return transport.send_error_response(req.id, -32000, "Inline is read-only. Create a workspace to make changes.").await;
+            if matches!(
+                method,
+                "fs/write_text_file" | "fs/writeTextFile" | "terminal/create"
+            ) {
+                return transport
+                    .send_error_response(
+                        req.id,
+                        -32000,
+                        "Inline is read-only. Create a workspace to make changes.",
+                    )
+                    .await;
             }
         }
-
 
         match method {
             "fs/read_text_file" | "fs/readTextFile" => {
@@ -1857,6 +2015,8 @@ impl AcpClient {
                 // review the plan, even in auto/yolo.
                 let auto_reason = if plan_extracted.is_some() {
                     None
+                } else if self.provider_support_request(&req.params) {
+                    Some("provider support file · read-only".to_string())
                 } else if allow_hit {
                     Some("matches an allow rule".to_string())
                 } else {
@@ -1963,16 +2123,11 @@ impl AcpClient {
                             {
                                 if let Ok(out) = self
                                     .terminals
-                                    .handle(
-                                        "terminal/output",
-                                        &Some(json!({ "terminalId": tid })),
-                                    )
+                                    .handle("terminal/output", &Some(json!({ "terminalId": tid })))
                                     .await
                                 {
-                                    let text = out
-                                        .get("output")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("");
+                                    let text =
+                                        out.get("output").and_then(|v| v.as_str()).unwrap_or("");
                                     if !text.is_empty() {
                                         let clip = if text.len() > 4000 {
                                             format!("{}…", &text[..4000])
@@ -2029,6 +2184,79 @@ impl AcpClient {
             }
         }
         Ok(())
+    }
+
+    fn provider_support_path(&self, path: &str) -> Option<PathBuf> {
+        let home = PathBuf::from(std::env::var_os("HOME")?);
+        let key = match self.config.backend_label.as_str() {
+            "grok" => "GROK_HOME",
+            "claude" => "CLAUDE_CONFIG_DIR",
+            "codex" => "CODEX_HOME",
+            _ => return None,
+        };
+        let configured = self
+            .config
+            .env
+            .iter()
+            .rev()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| PathBuf::from(v))
+            .or_else(|| std::env::var_os(key).map(PathBuf::from));
+        let roots = crate::provider_paths::roots(&self.config.backend_label, &home, configured);
+        let path = PathBuf::from(path);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            self.config.cwd.join(path)
+        };
+        crate::provider_paths::resolve(&path, &roots)
+    }
+
+    fn provider_support_request(&self, params: &Option<Value>) -> bool {
+        let Some(call) = params.as_ref().and_then(|p| p.get("toolCall")) else {
+            return false;
+        };
+        let tool = call
+            .get("title")
+            .or_else(|| call.get("toolName"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if classify_tool(tool, params) != ToolClass::SafeRead {
+            return false;
+        }
+        let Some(input) = call.get("rawInput") else {
+            return false;
+        };
+        [
+            "path",
+            "file_path",
+            "filePath",
+            "target_file",
+            "target_directory",
+        ]
+        .iter()
+        .find_map(|key| input.get(key).and_then(Value::as_str))
+        .is_some_and(|path| {
+            self.provider_support_path(path).is_some() && self.resolve_read_path(path).is_ok()
+        })
+    }
+
+    fn resolve_read_path(&self, path: &str) -> Result<PathBuf> {
+        if grok_permissions::matches_any_pattern(&self.deny_patterns, "Read", path)
+            || grok_permissions::matches_any_pattern(&self.deny_patterns, "fs/read", path)
+        {
+            return Err(AcpError::Protocol("Read denied by permission rule".into()));
+        }
+        let resolved = self
+            .resolve_sandbox_path(path)
+            .or_else(|error| self.provider_support_path(path).ok_or(error))?;
+        let canonical = resolved.to_string_lossy();
+        if grok_permissions::matches_any_pattern(&self.deny_patterns, "Read", &canonical)
+            || grok_permissions::matches_any_pattern(&self.deny_patterns, "fs/read", &canonical)
+        {
+            return Err(AcpError::Protocol("Read denied by permission rule".into()));
+        }
+        Ok(resolved)
     }
 
     fn resolve_sandbox_path(&self, path: &str) -> Result<PathBuf> {
@@ -2097,14 +2325,16 @@ impl AcpClient {
     }
 
     async fn fs_read_text(&self, params: &Option<Value>) -> Result<String> {
-        let p = params.as_ref().ok_or_else(|| AcpError::Protocol("missing params".into()))?;
+        let p = params
+            .as_ref()
+            .ok_or_else(|| AcpError::Protocol("missing params".into()))?;
         let path = p
             .get("path")
             .or_else(|| p.get("file_path"))
             .or_else(|| p.get("filePath"))
             .and_then(|v| v.as_str())
             .ok_or_else(|| AcpError::Protocol("fs/read missing path".into()))?;
-        let abs = self.resolve_sandbox_path(path)?;
+        let abs = self.resolve_read_path(path)?;
         let mut content = tokio::fs::read_to_string(&abs)
             .await
             .map_err(|e| AcpError::Protocol(format!("read {}: {e}", abs.display())))?;
@@ -2133,8 +2363,14 @@ impl AcpClient {
     }
 
     async fn fs_write_text(&self, params: &Option<Value>) -> Result<()> {
-        if self.config.read_only { return Err(AcpError::Protocol("Inline is read-only. Create a workspace to make changes.".into())); }
-        let p = params.as_ref().ok_or_else(|| AcpError::Protocol("missing params".into()))?;
+        if self.config.read_only {
+            return Err(AcpError::Protocol(
+                "Inline is read-only. Create a workspace to make changes.".into(),
+            ));
+        }
+        let p = params
+            .as_ref()
+            .ok_or_else(|| AcpError::Protocol("missing params".into()))?;
         let path = p
             .get("path")
             .or_else(|| p.get("file_path"))
@@ -2418,12 +2654,13 @@ impl AcpClient {
                     .and_then(|v| v.as_str())
                     .map(map_tool_status)
                     .unwrap_or(ToolCallStatus::Running);
-                let result_summary = if matches!(status, ToolCallStatus::Running | ToolCallStatus::Pending) {
-                    None
-                } else {
-                    extract_text_content(update.get("content"))
-                        .or_else(|| update.get("rawOutput").map(|v| v.to_string()))
-                };
+                let result_summary =
+                    if matches!(status, ToolCallStatus::Running | ToolCallStatus::Pending) {
+                        None
+                    } else {
+                        extract_text_content(update.get("content"))
+                            .or_else(|| update.get("rawOutput").map(|v| v.to_string()))
+                    };
                 bus.emit_tool_call(
                     sid,
                     ToolCallEvent {
@@ -2445,7 +2682,10 @@ impl AcpClient {
                 emit_images(
                     bus,
                     sid,
-                    update.get("toolCallId").or_else(|| update.get("id")).and_then(|v| v.as_str()),
+                    update
+                        .get("toolCallId")
+                        .or_else(|| update.get("id"))
+                        .and_then(|v| v.as_str()),
                     extract_image_blocks(update.get("content")),
                 );
             }
@@ -2480,18 +2720,17 @@ impl AcpClient {
                             .unwrap_or_default(),
                         status: tool_status,
                         result_summary: extract_text_content(update.get("content"))
-                            .or_else(|| {
-                                update
-                                    .get("rawOutput")
-                                    .map(|v| v.to_string())
-                            }),
+                            .or_else(|| update.get("rawOutput").map(|v| v.to_string())),
                         at: Utc::now(),
                     },
                 );
                 emit_images(
                     bus,
                     sid,
-                    update.get("toolCallId").or_else(|| update.get("id")).and_then(|v| v.as_str()),
+                    update
+                        .get("toolCallId")
+                        .or_else(|| update.get("id"))
+                        .and_then(|v| v.as_str()),
                     extract_image_blocks(update.get("content")),
                 );
             }
@@ -2574,7 +2813,12 @@ impl AcpClient {
                     },
                 );
             }
-            "available_commands_update" | "availablecommandsupdate" => {}
+            "available_commands_update" | "availablecommandsupdate" => {
+                bus.emit(ControlEvent::Raw { session_id: Some(sid), payload: json!({
+                    "channel":"provider_commands", "backend":self.config.backend_label,
+                    "commands":update.get("availableCommands").or_else(||update.get("commands")).cloned().unwrap_or(json!([]))
+                }) });
+            }
             "current_mode_update" | "currentmodeupdate" => {
                 if let Some(mode) = update
                     .get("currentModeId")
@@ -2621,11 +2865,7 @@ impl AcpClient {
                 } else {
                     compact
                 };
-                Self::emit_term(
-                    bus,
-                    sid,
-                    format!("· acp/{other}: {compact}"),
-                );
+                Self::emit_term(bus, sid, format!("· acp/{other}: {compact}"));
             }
         }
     }
@@ -2667,10 +2907,25 @@ fn classify_tool(tool_name: &str, params: &Option<Value>) -> ToolClass {
     // No usable kind — infer from the tool name / payload shape.
     let n = tool_name.to_lowercase();
     let name_is = |cands: &[&str]| cands.iter().any(|c| n.contains(c));
-    if name_is(&["read", "glob", "grep", "search", "list", "find", "fetch_rules"]) {
+    if name_is(&[
+        "read",
+        "glob",
+        "grep",
+        "search",
+        "list",
+        "find",
+        "fetch_rules",
+    ]) {
         return ToolClass::SafeRead;
     }
-    if name_is(&["multiedit", "edit", "write", "create_file", "apply_patch", "notebook"]) {
+    if name_is(&[
+        "multiedit",
+        "edit",
+        "write",
+        "create_file",
+        "apply_patch",
+        "notebook",
+    ]) {
         return ToolClass::Edit;
     }
     if name_is(&["bash", "shell", "terminal", "run_command", "exec"]) || command.is_some() {
@@ -2697,14 +2952,64 @@ fn is_safe_command(command: &str) -> bool {
 
     // Hard blockers anywhere in the line.
     const DANGER: &[&str] = &[
-        "sudo ", "su ", "doas ", "rm -rf", "rm -fr", "rm -r", "rm ", "rmdir", "dd ", "mkfs",
-        "chmod 777", "chown ", "shutdown", "reboot", "halt", "kill ", "pkill", "killall",
-        "curl", "wget", "nc ", "ssh ", "scp ", "ftp ", "npm publish", "yarn publish",
-        "cargo publish", "git push", "git reset --hard", "git clean", "git checkout --",
-        "> /", ">> /", "eval ", "source ", "chsh", "launchctl", "systemctl", "brew install",
-        "apt ", "apt-get", "yum ", "pacman", "pip install", "npm i -g", "npm install -g",
-        "docker ", "kubectl", "terraform", "aws ", "gcloud", "history", "crontab",
-        "..", "~/.ssh", "/etc/", "id_rsa", "credentials",
+        "sudo ",
+        "su ",
+        "doas ",
+        "rm -rf",
+        "rm -fr",
+        "rm -r",
+        "rm ",
+        "rmdir",
+        "dd ",
+        "mkfs",
+        "chmod 777",
+        "chown ",
+        "shutdown",
+        "reboot",
+        "halt",
+        "kill ",
+        "pkill",
+        "killall",
+        "curl",
+        "wget",
+        "nc ",
+        "ssh ",
+        "scp ",
+        "ftp ",
+        "npm publish",
+        "yarn publish",
+        "cargo publish",
+        "git push",
+        "git reset --hard",
+        "git clean",
+        "git checkout --",
+        "> /",
+        ">> /",
+        "eval ",
+        "source ",
+        "chsh",
+        "launchctl",
+        "systemctl",
+        "brew install",
+        "apt ",
+        "apt-get",
+        "yum ",
+        "pacman",
+        "pip install",
+        "npm i -g",
+        "npm install -g",
+        "docker ",
+        "kubectl",
+        "terraform",
+        "aws ",
+        "gcloud",
+        "history",
+        "crontab",
+        "..",
+        "~/.ssh",
+        "/etc/",
+        "id_rsa",
+        "credentials",
     ];
     if DANGER.iter().any(|d| lower.contains(d)) {
         return false;
@@ -2716,17 +3021,77 @@ fn is_safe_command(command: &str) -> bool {
 
     // Every && / ; segment must start with a known-safe program.
     const SAFE_PROGRAMS: &[&str] = &[
-        "ls", "cat", "head", "tail", "wc", "echo", "pwd", "which", "file", "stat", "tree",
-        "grep", "rg", "fd", "find", "diff", "sort", "uniq", "date", "env", "printenv",
-        "cargo", "npm", "pnpm", "yarn", "bun", "node", "deno", "python", "python3", "pip",
-        "pytest", "go", "make", "just", "ruff", "black", "prettier", "eslint", "tsc",
-        "jest", "vitest", "mvn", "gradle", "swift", "xcodebuild", "dotnet", "ruby", "rake",
-        "bundle", "php", "composer",
+        "ls",
+        "cat",
+        "head",
+        "tail",
+        "wc",
+        "echo",
+        "pwd",
+        "which",
+        "file",
+        "stat",
+        "tree",
+        "grep",
+        "rg",
+        "fd",
+        "find",
+        "diff",
+        "sort",
+        "uniq",
+        "date",
+        "env",
+        "printenv",
+        "cargo",
+        "npm",
+        "pnpm",
+        "yarn",
+        "bun",
+        "node",
+        "deno",
+        "python",
+        "python3",
+        "pip",
+        "pytest",
+        "go",
+        "make",
+        "just",
+        "ruff",
+        "black",
+        "prettier",
+        "eslint",
+        "tsc",
+        "jest",
+        "vitest",
+        "mvn",
+        "gradle",
+        "swift",
+        "xcodebuild",
+        "dotnet",
+        "ruby",
+        "rake",
+        "bundle",
+        "php",
+        "composer",
     ];
     // Git is safe for read-only subcommands only.
     const SAFE_GIT: &[&str] = &[
-        "status", "log", "diff", "show", "branch", "remote", "config", "blame", "stash",
-        "add", "commit", "fetch", "rev-parse", "describe", "ls-files", "worktree",
+        "status",
+        "log",
+        "diff",
+        "show",
+        "branch",
+        "remote",
+        "config",
+        "blame",
+        "stash",
+        "add",
+        "commit",
+        "fetch",
+        "rev-parse",
+        "describe",
+        "ls-files",
+        "worktree",
     ];
 
     for segment in lower.split("&&").flat_map(|s| s.split(';')) {
@@ -2829,7 +3194,13 @@ fn parse_permission_options(params: &Option<Value>) -> Vec<PermissionOptionInfo>
                         .or_else(|| o.get("label"))
                         .and_then(|v| v.as_str())
                         .map(str::to_string)
-                        .unwrap_or_else(|| if kind.is_empty() { id.clone() } else { kind.clone() });
+                        .unwrap_or_else(|| {
+                            if kind.is_empty() {
+                                id.clone()
+                            } else {
+                                kind.clone()
+                            }
+                        });
                     Some(PermissionOptionInfo { id, kind, label })
                 })
                 .collect()
@@ -2852,7 +3223,9 @@ fn pick_auto_approve_option(options: &[PermissionOptionInfo]) -> Option<String> 
 
     options
         .iter()
-        .find(|o| o.kind.eq_ignore_ascii_case("allow_once") || o.kind.eq_ignore_ascii_case("allowonce"))
+        .find(|o| {
+            o.kind.eq_ignore_ascii_case("allow_once") || o.kind.eq_ignore_ascii_case("allowonce")
+        })
         .or_else(|| {
             options
                 .iter()
@@ -3032,25 +3405,69 @@ mod tests {
             {"value":"default","name":"Default (recommended)"}, {"value":"opus[1m]","name":"Opus 5"}
         ]}]})).await;
         for model in ["opus[1m]", "default"] {
-            client.apply_model_after_session(&SpawnOptions {model:Some(model.into()), ..Default::default()}).await.unwrap();
-            assert_eq!(client.config_current.read().await.get("model").map(String::as_str), Some(model));
+            client
+                .apply_model_after_session(&SpawnOptions {
+                    model: Some(model.into()),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                client
+                    .config_current
+                    .read()
+                    .await
+                    .get("model")
+                    .map(String::as_str),
+                Some(model)
+            );
         }
-        assert!(client.apply_model_after_session(&SpawnOptions {model:Some("claude-opus-5".into()), ..Default::default()}).await.is_err());
+        assert!(client
+            .apply_model_after_session(&SpawnOptions {
+                model: Some("claude-opus-5".into()),
+                ..Default::default()
+            })
+            .await
+            .is_err());
     }
 
     #[tokio::test]
     async fn codex_model_and_reasoning_use_advertised_config_options() {
         let client = AcpClient::mock_for_tests("model-config", None);
-        client.capture_config_options(&serde_json::json!({"configOptions":[
-            {"id":"model","currentValue":"old","options":[{"value":"gpt-6-astra"}]},
-            {"id":"reasoning_effort","currentValue":"high","options":[{"value":"medium"}]}
-        ]})).await;
-        let opts = SpawnOptions { model: Some("gpt-6-astra".into()), ..Default::default() };
+        client
+            .capture_config_options(&serde_json::json!({"configOptions":[
+                {"id":"model","currentValue":"old","options":[{"value":"gpt-6-astra"}]},
+                {"id":"reasoning_effort","currentValue":"high","options":[{"value":"medium"}]}
+            ]}))
+            .await;
+        let opts = SpawnOptions {
+            model: Some("gpt-6-astra".into()),
+            ..Default::default()
+        };
         client.apply_model_after_session(&opts).await.unwrap();
         assert!(client.set_effort("medium").await.unwrap());
-        assert_eq!(client.config_current.read().await.get("model").map(String::as_str), Some("gpt-6-astra"));
-        assert_eq!(client.config_current.read().await.get("reasoning_effort").map(String::as_str), Some("medium"));
-        let unknown = SpawnOptions { model: Some("missing".into()), ..Default::default() };
+        assert_eq!(
+            client
+                .config_current
+                .read()
+                .await
+                .get("model")
+                .map(String::as_str),
+            Some("gpt-6-astra")
+        );
+        assert_eq!(
+            client
+                .config_current
+                .read()
+                .await
+                .get("reasoning_effort")
+                .map(String::as_str),
+            Some("medium")
+        );
+        let unknown = SpawnOptions {
+            model: Some("missing".into()),
+            ..Default::default()
+        };
         assert!(client.apply_model_after_session(&unknown).await.is_err());
     }
 
@@ -3063,14 +3480,33 @@ mod tests {
             "currentValue":"off", "options":[{"value":"off","name":"Off"},{"value":"on","name":"On"}]
         }]});
         client.capture_config_options(&options).await;
-        assert_eq!(client.speed_option().await, Some(("fast-mode".into(), vec!["off".into(), "on".into()], Some("off".into()))));
-        client.map_session_update(&bus, uuid::Uuid::new_v4(), &serde_json::json!({"update":{
-            "sessionUpdate":"config_option_update", "configOptions":[]
-        }})).await;
+        assert_eq!(
+            client.speed_option().await,
+            Some((
+                "fast-mode".into(),
+                vec!["off".into(), "on".into()],
+                Some("off".into())
+            ))
+        );
+        client
+            .map_session_update(
+                &bus,
+                uuid::Uuid::new_v4(),
+                &serde_json::json!({"update":{
+                    "sessionUpdate":"config_option_update", "configOptions":[]
+                }}),
+            )
+            .await;
         assert!(client.speed_option().await.is_none());
-        client.map_session_update(&bus, uuid::Uuid::new_v4(), &serde_json::json!({"update":{
-            "sessionUpdate":"config_option_update", "configOptions":options["configOptions"]
-        }})).await;
+        client
+            .map_session_update(
+                &bus,
+                uuid::Uuid::new_v4(),
+                &serde_json::json!({"update":{
+                    "sessionUpdate":"config_option_update", "configOptions":options["configOptions"]
+                }}),
+            )
+            .await;
         assert_eq!(client.speed_option().await.unwrap().0, "fast-mode");
     }
 
@@ -3080,8 +3516,17 @@ mod tests {
         client.capture_config_options(&serde_json::json!({"configOptions":[{"id":"effort","options":[{"value":"high"}]}]})).await;
         assert!(client.speed_option().await.is_none());
         client.capture_config_options(&serde_json::json!({"configOptions":[{"id":"service_tier","currentValue":"fast","options":[{"value":"standard"},{"value":"fast"}]}]})).await;
-        assert_eq!(client.speed_option().await, Some(("service_tier".into(), vec!["standard".into(), "fast".into()], Some("fast".into()))));
-        client.capture_config_options(&serde_json::json!({"configOptions":[]})).await;
+        assert_eq!(
+            client.speed_option().await,
+            Some((
+                "service_tier".into(),
+                vec!["standard".into(), "fast".into()],
+                Some("fast".into())
+            ))
+        );
+        client
+            .capture_config_options(&serde_json::json!({"configOptions":[]}))
+            .await;
         assert!(client.speed_option().await.is_none());
     }
 
@@ -3094,8 +3539,12 @@ mod tests {
         let c = Arc::get_mut(&mut client).unwrap();
         c.config.cwd = dir.path().to_path_buf();
         c.config.read_only = true;
-        c.always_approve.store(true, std::sync::atomic::Ordering::Relaxed);
-        assert!(client.fs_write_text(&Some(json!({"path":file,"content":"changed"}))).await.is_err());
+        c.always_approve
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(client
+            .fs_write_text(&Some(json!({"path":file,"content":"changed"})))
+            .await
+            .is_err());
         assert_eq!(std::fs::read_to_string(file).unwrap(), "original");
     }
 
@@ -3126,7 +3575,9 @@ mod tests {
     fn sandbox_blocks_dotdot_escape_for_new_files() {
         let c = AcpClient::mock_for_tests("sess-1", None);
         // cwd is /tmp — a not-yet-existing path escaping via `..` must fail.
-        assert!(c.resolve_sandbox_path("/tmp/x/../../etc/new_file_nope").is_err());
+        assert!(c
+            .resolve_sandbox_path("/tmp/x/../../etc/new_file_nope")
+            .is_err());
         assert!(c.resolve_sandbox_path("../../etc/new_file_nope").is_err());
         // A new file inside the workspace is fine.
         assert!(c.resolve_sandbox_path("subdir/new_file.txt").is_ok());
@@ -3150,10 +3601,11 @@ mod tests {
         assert!(extract_tool_plan("Ready to code?", Some(&input)).is_some());
         // `content` is only trusted on plan-named tools; short/missing plans
         // are ignored.
-        assert!(
-            extract_tool_plan("Bash", Some(&json!({ "content": "## Steps\nlong enough content" })))
-                .is_none()
-        );
+        assert!(extract_tool_plan(
+            "Bash",
+            Some(&json!({ "content": "## Steps\nlong enough content" }))
+        )
+        .is_none());
         assert!(extract_tool_plan("ExitPlanMode", Some(&json!({ "plan": "hi" }))).is_none());
         assert!(extract_tool_plan("ExitPlanMode", None).is_none());
     }
@@ -3259,7 +3711,10 @@ mod tests {
             "agent".into(),
             "agent-full-access".into(),
         ];
-        assert_eq!(c.resolve_mode_id("plan").await.as_deref(), Some("read-only"));
+        assert_eq!(
+            c.resolve_mode_id("plan").await.as_deref(),
+            Some("read-only")
+        );
         assert_eq!(
             c.resolve_mode_id("always_approve").await.as_deref(),
             Some("agent-full-access")
@@ -3357,15 +3812,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_support_reads_do_not_grant_write_or_credential_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        let provider = dir.path().join("provider");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(provider.join("skills/demo")).unwrap();
+        let skill = provider.join("skills/demo/SKILL.md");
+        std::fs::write(&skill, "skill instructions").unwrap();
+        let mut client = AcpClient::mock_for_tests("support", None);
+        let config = &mut Arc::get_mut(&mut client).unwrap().config;
+        config.cwd = cwd;
+        config
+            .env
+            .push(("GROK_HOME".into(), provider.to_string_lossy().into_owned()));
+        assert_eq!(
+            client
+                .fs_read_text(&Some(json!({"path":skill})))
+                .await
+                .unwrap(),
+            "skill instructions"
+        );
+        assert!(client
+            .fs_write_text(&Some(json!({"path":skill,"content":"no"})))
+            .await
+            .is_err());
+        std::fs::write(provider.join("auth.json"), "secret").unwrap();
+        assert!(client
+            .resolve_read_path(provider.join("auth.json").to_str().unwrap())
+            .is_err());
+        assert!(client.provider_support_request(&Some(
+            json!({"toolCall":{"title":"Read", "kind":"read", "rawInput":{"target_file":skill}}})
+        )));
+        Arc::get_mut(&mut client)
+            .unwrap()
+            .deny_patterns
+            .push("Read(*)".into());
+        assert!(client.resolve_read_path(skill.to_str().unwrap()).is_err());
+    }
+
+    #[tokio::test]
     async fn provider_auto_fallback_survives_switching_to_manual() {
         let client = AcpClient::mock_for_tests("mode-session", None);
         client.set_approval_mode(ApprovalMode::Auto).await;
-        client.capture_config_options(&json!({"configOptions":[{"id":"mode","currentValue":"acceptEdits","options":[
-            {"value":"default"},{"value":"auto"},{"value":"acceptEdits"}
-        ]}]})).await;
+        client
+            .capture_config_options(
+                &json!({"configOptions":[{"id":"mode","currentValue":"acceptEdits","options":[
+                    {"value":"default"},{"value":"auto"},{"value":"acceptEdits"}
+                ]}]}),
+            )
+            .await;
         client.set_approval_mode(ApprovalMode::Ask).await;
         *client.current_mode.write().await = Some("default".into());
-        assert_eq!(client.resolve_mode_id("auto").await.as_deref(), Some("acceptEdits"));
+        assert_eq!(
+            client.resolve_mode_id("auto").await.as_deref(),
+            Some("acceptEdits")
+        );
     }
 
     #[tokio::test]
@@ -3379,7 +3881,10 @@ mod tests {
         let mut found = false;
         while let Ok(event) = events.try_recv() {
             if let ControlEvent::Raw { payload, .. } = event {
-                if payload["channel"] == "image" { assert_eq!(payload["data"], "aGVsbG8="); found = true; }
+                if payload["channel"] == "image" {
+                    assert_eq!(payload["data"], "aGVsbG8=");
+                    found = true;
+                }
             }
         }
         assert!(found);

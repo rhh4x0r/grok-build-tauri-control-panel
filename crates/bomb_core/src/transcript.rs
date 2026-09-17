@@ -12,7 +12,9 @@ use std::collections::{HashSet, VecDeque};
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
-use grok_events::{ControlEvent, PermissionOptionInfo, PlanUpdateEvent, SessionStatus, ToolCallEvent};
+use grok_events::{
+    ControlEvent, PermissionOptionInfo, PlanUpdateEvent, SessionStatus, ToolCallEvent,
+};
 use grok_persistence::TranscriptEntry;
 use serde_json::Value;
 
@@ -138,9 +140,14 @@ pub enum Change {
     Appended(usize),
     Updated(usize),
     /// A streaming chunk was appended to `entries[index]`.
-    Streamed { index: usize, delta: String },
+    Streamed {
+        index: usize,
+        delta: String,
+    },
     /// Older entries were dropped; `count` entries removed from the front.
-    Trimmed { count: usize },
+    Trimmed {
+        count: usize,
+    },
     Label(String),
     Status(SessionStatus),
     Explain,
@@ -174,10 +181,13 @@ impl Thread {
 
     /// Unresolved approval cards, oldest first.
     pub fn open_approvals(&self) -> impl Iterator<Item = (usize, &ApprovalCard)> {
-        self.entries.iter().enumerate().filter_map(|(i, e)| match &e.body {
-            Body::Approval(a) if a.is_open() => Some((i, a)),
-            _ => None,
-        })
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| match &e.body {
+                Body::Approval(a) if a.is_open() => Some((i, a)),
+                _ => None,
+            })
     }
 
     /// Rebuild from persisted rows (roles written by `persist_control_event`
@@ -229,7 +239,10 @@ impl Thread {
                     };
                     if v.is_null() {
                         self.push(Role::Tool, Body::Text(row.body.clone()), at);
-                    } else if let Some(i) = self.find_tool(&row_.tool_id).filter(|_| !row_.tool_id.is_empty()) {
+                    } else if let Some(i) = self
+                        .find_tool(&row_.tool_id)
+                        .filter(|_| !row_.tool_id.is_empty())
+                    {
                         // Later status of the same call: update, don't stack.
                         self.entries[i].body = Body::Tool(row_);
                         self.entries[i].at = at;
@@ -277,20 +290,29 @@ impl Thread {
                 }
                 "image" => {
                     let v: Value = serde_json::from_str(&row.body).unwrap_or(Value::Null);
-                    let (Some(path), mime) = (str_at(&v, "path"), str_at(&v, "mimeType").unwrap_or_else(|| "image/png".into())) else {
+                    let (Some(path), mime) = (
+                        str_at(&v, "path"),
+                        str_at(&v, "mimeType").unwrap_or_else(|| "image/png".into()),
+                    ) else {
                         continue;
                     };
                     if let Ok(bytes) = std::fs::read(&path) {
                         use base64::Engine;
                         let data = base64::engine::general_purpose::STANDARD.encode(bytes);
                         let e = self.push(Role::Agent, Body::Text(String::new()), at);
-                        e.images.push(ImageAttachment { mime_type: mime, data, name: Some(path) });
+                        e.images.push(ImageAttachment {
+                            mime_type: mime,
+                            data,
+                            name: Some(path),
+                        });
                     }
                 }
                 _ => {
                     // Breadcrumbs the old UI needed so the column never looked
                     // idle; the status line covers that now.
-                    if starts_with_status_glyph(&row.body) || row.body.starts_with("→ prompt accepted") {
+                    if starts_with_status_glyph(&row.body)
+                        || row.body.starts_with("→ prompt accepted")
+                    {
                         self.protocol(&row.body);
                     } else {
                         self.push(Role::System, Body::Text(row.body.clone()), at);
@@ -380,7 +402,10 @@ impl Thread {
                 ch
             }
             ControlEvent::SessionCreated { session_id, .. } => {
-                self.protocol(&format!("session ready · {}", short_id(&session_id.to_string())));
+                self.protocol(&format!(
+                    "session ready · {}",
+                    short_id(&session_id.to_string())
+                ));
                 vec![Change::Protocol]
             }
             ControlEvent::SessionStatusChanged { status, .. } => self.on_status(*status, now),
@@ -455,6 +480,10 @@ impl Thread {
                         a.resolution = Some(resolution);
                     }
                     ch.push(Change::Updated(i));
+                }
+                // Late acknowledgments may arrive after the turn's completion.
+                if !self.presence.turn_active() {
+                    return ch;
                 }
                 // Back to work: wait accepts a lower-ranked phase.
                 self.presence.signal(
@@ -554,8 +583,12 @@ impl Thread {
                 Some(i) => {
                     // ACP status-only updates omit the original name/input.
                     if let Body::Tool(previous) = &self.entries[i].body {
-                        if row.name == "tool" || row.name.is_empty() { row.name.clone_from(&previous.name); }
-                        if row.args.is_empty() { row.args.clone_from(&previous.args); }
+                        if row.name == "tool" || row.name.is_empty() {
+                            row.name.clone_from(&previous.name);
+                        }
+                        if row.args.is_empty() {
+                            row.args.clone_from(&previous.args);
+                        }
                     }
                     self.entries[i].body = Body::Tool(row);
                     self.entries[i].at = te.at;
@@ -643,7 +676,9 @@ impl Thread {
                 // a terminal update from the agent.
                 self.sweep_tools("completed", &mut ch);
                 let p = &self.presence;
-                if p.phase == Phase::Error { return ch; }
+                if p.phase == Phase::Error {
+                    return ch;
+                }
                 if p.turn_active() || p.reply_chars > 0 || p.tool_count > 0 {
                     self.open_tools.clear();
                     self.end_turn(Phase::Done, "Turn finished", now);
@@ -652,18 +687,9 @@ impl Thread {
                     self.presence.signal(Phase::Idle, Patch::default(), now);
                 }
             }
-            SessionStatus::Running => {
-                if !self.presence.turn_active() {
-                    self.presence.signal(
-                        Phase::Think,
-                        Patch {
-                            note: Some("Session running".into()),
-                            ..Default::default()
-                        },
-                        now,
-                    );
-                }
-            }
+            // note_prompt starts the meter. Late Running/approval acknowledgments
+            // must not reopen a completed turn.
+            SessionStatus::Running => {}
             SessionStatus::Starting | SessionStatus::Recovering => {}
         }
         ch.push(Change::Presence);
@@ -691,7 +717,9 @@ impl Thread {
                 ch
             }
             "thread" if str_at(payload, "kind").as_deref() == Some("model_switch") => {
-                str_at(payload, "line").map(|line| self.note_system(&line)).unwrap_or_default()
+                str_at(payload, "line")
+                    .map(|line| self.note_system(&line))
+                    .unwrap_or_default()
             }
             "thread" if str_at(payload, "kind").as_deref() == Some("label") => {
                 match str_at(payload, "label") {
@@ -703,11 +731,17 @@ impl Thread {
                 }
             }
             "image" => {
-                let Some(data) = str_at(payload, "data") else { return Vec::new() };
+                let Some(data) = str_at(payload, "data") else {
+                    return Vec::new();
+                };
                 let mime = str_at(payload, "mimeType").unwrap_or_else(|| "image/png".into());
                 let mut ch = self.close_streams();
                 let e = self.push(Role::Agent, Body::Text(String::new()), Utc::now());
-                e.images.push(ImageAttachment { mime_type: mime, data, name: None });
+                e.images.push(ImageAttachment {
+                    mime_type: mime,
+                    data,
+                    name: None,
+                });
                 ch.push(Change::Appended(self.entries.len() - 1));
                 ch
             }
@@ -720,21 +754,9 @@ impl Thread {
                     return Vec::new();
                 }
                 self.context_tokens = Some(n);
-                if self.presence.turn_active() || self.presence.phase == Phase::Idle {
-                    let phase = if self.presence.phase == Phase::Idle {
-                        Phase::Think
-                    } else {
-                        self.presence.phase
-                    };
-                    self.presence.signal(
-                        phase,
-                        Patch {
-                            context_tokens: Some(n),
-                            ..Default::default()
-                        },
-                        now,
-                    );
-                }
+                // Usage is metadata, including updates delivered after end_turn.
+                // It must never create or restart a turn.
+                self.presence.context_tokens = Some(n);
                 vec![Change::Presence]
             }
             "term" => {
@@ -742,6 +764,9 @@ impl Thread {
                     return Vec::new();
                 };
                 self.protocol(&line);
+                if payload.get("turn_complete").and_then(Value::as_bool) == Some(true) {
+                    return self.on_status(SessionStatus::Completed, now);
+                }
                 let mut ch = vec![Change::Protocol];
                 if self.presence.turn_active() {
                     let phase = self.presence.phase;
@@ -974,9 +999,11 @@ impl Thread {
 
 pub fn tool_status_terminal(status: &str) -> bool {
     let st = status.to_ascii_lowercase();
-    ["complete", "done", "success", "fail", "error", "denied", "reject", "cancel"]
-        .iter()
-        .any(|k| st.contains(k))
+    [
+        "complete", "done", "success", "fail", "error", "denied", "reject", "cancel",
+    ]
+    .iter()
+    .any(|k| st.contains(k))
 }
 
 /// Chatter the ACP layer emits that is not agent speech.
@@ -1023,7 +1050,11 @@ pub fn allow_pattern_for(tool: &str, summary: &str) -> Option<String> {
             let line = rest.lines().next().unwrap_or("").trim();
             let words: Vec<&str> = line.split_whitespace().collect();
             if !words.is_empty() {
-                let take = if matches!(words[0], "git" | "cargo" | "npm") { 2 } else { 1 };
+                let take = if matches!(words[0], "git" | "cargo" | "npm") {
+                    2
+                } else {
+                    1
+                };
                 let head: Vec<&str> = words.iter().take(take).copied().collect();
                 return Some(format!("{name}({} *)", head.join(" ")));
             }
@@ -1066,7 +1097,8 @@ fn tool_result_summary(raw: &str) -> String {
     if let Ok(v) = serde_json::from_str::<Value>(raw) {
         if v.get("path").and_then(Value::as_str).is_some()
             && v.get("filename").and_then(Value::as_str).is_some()
-            && v.get("session_folder").and_then(Value::as_str).is_some() {
+            && v.get("session_folder").and_then(Value::as_str).is_some()
+        {
             return serde_json::json!({"path":v["path"], "filename":v["filename"], "session_folder":v["session_folder"]}).to_string();
         }
     }
@@ -1089,8 +1121,8 @@ fn clip_chars(text: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
     use grok_events::ToolCallStatus;
+    use std::time::Duration;
     use uuid::Uuid;
 
     fn sid() -> Uuid {
@@ -1129,26 +1161,52 @@ mod tests {
 
     #[test]
     fn failed_cancelled_and_completed_turns_freeze_elapsed_and_retry_resets_it() {
-        for event in [status(SessionStatus::Failed), status(SessionStatus::Cancelled), ControlEvent::SessionCompleted { session_id: sid(), at: Utc::now() }] {
-            let start = Instant::now(); let mut t = Thread::new();
+        for event in [
+            status(SessionStatus::Failed),
+            status(SessionStatus::Cancelled),
+            ControlEvent::SessionCompleted {
+                session_id: sid(),
+                at: Utc::now(),
+            },
+        ] {
+            let start = Instant::now();
+            let mut t = Thread::new();
             t.note_prompt("hello", vec![], start);
             t.apply(&event, start + Duration::from_secs(4));
-            assert_eq!(t.presence.elapsed(start + Duration::from_secs(90)), Some(Duration::from_secs(4)));
+            assert_eq!(
+                t.presence.elapsed(start + Duration::from_secs(90)),
+                Some(Duration::from_secs(4))
+            );
             t.note_prompt("retry", vec![], start + Duration::from_secs(100));
-            assert_eq!(t.presence.elapsed(start + Duration::from_secs(102)), Some(Duration::from_secs(2)));
+            assert_eq!(
+                t.presence.elapsed(start + Duration::from_secs(102)),
+                Some(Duration::from_secs(2))
+            );
             t.note_failure("connection failed", start + Duration::from_secs(103));
-            t.apply(&status(SessionStatus::Idle), start + Duration::from_secs(104));
+            t.apply(
+                &status(SessionStatus::Idle),
+                start + Duration::from_secs(104),
+            );
             assert_eq!(t.presence.phase, Phase::Error);
-            assert_eq!(t.presence.elapsed(start + Duration::from_secs(200)), Some(Duration::from_secs(3)));
+            assert_eq!(
+                t.presence.elapsed(start + Duration::from_secs(200)),
+                Some(Duration::from_secs(3))
+            );
         }
     }
 
     #[test]
     fn model_switch_notice_is_visible_in_the_live_transcript() {
         let mut t = Thread::new();
-        t.apply(&ControlEvent::Raw { session_id: Some(sid()), payload: serde_json::json!({
-            "channel":"thread", "kind":"model_switch", "line":"Switched model: Grok → Astra"
-        }) }, Instant::now());
+        t.apply(
+            &ControlEvent::Raw {
+                session_id: Some(sid()),
+                payload: serde_json::json!({
+                    "channel":"thread", "kind":"model_switch", "line":"Switched model: Grok → Astra"
+                }),
+            },
+            Instant::now(),
+        );
         assert_eq!(t.entries.len(), 1);
         assert_eq!(t.entries[0].role, Role::System);
         assert_eq!(t.entries[0].text(), Some("Switched model: Grok → Astra"));
@@ -1156,15 +1214,28 @@ mod tests {
 
     #[test]
     fn sparse_image_tool_updates_keep_identity_and_arguments() {
-        let mut t = Thread::new(); let now = Instant::now();
-        t.apply(&tool("image-1", "image_gen", ToolCallStatus::Running, r#"{"prompt":"Lake"}"#), now);
+        let mut t = Thread::new();
+        let now = Instant::now();
+        t.apply(
+            &tool(
+                "image-1",
+                "image_gen",
+                ToolCallStatus::Running,
+                r#"{"prompt":"Lake"}"#,
+            ),
+            now,
+        );
         for status in [ToolCallStatus::Running, ToolCallStatus::Completed] {
             t.apply(&tool("image-1", "tool", status, ""), now);
-            let Body::Tool(row) = &t.entries[0].body else { panic!() };
+            let Body::Tool(row) = &t.entries[0].body else {
+                panic!()
+            };
             assert_eq!(row.name, "image_gen");
             assert_eq!(row.args, r#"{"prompt":"Lake"}"#);
         }
-        let Body::Tool(row) = &t.entries[0].body else { panic!() };
+        let Body::Tool(row) = &t.entries[0].body else {
+            panic!()
+        };
         assert!(row.is_terminal());
     }
 
@@ -1201,12 +1272,18 @@ mod tests {
         let mut t = Thread::new();
         t.note_prompt("run tests", vec![], now);
         t.apply(&msg("Sure."), now);
-        t.apply(&tool("t1", "Bash", ToolCallStatus::Running, "cmd: cargo test"), now);
+        t.apply(
+            &tool("t1", "Bash", ToolCallStatus::Running, "cmd: cargo test"),
+            now,
+        );
         assert_eq!(t.entries.len(), 3);
         assert!(!t.entries[1].streaming, "tool call closes the stream");
         assert_eq!(t.presence.phase, Phase::Tools);
         assert_eq!(t.presence.tools_active, 1);
-        let ch = t.apply(&tool("t1", "Bash", ToolCallStatus::Completed, "cmd: cargo test"), now);
+        let ch = t.apply(
+            &tool("t1", "Bash", ToolCallStatus::Completed, "cmd: cargo test"),
+            now,
+        );
         assert!(ch.contains(&Change::Updated(2)));
         assert_eq!(t.entries.len(), 3, "same tool id updates, never stacks");
         match &t.entries[2].body {
@@ -1226,7 +1303,15 @@ mod tests {
     fn plan_tools_are_not_dumped() {
         let now = Instant::now();
         let mut t = Thread::new();
-        t.apply(&tool("p", "ExitPlanMode", ToolCallStatus::Running, "{\"plan\": \"x\"}"), now);
+        t.apply(
+            &tool(
+                "p",
+                "ExitPlanMode",
+                ToolCallStatus::Running,
+                "{\"plan\": \"x\"}",
+            ),
+            now,
+        );
         assert!(t.entries.is_empty());
     }
 
@@ -1262,7 +1347,9 @@ mod tests {
             now,
         );
         match &t.entries[1].body {
-            Body::Approval(a) => assert_eq!(a.explanation.as_deref(), Some("It wants to run the tests.")),
+            Body::Approval(a) => {
+                assert_eq!(a.explanation.as_deref(), Some("It wants to run the tests."))
+            }
             _ => panic!(),
         }
         t.apply(
@@ -1318,11 +1405,35 @@ mod tests {
     }
 
     #[test]
+    fn late_usage_and_running_status_do_not_reopen_completed_turn() {
+        let now = Instant::now();
+        let mut t = Thread::new();
+        t.note_prompt("explain", vec![], now);
+        t.apply(&msg("done"), now);
+        t.apply(&ControlEvent::Raw { session_id:Some(sid()), payload:serde_json::json!({"channel":"term","line":"complete","turn_complete":true}) }, now);
+        assert_eq!(t.presence.phase, Phase::Done);
+        t.settle(now);
+        t.apply(
+            &ControlEvent::Raw {
+                session_id: Some(sid()),
+                payload: serde_json::json!({"channel":"usage","totalTokens":43000}),
+            },
+            now,
+        );
+        t.apply(&status(SessionStatus::Running), now);
+        assert!(!t.presence.turn_active());
+        assert_eq!(t.presence.phase, Phase::Idle);
+    }
+
+    #[test]
     fn failure_sweeps_open_tools() {
         let now = Instant::now();
         let mut t = Thread::new();
         t.note_prompt("x", vec![], now);
-        t.apply(&tool("t1", "Bash", ToolCallStatus::Running, "cmd: sleep"), now);
+        t.apply(
+            &tool("t1", "Bash", ToolCallStatus::Running, "cmd: sleep"),
+            now,
+        );
         t.apply(&status(SessionStatus::Failed), now);
         match &t.entries[1].body {
             Body::Tool(r) => assert_eq!(r.status, "failed"),
@@ -1360,7 +1471,11 @@ mod tests {
             },
             now,
         );
-        assert_eq!(t.entries.len(), 1, "protocol lines never enter the transcript");
+        assert_eq!(
+            t.entries.len(),
+            1,
+            "protocol lines never enter the transcript"
+        );
         assert_eq!(t.protocol_log.back().unwrap(), "[acp] session/update");
         t.apply(
             &ControlEvent::Raw {
@@ -1396,8 +1511,18 @@ mod tests {
         // A saved copy whose tool rows never got a terminal status (the agent
         // replayed them as one-shot `tool_call`s) must not show "working".
         let rows = vec![
-            TranscriptEntry { role: "tool".into(), body: r#"{"id":"a","tool":"Bash","status":"running","args":"ls"}"#.into(), at: "".into(), seq: 1 },
-            TranscriptEntry { role: "tool".into(), body: r#"{"id":"b","tool":"Read","status":"pending","args":"f"}"#.into(), at: "".into(), seq: 2 },
+            TranscriptEntry {
+                role: "tool".into(),
+                body: r#"{"id":"a","tool":"Bash","status":"running","args":"ls"}"#.into(),
+                at: "".into(),
+                seq: 1,
+            },
+            TranscriptEntry {
+                role: "tool".into(),
+                body: r#"{"id":"b","tool":"Read","status":"pending","args":"f"}"#.into(),
+                at: "".into(),
+                seq: 2,
+            },
         ];
         let mut t = Thread::new();
         t.hydrate(&rows);
@@ -1413,12 +1538,44 @@ mod tests {
     #[test]
     fn hydrates_persisted_rows() {
         let rows = vec![
-            TranscriptEntry { role: "prompt".into(), body: "hello".into(), at: "2026-01-01T00:00:00Z".into(), seq: 1 },
-            TranscriptEntry { role: "agent".into(), body: "hi".into(), at: "2026-01-01T00:00:01Z".into(), seq: 2 },
-            TranscriptEntry { role: "tool".into(), body: r#"{"id":"t","tool":"Read","status":"completed","args":"f.rs","result":"ok"}"#.into(), at: "bad".into(), seq: 3 },
-            TranscriptEntry { role: "approval".into(), body: "Bash — Run: rm -rf".into(), at: "".into(), seq: 4 },
-            TranscriptEntry { role: "term".into(), body: "a\nb\n".into(), at: "".into(), seq: 5 },
-            TranscriptEntry { role: "system".into(), body: "session completed".into(), at: "".into(), seq: 6 },
+            TranscriptEntry {
+                role: "prompt".into(),
+                body: "hello".into(),
+                at: "2026-01-01T00:00:00Z".into(),
+                seq: 1,
+            },
+            TranscriptEntry {
+                role: "agent".into(),
+                body: "hi".into(),
+                at: "2026-01-01T00:00:01Z".into(),
+                seq: 2,
+            },
+            TranscriptEntry {
+                role: "tool".into(),
+                body:
+                    r#"{"id":"t","tool":"Read","status":"completed","args":"f.rs","result":"ok"}"#
+                        .into(),
+                at: "bad".into(),
+                seq: 3,
+            },
+            TranscriptEntry {
+                role: "approval".into(),
+                body: "Bash — Run: rm -rf".into(),
+                at: "".into(),
+                seq: 4,
+            },
+            TranscriptEntry {
+                role: "term".into(),
+                body: "a\nb\n".into(),
+                at: "".into(),
+                seq: 5,
+            },
+            TranscriptEntry {
+                role: "system".into(),
+                body: "session completed".into(),
+                at: "".into(),
+                seq: 6,
+            },
         ];
         let mut t = Thread::new();
         t.hydrate(&rows);
@@ -1444,9 +1601,18 @@ mod tests {
 
     #[test]
     fn allow_patterns() {
-        assert_eq!(allow_pattern_for("Bash", "Run: git status -s").as_deref(), Some("Bash(git status *)"));
-        assert_eq!(allow_pattern_for("Bash", "Run: ls -la").as_deref(), Some("Bash(ls *)"));
-        assert_eq!(allow_pattern_for("Read", "path: x").as_deref(), Some("Read(*)"));
+        assert_eq!(
+            allow_pattern_for("Bash", "Run: git status -s").as_deref(),
+            Some("Bash(git status *)")
+        );
+        assert_eq!(
+            allow_pattern_for("Bash", "Run: ls -la").as_deref(),
+            Some("Bash(ls *)")
+        );
+        assert_eq!(
+            allow_pattern_for("Read", "path: x").as_deref(),
+            Some("Read(*)")
+        );
         assert_eq!(allow_pattern_for("", "").as_deref(), None);
     }
 }

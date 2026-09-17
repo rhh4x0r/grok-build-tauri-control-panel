@@ -2,17 +2,17 @@
 //! right-aligned bubbles; the agent's replies are plain markdown; thoughts and
 //! tool calls fold into one "Thought · Ran 4 commands" disclosure line.
 
+use crate::models::app::AppModelHandle;
 use bomb_core::services;
 use bomb_core::transcript::{ApprovalCard, Body, Entry, PlanDoc, Role, ToolRow};
-use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::assets::IconName as Lucide;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
+use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::component::{Icon, IconName, Sizable};
-use std::sync::Arc;
-use crate::models::app::AppModelHandle;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::sync::Arc;
 
 use crate::models::thread::ThreadModel;
 use crate::runtime::{services as svc, spawn_service};
@@ -37,7 +37,9 @@ pub struct TranscriptView {
 
 impl TranscriptView {
     pub fn set_search(&mut self, query: Option<String>, cx: &mut Context<Self>) {
-        self.search = query.filter(|q| !q.trim().is_empty()).map(|q| (q.to_lowercase(), 0));
+        self.search = query
+            .filter(|q| !q.trim().is_empty())
+            .map(|q| (q.to_lowercase(), 0));
         self.scrolled_to = None;
         cx.notify();
     }
@@ -54,7 +56,12 @@ impl TranscriptView {
     }
 
     pub fn search_status(&self) -> Option<(usize, usize)> {
-        self.search.as_ref().map(|(_, ix)| (if self.matches.is_empty() { 0 } else { ix + 1 }, self.matches.len()))
+        self.search.as_ref().map(|(_, ix)| {
+            (
+                if self.matches.is_empty() { 0 } else { ix + 1 },
+                self.matches.len(),
+            )
+        })
     }
 }
 
@@ -91,7 +98,11 @@ enum Row {
         /// Images the agent/tool returned inline (decoded).
         attached: Vec<Arc<Image>>,
     },
-    GeneratingImage { id: u64, args: String, running: bool },
+    GeneratingImage {
+        id: u64,
+        args: String,
+        running: bool,
+    },
     Activity {
         first_id: u64,
         items: Vec<Activity>,
@@ -138,13 +149,20 @@ impl TranscriptView {
                 .rposition(|e| e.role == Role::Agent && e.images.is_empty())
                 .map(|i| entries[i].id);
             let mut rows: Vec<Row> = Vec::with_capacity(entries.len());
-            let turn_start = entries.iter().rposition(|e| e.role == Role::You).unwrap_or(0);
+            let turn_start = entries
+                .iter()
+                .rposition(|e| e.role == Role::You)
+                .unwrap_or(0);
             let mut image_aliases = std::collections::HashMap::new();
             let mut i = 0;
             while i < entries.len() {
                 let e = &entries[i];
-                let is_activity =
-                    |e: &Entry| matches!((&e.role, &e.body), (Role::Tool, Body::Tool(_)) | (Role::Thought, Body::Text(_)));
+                let is_activity = |e: &Entry| {
+                    matches!(
+                        (&e.role, &e.body),
+                        (Role::Tool, Body::Tool(_)) | (Role::Thought, Body::Text(_))
+                    )
+                };
                 if is_activity(e) {
                     let first_id = e.id;
                     let mut items = Vec::new();
@@ -156,10 +174,10 @@ impl TranscriptView {
                                     image_aliases.insert(alias, path);
                                 }
                                 items.push(Activity::Tool {
-                                id: a.id,
-                                row: r.clone(),
-                                expanded: t.expanded.contains(&a.id),
-                            });
+                                    id: a.id,
+                                    row: r.clone(),
+                                    expanded: t.expanded.contains(&a.id),
+                                });
                             }
                             Body::Text(s) => {
                                 let state = t.markdown_state(a.id, s, cx);
@@ -185,13 +203,22 @@ impl TranscriptView {
                         !running
                     };
                     let image_rows: Vec<Row> = if t.meta.live && i > turn_start {
-                        items.iter().filter_map(|item| match item {
-                            Activity::Tool { id, row, .. } if generating_image(row) => Some(Row::GeneratingImage {
-                                id: *id, args: row.args.clone(), running: row.status != "pending",
-                            }),
-                            _ => None,
-                        }).collect()
-                    } else { Vec::new() };
+                        items
+                            .iter()
+                            .filter_map(|item| match item {
+                                Activity::Tool { id, row, .. } if generating_image(row) => {
+                                    Some(Row::GeneratingImage {
+                                        id: *id,
+                                        args: row.args.clone(),
+                                        running: row.status != "pending",
+                                    })
+                                }
+                                _ => None,
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     rows.push(Row::Activity {
                         first_id,
                         items,
@@ -203,8 +230,16 @@ impl TranscriptView {
                 match (&e.role, &e.body) {
                     (Role::Agent, Body::Text(s)) => {
                         let state = t.markdown_state(e.id, s, cx);
-                        let images = if e.streaming { Vec::new() } else { local_images(s, &cwd, project_root.as_deref(), &image_aliases) };
-                        let attached = if e.images.is_empty() { Vec::new() } else { t.images_for(e.id) };
+                        let images = if e.streaming {
+                            Vec::new()
+                        } else {
+                            local_images(s, &cwd, project_root.as_deref(), &image_aliases)
+                        };
+                        let attached = if e.images.is_empty() {
+                            Vec::new()
+                        } else {
+                            t.images_for(e.id)
+                        };
                         rows.push(Row::Agent {
                             id: e.id,
                             state,
@@ -213,11 +248,19 @@ impl TranscriptView {
                             images,
                             attached,
                             last: last_agent == Some(e.id),
-                            at: e.at.with_timezone(&chrono::Local).format("%b %-d, %-I:%M %p").to_string(),
+                            at: e
+                                .at
+                                .with_timezone(&chrono::Local)
+                                .format("%b %-d, %-I:%M %p")
+                                .to_string(),
                         });
                     }
                     (Role::You, Body::Text(s)) => {
-                        let images = if e.images.is_empty() { Vec::new() } else { t.images_for(e.id) };
+                        let images = if e.images.is_empty() {
+                            Vec::new()
+                        } else {
+                            t.images_for(e.id)
+                        };
                         rows.push(Row::User {
                             id: e.id,
                             text: s.clone(),
@@ -271,17 +314,22 @@ impl TranscriptView {
             .pt_4()
             .pb_2()
             .when(!images.is_empty(), |el| {
-                el.child(div().flex().gap_2().justify_end().children(images.iter().enumerate().map(|(ix, im)| {
-                    div()
-                        .id(("user-image", id * 64 + ix as u64))
-                        .context_menu({ let source = super::image_actions::Source::Attachment(im.clone()); move |menu, _, _| super::image_actions::menu(menu, source.clone()) })
-                        .size(px(120.))
-                        .rounded(px(10.))
-                        .overflow_hidden()
-                        .border_1()
-                        .border_color(ui.border)
-                        .child(img(im.clone()).size_full().object_fit(ObjectFit::Cover))
-                })))
+                el.child(div().flex().gap_2().justify_end().children(
+                    images.iter().enumerate().map(|(ix, im)| {
+                        div()
+                            .id(("user-image", id * 64 + ix as u64))
+                            .context_menu({
+                                let source = super::image_actions::Source::Attachment(im.clone());
+                                move |menu, _, _| super::image_actions::menu(menu, source.clone())
+                            })
+                            .size(px(120.))
+                            .rounded(px(10.))
+                            .overflow_hidden()
+                            .border_1()
+                            .border_color(ui.border)
+                            .child(img(im.clone()).size_full().object_fit(ObjectFit::Cover))
+                    }),
+                ))
             })
             .child(
                 div()
@@ -333,42 +381,60 @@ impl TranscriptView {
             .py_1()
             .text_size(px(Layout::BODY_SIZE))
             .line_height(px(Layout::BODY_LINE))
-            .when(!raw.trim().is_empty() || streaming, |el| el.child(body_text))
+            .when(!raw.trim().is_empty() || streaming, |el| {
+                el.child(body_text)
+            })
             .when(!attached.is_empty(), |el| {
-                el.child(div().flex().flex_wrap().gap_2().py_2().children(attached.iter().enumerate().map(|(ix, im)| {
-                    let im = im.clone();
-                    div()
-                        .id(("att-img", id * 64 + ix as u64))
-                        .context_menu({ let source = super::image_actions::Source::Attachment(im.clone()); move |menu, _, _| super::image_actions::menu(menu, source.clone()) })
-                        .max_w(px(420.))
-                        .rounded(px(10.))
-                        .overflow_hidden()
-                        .border_1()
-                        .border_color(ui.border)
-                        .child(crate::views::motion::reveal(
-                            ("att-reveal", id * 64 + ix as u64),
-                            img(im).max_w(px(420.)).max_h(px(420.)).object_fit(ObjectFit::Contain),
-                        ))
-                })))
+                el.child(div().flex().flex_wrap().gap_2().py_2().children(
+                    attached.iter().enumerate().map(|(ix, im)| {
+                        let im = im.clone();
+                        div()
+                            .id(("att-img", id * 64 + ix as u64))
+                            .context_menu({
+                                let source = super::image_actions::Source::Attachment(im.clone());
+                                move |menu, _, _| super::image_actions::menu(menu, source.clone())
+                            })
+                            .max_w(px(420.))
+                            .rounded(px(10.))
+                            .overflow_hidden()
+                            .border_1()
+                            .border_color(ui.border)
+                            .child(crate::views::motion::reveal(
+                                ("att-reveal", id * 64 + ix as u64),
+                                img(im)
+                                    .max_w(px(420.))
+                                    .max_h(px(420.))
+                                    .object_fit(ObjectFit::Contain),
+                            ))
+                    }),
+                ))
             })
             .when(!images.is_empty(), |el| {
-                el.child(div().flex().flex_wrap().gap_2().py_2().children(images.iter().enumerate().map(|(ix, p)| {
-                    let path = p.clone();
-                    div()
-                        .id(("gen-img", id * 64 + ix as u64))
-                        .max_w(px(420.))
-                        .rounded(px(10.))
-                        .overflow_hidden()
-                        .border_1()
-                        .border_color(ui.border)
-                        .cursor_pointer()
-                        .on_click(move |_, _, _| open_path(&path))
-                        .context_menu({ let source = super::image_actions::Source::File(p.clone()); move |menu, _, _| super::image_actions::menu(menu, source.clone()) })
-                        .child(crate::views::motion::reveal(
-                            ("reveal", id * 64 + ix as u64),
-                            img(p.clone()).max_w(px(420.)).max_h(px(420.)).object_fit(ObjectFit::Contain),
-                        ))
-                })))
+                el.child(div().flex().flex_wrap().gap_2().py_2().children(
+                    images.iter().enumerate().map(|(ix, p)| {
+                        let path = p.clone();
+                        div()
+                            .id(("gen-img", id * 64 + ix as u64))
+                            .max_w(px(420.))
+                            .rounded(px(10.))
+                            .overflow_hidden()
+                            .border_1()
+                            .border_color(ui.border)
+                            .cursor_pointer()
+                            .on_click(move |_, _, _| open_path(&path))
+                            .context_menu({
+                                let source = super::image_actions::Source::File(p.clone());
+                                move |menu, _, _| super::image_actions::menu(menu, source.clone())
+                            })
+                            .child(crate::views::motion::reveal(
+                                ("reveal", id * 64 + ix as u64),
+                                img(p.clone())
+                                    .max_w(px(420.))
+                                    .max_h(px(420.))
+                                    .object_fit(ObjectFit::Contain),
+                            ))
+                    }),
+                ))
             })
             .when(streaming, |el| {
                 el.child(breathe(
@@ -400,13 +466,17 @@ impl TranscriptView {
                         .text_color(ui.text_faint)
                         .child(at.to_string())
                         .child(action("copy-reply", "Copy").on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(text_for_copy.to_string()));
+                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                text_for_copy.to_string(),
+                            ));
                         }))
-                        .child(action("remember-reply", "Remember").on_click(move |_, _, cx| {
-                            let app = cx.global::<AppModelHandle>().0.clone();
-                            let t = text_for_mem.to_string();
-                            app.update(cx, |m, cx| m.remember(t, cx));
-                        })),
+                        .child(
+                            action("remember-reply", "Remember").on_click(move |_, _, cx| {
+                                let app = cx.global::<AppModelHandle>().0.clone();
+                                let t = text_for_mem.to_string();
+                                app.update(cx, |m, cx| m.remember(t, cx));
+                            }),
+                        ),
                 )
             });
         fade_in(("agent", id), body).into_any_element()
@@ -503,10 +573,14 @@ impl TranscriptView {
             items
                 .iter()
                 .map(|a| match a {
-                    Activity::Tool { id, row, expanded } => self.tool_chip(*id, row, *expanded, ui, cx),
-                    Activity::Thought { id, state, expanded } => {
-                        self.thought_chip(*id, state, *expanded, ui, cx)
+                    Activity::Tool { id, row, expanded } => {
+                        self.tool_chip(*id, row, *expanded, ui, cx)
                     }
+                    Activity::Thought {
+                        id,
+                        state,
+                        expanded,
+                    } => self.thought_chip(*id, state, *expanded, ui, cx),
                 })
                 .collect()
         };
@@ -593,7 +667,14 @@ impl TranscriptView {
             .into_any_element()
     }
 
-    fn tool_chip(&self, id: u64, r: &ToolRow, expanded: bool, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
+    fn tool_chip(
+        &self,
+        id: u64,
+        r: &ToolRow,
+        expanded: bool,
+        ui: &Ui,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let _ = cx;
         let thread = self.thread.clone();
         let mono = ui.mono.clone();
@@ -645,14 +726,33 @@ impl TranscriptView {
                     .child(strip_arg_prefix(&first_line)),
             )
             .when(failed, |el| {
-                el.child(div().text_xs().text_color(ui.danger).child(r.status.clone()))
+                el.child(
+                    div()
+                        .text_xs()
+                        .text_color(ui.danger)
+                        .child(r.status.clone()),
+                )
             });
         let kind = tool_kind(&r.name);
         let detail = expanded.then(|| {
             let mut blocks: Vec<AnyElement> = Vec::new();
             if kind == "command" {
-                blocks.push(terminal_block(id, &first_line, r.result.as_deref().unwrap_or(""), terminal, failed, ui));
-                return div().flex().flex_col().gap_1().pl_8().pr_2().pb_2().children(blocks);
+                blocks.push(terminal_block(
+                    id,
+                    &first_line,
+                    r.result.as_deref().unwrap_or(""),
+                    terminal,
+                    failed,
+                    ui,
+                ));
+                return div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .pl_8()
+                    .pr_2()
+                    .pb_2()
+                    .children(blocks);
             }
             if !r.args.trim().is_empty() {
                 blocks.push(if looks_like_diff(&r.args) {
@@ -668,7 +768,14 @@ impl TranscriptView {
                     mono_block(res, &mono, ui.text, ui)
                 });
             }
-            div().flex().flex_col().gap_1().pl_8().pr_2().pb_2().children(blocks)
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .pl_8()
+                .pr_2()
+                .pb_2()
+                .children(blocks)
         });
         div()
             .flex()
@@ -703,9 +810,15 @@ impl TranscriptView {
                         let app = app.clone();
                         let bid = b.id.clone();
                         let mdl = md.clone();
-                        menu = menu.item(PopupMenuItem::new(format!("{} · {md}", b.display_name)).on_click(move |_, _, cx| {
-                            app.update(cx, |m, cx| m.code_plan_with(&bid, Some(mdl.clone()), cx));
-                        }));
+                        menu = menu.item(
+                            PopupMenuItem::new(format!("{} · {md}", b.display_name)).on_click(
+                                move |_, _, cx| {
+                                    app.update(cx, |m, cx| {
+                                        m.code_plan_with(&bid, Some(mdl.clone()), cx)
+                                    });
+                                },
+                            ),
+                        );
                     }
                 }
                 menu
@@ -739,7 +852,13 @@ impl TranscriptView {
         fade_in(("plan", id), card).into_any_element()
     }
 
-    fn approval_row(&self, id: u64, card: &ApprovalCard, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
+    fn approval_row(
+        &self,
+        id: u64,
+        card: &ApprovalCard,
+        ui: &Ui,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let sid = self.thread.read(cx).id();
         let rid = card.request_id.clone();
         let open = card.is_open();
@@ -766,18 +885,46 @@ impl TranscriptView {
                 .find(|o| o.kind.contains("reject") || o.kind.contains("deny"))
                 .map(|o| o.id.clone());
             if let Some(opt) = allow.clone() {
-                buttons.push(respond_button(("allow", id), "Allow", true, sid.clone(), rid.clone(), Some(opt), None));
+                buttons.push(respond_button(
+                    ("allow", id),
+                    "Allow",
+                    true,
+                    sid.clone(),
+                    rid.clone(),
+                    Some(opt),
+                    None,
+                ));
             }
             match (always, card.allow_pattern.clone(), allow) {
                 (Some(opt), _, _) => buttons.push(respond_button(
-                    ("always", id), "Always allow", false, sid.clone(), rid.clone(), Some(opt), None,
+                    ("always", id),
+                    "Always allow",
+                    false,
+                    sid.clone(),
+                    rid.clone(),
+                    Some(opt),
+                    None,
                 )),
                 (None, Some(pattern), Some(opt)) => buttons.push(respond_button(
-                    ("always", id), format!("Always allow {pattern}"), false, sid.clone(), rid.clone(), Some(opt), Some(pattern),
+                    ("always", id),
+                    format!("Always allow {pattern}"),
+                    false,
+                    sid.clone(),
+                    rid.clone(),
+                    Some(opt),
+                    Some(pattern),
                 )),
                 _ => {}
             }
-            buttons.push(respond_button(("deny", id), "Deny", false, sid.clone(), rid.clone(), deny, None));
+            buttons.push(respond_button(
+                ("deny", id),
+                "Deny",
+                false,
+                sid.clone(),
+                rid.clone(),
+                deny,
+                None,
+            ));
         }
 
         let body = div()
@@ -788,8 +935,16 @@ impl TranscriptView {
             .p_3()
             .rounded(px(Layout::PANEL_RADIUS))
             .border_1()
-            .border_color(if open { ui.warning.opacity(0.5) } else { ui.border })
-            .bg(if open { ui.warning.opacity(0.05) } else { ui.ink(0.02) })
+            .border_color(if open {
+                ui.warning.opacity(0.5)
+            } else {
+                ui.border
+            })
+            .bg(if open {
+                ui.warning.opacity(0.05)
+            } else {
+                ui.ink(0.02)
+            })
             .child(
                 div()
                     .flex()
@@ -800,38 +955,112 @@ impl TranscriptView {
                             .text_xs()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(if open { ui.warning } else { ui.text_muted })
-                            .child(if open { "Permission requested" } else { "Permission request" }),
+                            .child(if open {
+                                "Permission requested"
+                            } else {
+                                "Permission request"
+                            }),
                     )
-                    .child(Icon::from(Lucide::Shield).size(px(14.)).text_color(ui.text_muted))
-                    .child(div().text_xs().font_family(mono.clone()).text_color(ui.text_faint).child(card.tool.split_whitespace().next().unwrap_or("Tool").to_string()))
+                    .child(
+                        Icon::from(Lucide::Shield)
+                            .size(px(14.))
+                            .text_color(ui.text_muted),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family(mono.clone())
+                            .text_color(ui.text_faint)
+                            .child(
+                                card.tool
+                                    .split_whitespace()
+                                    .next()
+                                    .unwrap_or("Tool")
+                                    .to_string(),
+                            ),
+                    )
                     .child(div().flex_1())
-                    .when_some(card.resolution.clone().filter(|r| r != "restored"), |el, r| {
-                        el.child(div().text_xs().text_color(ui.text_faint).child(card.options.iter().find(|o| o.id == r).map(|o| o.label.clone()).unwrap_or(r)))
-                    }),
+                    .when_some(
+                        card.resolution.clone().filter(|r| r != "restored"),
+                        |el, r| {
+                            el.child(
+                                div().text_xs().text_color(ui.text_faint).child(
+                                    card.options
+                                        .iter()
+                                        .find(|o| o.id == r)
+                                        .map(|o| o.label.clone())
+                                        .unwrap_or(r),
+                                ),
+                            )
+                        },
+                    ),
             )
-            .child(div().text_sm().font_family(mono).text_color(ui.text).whitespace_normal().child(summary))
-            .child(Button::new(("approval-details", id)).ghost().small().label(if expanded { "Hide details" } else { "Details" }).on_click(move |_, _, cx| thread.update(cx, |t, cx| t.toggle_expanded(id, cx))))
-            .when(expanded, |el| el.child(div().text_xs().font_family(ui.mono.clone()).text_color(ui.text_muted).whitespace_normal().child(card.summary.clone())))
+            .child(
+                div()
+                    .text_sm()
+                    .font_family(mono)
+                    .text_color(ui.text)
+                    .whitespace_normal()
+                    .child(summary),
+            )
+            .child(
+                Button::new(("approval-details", id))
+                    .ghost()
+                    .small()
+                    .label(if expanded { "Hide details" } else { "Details" })
+                    .on_click(move |_, _, cx| thread.update(cx, |t, cx| t.toggle_expanded(id, cx))),
+            )
+            .when(expanded, |el| {
+                el.child(
+                    div()
+                        .text_xs()
+                        .font_family(ui.mono.clone())
+                        .text_color(ui.text_muted)
+                        .whitespace_normal()
+                        .child(card.summary.clone()),
+                )
+            })
             .when_some(card.explanation.clone(), |el, ex| {
                 el.child(div().text_sm().text_color(ui.text_muted).child(ex))
             })
-            .when(!buttons.is_empty(), |el| el.child(div().flex().gap_2().pt_1().children(buttons)));
+            .when(!buttons.is_empty(), |el| {
+                el.child(div().flex().gap_2().pt_1().children(buttons))
+            });
         fade_in(("approval", id), body).into_any_element()
     }
 
     fn line_row(&self, id: u64, role: Role, text: &str, ui: &Ui) -> AnyElement {
         // Normalize old saved creation notices without rewriting conversation history.
-        let renamed = (role == Role::System).then(|| text.strip_prefix("Workspace created")).flatten()
+        let renamed = (role == Role::System)
+            .then(|| text.strip_prefix("Workspace created"))
+            .flatten()
             .map(|suffix| format!("Thread created{suffix}"));
         let text = renamed.as_deref().unwrap_or(text);
+        if role == Role::System {
+            if let Some(notice) = model_switch_notice(text, ui) {
+                return fade_in(("switch", id), div().child(notice)).into_any_element();
+            }
+        }
         let color = match role {
             Role::Error => ui.danger,
             _ => ui.text_faint,
         };
         fade_in(
             ("line", id),
-            div().py_1().text_xs().text_color(color).whitespace_normal()
-                .when(text.starts_with("Switched model:"), |el| el.my_2().p_3().rounded(px(8.)).border_1().border_color(ui.border).bg(ui.ink(0.03)).text_color(ui.text_muted))
+            div()
+                .py_1()
+                .text_xs()
+                .text_color(color)
+                .whitespace_normal()
+                .when(text.starts_with("Switched model:"), |el| {
+                    el.my_2()
+                        .p_3()
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(ui.border)
+                        .bg(ui.ink(0.03))
+                        .text_color(ui.text_muted)
+                })
                 .child(text.to_string()),
         )
         .into_any_element()
@@ -870,24 +1099,40 @@ impl Render for TranscriptView {
                 .collect(),
             None => Vec::new(),
         };
-        let active_match = self.search.as_ref().and_then(|(_, ix)| self.matches.get(*ix).copied());
+        let active_match = self
+            .search
+            .as_ref()
+            .and_then(|(_, ix)| self.matches.get(*ix).copied());
         let match_bg = ui.warning;
         let children: Vec<AnyElement> = rows
             .iter()
             .enumerate()
             .map(|(i, row)| {
                 let el = match row {
-                Row::User { id, text, images } => self.user_row(*id, text, images, &ui),
-                Row::Agent { id, state, raw, streaming, last, at, images, attached } => {
-                    self.agent_row(*id, state, raw, *streaming, *last, at, images, attached, &ui, cx)
-                }
-                Row::Activity { first_id, items, collapsed } => {
-                    self.activity_row(*first_id, items, *collapsed, &ui, cx)
-                }
-                Row::GeneratingImage { id, args, running } => image_placeholder(*id, args, *running, &ui),
-                Row::Plan { id, state, doc } => self.plan_row(*id, state, doc, &ui, cx),
-                Row::Approval { id, card } => self.approval_row(*id, card, &ui, cx),
-                Row::Line { id, role, text } => self.line_row(*id, *role, text, &ui),
+                    Row::User { id, text, images } => self.user_row(*id, text, images, &ui),
+                    Row::Agent {
+                        id,
+                        state,
+                        raw,
+                        streaming,
+                        last,
+                        at,
+                        images,
+                        attached,
+                    } => self.agent_row(
+                        *id, state, raw, *streaming, *last, at, images, attached, &ui, cx,
+                    ),
+                    Row::Activity {
+                        first_id,
+                        items,
+                        collapsed,
+                    } => self.activity_row(*first_id, items, *collapsed, &ui, cx),
+                    Row::GeneratingImage { id, args, running } => {
+                        image_placeholder(*id, args, *running, &ui)
+                    }
+                    Row::Plan { id, state, doc } => self.plan_row(*id, state, doc, &ui, cx),
+                    Row::Approval { id, card } => self.approval_row(*id, card, &ui, cx),
+                    Row::Line { id, role, text } => self.line_row(*id, *role, text, &ui),
                 };
                 if self.matches.contains(&i) {
                     let active = active_match == Some(i);
@@ -939,44 +1184,46 @@ impl Render for TranscriptView {
             Vec::new()
         };
 
-        div()
-            .relative()
-            .size_full()
-            .children(marks)
-            .child(
-        div()
-            .id("transcript")
-            .size_full()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, cx| {
-                let dy = match ev.delta {
-                    ScrollDelta::Pixels(p) => f32::from(p.y),
-                    ScrollDelta::Lines(l) => l.y * 20.0,
-                };
-                if dy > 0.0 {
-                    this.follow = false;
-                    cx.notify();
-                }
-            }))
-            .flex()
-            .flex_col()
-            .items_center()
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(Layout::CONTENT_MAX))
-                    .px_6()
-                    .pt_8()
-                    .pb_10()
-                    .flex()
-                    .flex_col()
-                    .children(children)
-                    .when(count == 0, |el| {
-                        el.child(div().py_4().text_sm().text_color(ui.text_faint).child("Nothing here yet."))
-                    }),
-            ),
-            )
+        div().relative().size_full().children(marks).child(
+            div()
+                .id("transcript")
+                .size_full()
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll)
+                .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, cx| {
+                    let dy = match ev.delta {
+                        ScrollDelta::Pixels(p) => f32::from(p.y),
+                        ScrollDelta::Lines(l) => l.y * 20.0,
+                    };
+                    if dy > 0.0 {
+                        this.follow = false;
+                        cx.notify();
+                    }
+                }))
+                .flex()
+                .flex_col()
+                .items_center()
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(Layout::CONTENT_MAX))
+                        .px_6()
+                        .pt_8()
+                        .pb_10()
+                        .flex()
+                        .flex_col()
+                        .children(children)
+                        .when(count == 0, |el| {
+                            el.child(
+                                div()
+                                    .py_4()
+                                    .text_sm()
+                                    .text_color(ui.text_faint)
+                                    .child("Nothing here yet."),
+                            )
+                        }),
+                ),
+        )
     }
 }
 
@@ -1005,21 +1252,31 @@ fn streaming_text(id: u64, raw: &str, ui: &Ui) -> AnyElement {
     let key = ("stream", id * 1_000_003 + n as u64);
     div()
         .whitespace_normal()
-        .with_animation(key, Animation::new(std::time::Duration::from_millis(700)), move |el, t| {
-            let mut highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = Vec::new();
-            for (k, (a, b)) in words.iter().enumerate() {
-                let from_end = n - 1 - k;
-                let color = if from_end < 2 {
-                    accent
-                } else if from_end < 4 {
-                    lerp_hsla(accent, ink, t)
-                } else {
-                    continue;
-                };
-                highlights.push((*a..*b, HighlightStyle { color: Some(color), ..Default::default() }));
-            }
-            el.child(StyledText::new(text.clone()).with_highlights(highlights))
-        })
+        .with_animation(
+            key,
+            Animation::new(std::time::Duration::from_millis(700)),
+            move |el, t| {
+                let mut highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = Vec::new();
+                for (k, (a, b)) in words.iter().enumerate() {
+                    let from_end = n - 1 - k;
+                    let color = if from_end < 2 {
+                        accent
+                    } else if from_end < 4 {
+                        lerp_hsla(accent, ink, t)
+                    } else {
+                        continue;
+                    };
+                    highlights.push((
+                        *a..*b,
+                        HighlightStyle {
+                            color: Some(color),
+                            ..Default::default()
+                        },
+                    ));
+                }
+                el.child(StyledText::new(text.clone()).with_highlights(highlights))
+            },
+        )
         .into_any_element()
 }
 
@@ -1034,7 +1291,14 @@ fn lerp_hsla(a: Hsla, b: Hsla, t: f32) -> Hsla {
 
 /// Terminal block: the command as header with a spinner-or-check, output
 /// lines below with the newest line brightest, exit line at the bottom.
-fn terminal_block(id: u64, command: &str, output: &str, done: bool, failed: bool, ui: &Ui) -> AnyElement {
+fn terminal_block(
+    id: u64,
+    command: &str,
+    output: &str,
+    done: bool,
+    failed: bool,
+    ui: &Ui,
+) -> AnyElement {
     let lines: Vec<&str> = output.lines().collect();
     let n = lines.len();
     let mono = ui.mono.clone();
@@ -1070,7 +1334,12 @@ fn terminal_block(id: u64, command: &str, output: &str, done: bool, failed: bool
                         .child(command.to_string()),
                 )
                 .child(if !done {
-                    crate::views::motion::breathe(("term-spin", id), 0.3, div().size(px(6.)).rounded_full().bg(ui.text_muted)).into_any_element()
+                    crate::views::motion::breathe(
+                        ("term-spin", id),
+                        0.3,
+                        div().size(px(6.)).rounded_full().bg(ui.text_muted),
+                    )
+                    .into_any_element()
                 } else {
                     div()
                         .flex()
@@ -1078,7 +1347,11 @@ fn terminal_block(id: u64, command: &str, output: &str, done: bool, failed: bool
                         .gap_1()
                         .text_xs()
                         .text_color(if failed { ui.danger } else { ui.success })
-                        .child(div().size(px(12.)).child(Icon::from(if failed { Lucide::X } else { Lucide::Check })))
+                        .child(div().size(px(12.)).child(Icon::from(if failed {
+                            Lucide::X
+                        } else {
+                            Lucide::Check
+                        })))
                         .child(if failed { "failed" } else { "exit 0" })
                         .into_any_element()
                 }),
@@ -1093,7 +1366,13 @@ fn terminal_block(id: u64, command: &str, output: &str, done: bool, failed: bool
                 .overflow_hidden()
                 .text_xs()
                 .font_family(mono)
-                .when(n == 0, |el| el.child(div().text_color(ui.text_faint).child(if done { "(no output)" } else { "running…" })))
+                .when(n == 0, |el| {
+                    el.child(div().text_color(ui.text_faint).child(if done {
+                        "(no output)"
+                    } else {
+                        "running…"
+                    }))
+                })
                 .children(lines.iter().enumerate().map(|(i, l)| {
                     let last = i + 1 == n;
                     div()
@@ -1112,7 +1391,14 @@ fn image_placeholder(id: u64, args: &str, running: bool, ui: &Ui) -> AnyElement 
     let height = 320. / ratio;
 
     let dot = ui.text_muted;
-    let mut grid = div().absolute().inset_0().flex().flex_col().justify_around().px(px(24.)).py(px(24.));
+    let mut grid = div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .flex_col()
+        .justify_around()
+        .px(px(24.))
+        .py(px(24.));
     for row in 0..8u64 {
         let mut r = div().flex().justify_around();
         for col in 0..8u64 {
@@ -1122,18 +1408,26 @@ fn image_placeholder(id: u64, args: &str, running: bool, ui: &Ui) -> AnyElement 
             let dot = if running {
                 dot.with_animation(
                     ("gen-dot", id * 100 + i),
-                    Animation::new(std::time::Duration::from_millis(1600)).repeat()
-                        .with_easing(move |t| pulsating_between(0.15, 0.9)((t + phase) % 1.0)).with_max_fps(30.),
+                    Animation::new(std::time::Duration::from_millis(1600))
+                        .repeat()
+                        .with_easing(move |t| pulsating_between(0.15, 0.9)((t + phase) % 1.0))
+                        .with_max_fps(30.),
                     |el, t| el.opacity(t),
-                ).into_any_element()
-            } else { dot.opacity(0.25).into_any_element() };
+                )
+                .into_any_element()
+            } else {
+                dot.opacity(0.25).into_any_element()
+            };
             r = r.child(dot);
         }
         grid = grid.child(r);
     }
     let label = if running {
-        crate::views::motion::breathe(("gen-label", id), 0.4, div().child("Generating image…")).into_any_element()
-    } else { div().child("Preparing image…").into_any_element() };
+        crate::views::motion::breathe(("gen-label", id), 0.4, div().child("Generating image…"))
+            .into_any_element()
+    } else {
+        div().child("Preparing image…").into_any_element()
+    };
     div()
         .flex()
         .flex_col()
@@ -1141,7 +1435,8 @@ fn image_placeholder(id: u64, args: &str, running: bool, ui: &Ui) -> AnyElement 
         .child(
             div()
                 .relative()
-                .w(px(320.)).h(px(height))
+                .w(px(320.))
+                .h(px(height))
                 .rounded(px(12.))
                 .overflow_hidden()
                 .border_1()
@@ -1163,25 +1458,132 @@ fn image_placeholder(id: u64, args: &str, running: bool, ui: &Ui) -> AnyElement 
                 .text_color(ui.text_faint)
                 .child(label),
         )
-        .when_some(caption, |el, caption| el.child(div().max_w(px(320.)).text_xs().text_color(ui.text_muted).child(caption)))
+        .when_some(caption, |el, caption| {
+            el.child(
+                div()
+                    .max_w(px(320.))
+                    .text_xs()
+                    .text_color(ui.text_muted)
+                    .child(caption),
+            )
+        })
         .into_any_element()
+}
+
+fn switch_parts(text: &str) -> Option<(&str, &str, &str)> {
+    let (from, rest) = text.strip_prefix("Switched model: ")?.split_once(" → ")?;
+    let (to, continuity) = rest.split_once(". ").unwrap_or((rest, ""));
+    Some((from, to, continuity))
+}
+
+fn switch_identity(value: &str) -> (&str, &str) {
+    if let Some((provider, model)) = value.split_once(" · ") {
+        return (provider, model);
+    }
+    let provider = if value.starts_with("grok") {
+        "grok"
+    } else if value.starts_with("gpt") || value.contains("codex") {
+        "codex"
+    } else if ["claude", "opus", "sonnet", "haiku", "fable"]
+        .iter()
+        .any(|prefix| value.starts_with(prefix))
+    {
+        "claude"
+    } else {
+        "unknown"
+    };
+    (provider, value)
+}
+
+fn model_switch_notice(text: &str, ui: &Ui) -> Option<AnyElement> {
+    let (from, to, continuity) = switch_parts(text)?;
+    let identity = |value: &str| {
+        let (provider, model) = switch_identity(value);
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(super::brand::brand_mark(provider, 18., true, ui))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(super::brand::pretty_model(model)),
+            )
+    };
+    Some(
+        div()
+            .my_2()
+            .p_3()
+            .rounded(px(10.))
+            .border_1()
+            .border_color(ui.border)
+            .bg(ui.ink(0.03))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .text_color(ui.text_muted)
+                    .child(identity(from))
+                    .child(Icon::from(Lucide::ArrowRight).size(px(14.)))
+                    .child(identity(to)),
+            )
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(ui.text_faint)
+                    .child(continuity.to_string()),
+            )
+            .into_any_element(),
+    )
 }
 
 fn generating_image(row: &ToolRow) -> bool {
     let name = row.name.to_ascii_lowercase().replace('-', "_");
-    let name = if name.starts_with("imagine:") { "image_gen" } else { &name };
+    let name = if name.starts_with("imagine:") {
+        "image_gen"
+    } else {
+        &name
+    };
     let name = name.rsplit([':', '.']).next().unwrap_or(name);
-    matches!(row.status.as_str(), "pending" | "running" | "in_progress") &&
-        matches!(name, "image_gen" | "imagegen" | "image_edit" | "generate_image" | "edit_image" | "image_generation" | "image generation")
+    matches!(row.status.as_str(), "pending" | "running" | "in_progress")
+        && matches!(
+            name,
+            "image_gen"
+                | "imagegen"
+                | "image_edit"
+                | "generate_image"
+                | "edit_image"
+                | "image_generation"
+                | "image generation"
+        )
 }
 
 fn generation_frame(args: &str) -> (f32, Option<String>) {
     let args = serde_json::from_str::<serde_json::Value>(args).unwrap_or_default();
-    let ratio = args.get("aspect_ratio").and_then(|v| v.as_str()).and_then(|s| s.split_once(':'))
-        .and_then(|(w,h)| Some(w.parse::<f32>().ok()? / h.parse::<f32>().ok()?))
-        .filter(|r| r.is_finite() && *r > 0.).unwrap_or(1.).clamp(0.5, 2.);
-    let caption = args.get("prompt").and_then(|v|v.as_str()).filter(|s| !s.trim().is_empty())
-        .map(|s| { let mut text: String = s.chars().take(140).collect(); if s.chars().count() > 140 { text.push('…'); } text });
+    let ratio = args
+        .get("aspect_ratio")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.split_once(':'))
+        .and_then(|(w, h)| Some(w.parse::<f32>().ok()? / h.parse::<f32>().ok()?))
+        .filter(|r| r.is_finite() && *r > 0.)
+        .unwrap_or(1.)
+        .clamp(0.5, 2.);
+    let caption = args
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| {
+            let mut text: String = s.chars().take(140).collect();
+            if s.chars().count() > 140 {
+                text.push('…');
+            }
+            text
+        });
     (ratio, caption)
 }
 
@@ -1189,7 +1591,11 @@ fn generation_frame(args: &str) -> (f32, Option<String>) {
 fn looks_like_diff(text: &str) -> bool {
     let mut markers = 0;
     for l in text.lines().take(40) {
-        if l.starts_with("@@ ") || l.starts_with("+++ ") || l.starts_with("--- ") || l.starts_with("diff --git") {
+        if l.starts_with("@@ ")
+            || l.starts_with("+++ ")
+            || l.starts_with("--- ")
+            || l.starts_with("diff --git")
+        {
             markers += 1;
         }
     }
@@ -1216,7 +1622,11 @@ fn is_image_path(s: &str) -> bool {
 
 /// Resolve a path the agent mentioned against the thread cwd (then the
 /// project root); only existing files count.
-fn resolve_local(raw: &str, cwd: &std::path::Path, root: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+fn resolve_local(
+    raw: &str,
+    cwd: &std::path::Path,
+    root: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
     let raw = raw.trim().trim_start_matches("file://");
     let p = std::path::Path::new(raw);
     let candidates = if p.is_absolute() {
@@ -1233,28 +1643,50 @@ fn resolve_local(raw: &str, cwd: &std::path::Path, root: Option<&std::path::Path
 
 /// Resolve only explicit provider artifact metadata, never a guessed session directory.
 fn generated_image_alias(row: &ToolRow) -> Option<(String, std::path::PathBuf)> {
-    if row.status != "completed" { return None; }
+    if row.status != "completed" {
+        return None;
+    }
     let result: serde_json::Value = serde_json::from_str(row.result.as_deref()?).ok()?;
     let path = std::path::PathBuf::from(result.get("path")?.as_str()?);
     let filename = result.get("filename")?.as_str()?;
     let folder = result.get("session_folder")?.as_str()?;
     let alias = std::path::Path::new(folder).join(filename);
-    if !path.is_absolute() || !is_image_path(filename) || path.file_name()?.to_str()? != filename
-        || !alias.components().all(|c| matches!(c, std::path::Component::Normal(_))) {
+    if !path.is_absolute()
+        || !is_image_path(filename)
+        || path.file_name()?.to_str()? != filename
+        || !alias
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+    {
         return None;
     }
     Some((alias.to_str()?.to_owned(), path))
 }
 
 /// Image files referenced in a reply: markdown images/links and bare paths.
-fn local_images(text: &str, cwd: &std::path::Path, root: Option<&std::path::Path>, aliases: &std::collections::HashMap<String, std::path::PathBuf>) -> Vec<std::path::PathBuf> {
+fn local_images(
+    text: &str,
+    cwd: &std::path::Path,
+    root: Option<&std::path::Path>,
+    aliases: &std::collections::HashMap<String, std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
     let mut out: Vec<std::path::PathBuf> = Vec::new();
     let mut push = |cand: &str| {
-        let cand = cand.trim_matches(|c: char| matches!(c, '`' | '*' | '"' | '\'' | '(' | ')' | '<' | '>' | ',' | '.' | ':' | ';'));
+        let cand = cand.trim_matches(|c: char| {
+            matches!(
+                c,
+                '`' | '*' | '"' | '\'' | '(' | ')' | '<' | '>' | ',' | '.' | ':' | ';'
+            )
+        });
         if !is_image_path(cand) || cand.starts_with("http") {
             return;
         }
-        if let Some(p) = aliases.get(cand).filter(|p| p.is_file()).cloned().or_else(|| resolve_local(cand, cwd, root)) {
+        if let Some(p) = aliases
+            .get(cand)
+            .filter(|p| p.is_file())
+            .cloned()
+            .or_else(|| resolve_local(cand, cwd, root))
+        {
             if !out.contains(&p) {
                 out.push(p);
             }
@@ -1296,7 +1728,9 @@ fn open_link(href: &str, cwd: &std::path::Path, cx: &mut App) {
 /// "cmd: cargo test" → "cargo test": the verb already says what it is.
 fn strip_arg_prefix(line: &str) -> String {
     let l = line.trim();
-    for pre in ["cmd:", "command:", "path:", "file:", "pattern:", "query:", "url:"] {
+    for pre in [
+        "cmd:", "command:", "path:", "file:", "pattern:", "query:", "url:",
+    ] {
         if let Some(rest) = l.strip_prefix(pre) {
             return rest.trim().to_string();
         }
@@ -1371,13 +1805,27 @@ fn respond_button(
 
 fn tool_kind(name: &str) -> &'static str {
     let n = name.to_ascii_lowercase();
-    if ["bash", "shell", "terminal", "exec", "command"].iter().any(|k| n.contains(k)) {
+    if ["bash", "shell", "terminal", "exec", "command"]
+        .iter()
+        .any(|k| n.contains(k))
+    {
         "command"
-    } else if ["edit", "write", "patch", "create", "apply"].iter().any(|k| n.contains(k)) {
+    } else if ["edit", "write", "patch", "create", "apply"]
+        .iter()
+        .any(|k| n.contains(k))
+    {
         "edit"
-    } else if ["read", "glob", "grep", "search", "ls", "list", "find", "cat", "view"].iter().any(|k| n.contains(k)) {
+    } else if [
+        "read", "glob", "grep", "search", "ls", "list", "find", "cat", "view",
+    ]
+    .iter()
+    .any(|k| n.contains(k))
+    {
         "read"
-    } else if ["fetch", "web", "http", "browse"].iter().any(|k| n.contains(k)) {
+    } else if ["fetch", "web", "http", "browse"]
+        .iter()
+        .any(|k| n.contains(k))
+    {
         "web"
     } else {
         "other"
@@ -1406,7 +1854,10 @@ fn tool_label(name: &str) -> String {
 
 /// "Thought · Ran 4 commands · Edited 1 file"
 fn activity_summary(items: &[Activity]) -> String {
-    let thoughts = items.iter().filter(|a| matches!(a, Activity::Thought { .. })).count();
+    let thoughts = items
+        .iter()
+        .filter(|a| matches!(a, Activity::Thought { .. }))
+        .count();
     let rows: Vec<&ToolRow> = items
         .iter()
         .filter_map(|a| match a {
@@ -1486,7 +1937,13 @@ mod tests {
 
     #[test]
     fn summarises_groups() {
-        let rows = [row("Bash"), row("Bash"), row("Edit"), row("Read"), row("Sparkle")];
+        let rows = [
+            row("Bash"),
+            row("Bash"),
+            row("Edit"),
+            row("Read"),
+            row("Sparkle"),
+        ];
         assert_eq!(
             tool_group_summary(rows.iter()),
             "Ran 2 commands · Edited 1 file · Read 1 file · 1 other tool call"
@@ -1501,8 +1958,15 @@ fn approval_summary(summary: &str) -> String {
     if let Some(start) = summary.find('{') {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&summary[start..]) {
             // Shell commands and edits need their complete scope visible.
-            if value.get("command").is_none() && value.get("new_string").is_none() && value.get("content").is_none() {
-                if let Some(path) = value.get("file_path").or_else(|| value.get("path")).and_then(|v| v.as_str()) {
+            if value.get("command").is_none()
+                && value.get("new_string").is_none()
+                && value.get("content").is_none()
+            {
+                if let Some(path) = value
+                    .get("file_path")
+                    .or_else(|| value.get("path"))
+                    .and_then(|v| v.as_str())
+                {
                     return path.to_string();
                 }
             }
@@ -1516,8 +1980,17 @@ mod approval_display_tests {
     use super::approval_summary;
     #[test]
     fn read_target_is_concise_but_commands_and_invalid_payloads_remain_visible() {
-        assert_eq!(approval_summary(r#"Read /tmp/a.png: {"file_path":"/tmp/a.png"}"#), "/tmp/a.png");
-        for text in [r#"Shell: {"command":"rm file","path":"/tmp"}"#, "Read: {broken", r#"Edit: {"path":"a","new_string":"b"}"#] { assert_eq!(approval_summary(text), text); }
+        assert_eq!(
+            approval_summary(r#"Read /tmp/a.png: {"file_path":"/tmp/a.png"}"#),
+            "/tmp/a.png"
+        );
+        for text in [
+            r#"Shell: {"command":"rm file","path":"/tmp"}"#,
+            "Read: {broken",
+            r#"Edit: {"path":"a","new_string":"b"}"#,
+        ] {
+            assert_eq!(approval_summary(text), text);
+        }
     }
 }
 
@@ -1526,16 +1999,47 @@ mod image_generation_tests {
     use super::{generating_image, generation_frame, ToolRow};
     #[test]
     fn only_active_generation_tools_get_placeholders() {
-        let mut row = ToolRow { tool_id: "1".into(), name: "image_gen".into(), status: "running".into(), args: String::new(), result: None };
-        for name in ["image_gen", "image_edit", "generate_image", "functions.imagegen", "imagine: A cinematic arcade."] { row.name = name.into(); assert!(generating_image(&row)); }
-        for status in ["completed", "failed", "denied", "cancelled", "restored"] { row.status = status.into(); assert!(!generating_image(&row)); }
+        let mut row = ToolRow {
+            tool_id: "1".into(),
+            name: "image_gen".into(),
+            status: "running".into(),
+            args: String::new(),
+            result: None,
+        };
+        for name in [
+            "image_gen",
+            "image_edit",
+            "generate_image",
+            "functions.imagegen",
+            "imagine: A cinematic arcade.",
+        ] {
+            row.name = name.into();
+            assert!(generating_image(&row));
+        }
+        for status in ["completed", "failed", "denied", "cancelled", "restored"] {
+            row.status = status.into();
+            assert!(!generating_image(&row));
+        }
         row.status = "running".into();
-        for name in ["read_image", "view_image", "image_search", "Read /tmp/image.png"] { row.name = name.into(); assert!(!generating_image(&row)); }
+        for name in [
+            "read_image",
+            "view_image",
+            "image_search",
+            "Read /tmp/image.png",
+        ] {
+            row.name = name.into();
+            assert!(!generating_image(&row));
+        }
     }
     #[test]
     fn frame_uses_real_aspect_ratio_and_handles_partial_arguments() {
-        assert_eq!(generation_frame(r#"{"aspect_ratio":"16:9","prompt":"Lake"}"#), (16./9., Some("Lake".into())));
-        for args in ["", "{partial", r#"{"aspect_ratio":"1:0"}"#] { assert_eq!(generation_frame(args), (1., None)); }
+        assert_eq!(
+            generation_frame(r#"{"aspect_ratio":"16:9","prompt":"Lake"}"#),
+            (16. / 9., Some("Lake".into()))
+        );
+        for args in ["", "{partial", r#"{"aspect_ratio":"1:0"}"#] {
+            assert_eq!(generation_frame(args), (1., None));
+        }
     }
 }
 
@@ -1548,13 +2052,43 @@ mod artifact_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("1.jpg");
         std::fs::write(&file, b"test image coordinates").unwrap();
-        let mut row = ToolRow {tool_id:"1".into(), name:"tool".into(),status:"completed".into(),args:String::new(),
-            result:Some(serde_json::json!({"path":file,"filename":"1.jpg","session_folder":"images"}).to_string())};
-        let (alias,path) = generated_image_alias(&row).unwrap();
-        let aliases = std::collections::HashMap::from([(alias,path.clone())]);
-        assert_eq!(local_images("![Arcade](images/1.jpg)", &dir, None, &aliases), vec![path]);
-        row.result = Some(serde_json::json!({"path":file,"filename":"1.jpg","session_folder":"../images"}).to_string());
+        let mut row = ToolRow {
+            tool_id: "1".into(),
+            name: "tool".into(),
+            status: "completed".into(),
+            args: String::new(),
+            result: Some(
+                serde_json::json!({"path":file,"filename":"1.jpg","session_folder":"images"})
+                    .to_string(),
+            ),
+        };
+        let (alias, path) = generated_image_alias(&row).unwrap();
+        let aliases = std::collections::HashMap::from([(alias, path.clone())]);
+        assert_eq!(
+            local_images("![Arcade](images/1.jpg)", &dir, None, &aliases),
+            vec![path]
+        );
+        row.result = Some(
+            serde_json::json!({"path":file,"filename":"1.jpg","session_folder":"../images"})
+                .to_string(),
+        );
         assert!(generated_image_alias(&row).is_none());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod model_switch_tests {
+    use super::{switch_identity, switch_parts};
+    #[test]
+    fn switch_notice_supports_saved_and_provider_qualified_models() {
+        let (from, to, context) = switch_parts("Switched model: gpt-6-astra → grok · grok-4.6. Recent history carried over.").unwrap();
+        assert_eq!(switch_identity(from), ("codex", "gpt-6-astra"));
+        assert_eq!(switch_identity(to), ("grok", "grok-4.6"));
+        assert_eq!(context, "Recent history carried over.");
+        let (from, to, _) = switch_parts("Switched model: claude · sonnet → codex · gpt-6-astra. Context retained.").unwrap();
+        assert_eq!(switch_identity(from), ("claude", "sonnet"));
+        assert_eq!(switch_identity(to), ("codex", "gpt-6-astra"));
+        assert!(switch_parts("An ordinary message").is_none());
     }
 }

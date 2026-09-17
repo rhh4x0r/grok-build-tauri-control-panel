@@ -14,5 +14,7 @@ pub mod state;
 pub mod transcript;
 pub mod usage;
 
-pub use state::AppState;
 pub use grok_events::{ControlEvent, EventBus};
+pub use state::AppState;
+
+pub mod terminal;
