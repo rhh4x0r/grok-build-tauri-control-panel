@@ -32,7 +32,7 @@ struct PendingConnect {
     acp_opts: AcpSpawnOptions,
     connect_opts: ConnectOpts,
     /// Reasoning effort to apply through the agent's `effort` config option
-    /// (the Claude adapter advertises one; Grok/Codex take a CLI flag instead).
+    /// (the Claude adapter advertises one; Grok takes a CLI flag instead).
     effort: Option<String>,
 }
 
@@ -349,17 +349,6 @@ impl SessionRegistry {
                     client_cfg.args = resolved.args.clone();
                     // `grok agent --reasoning-effort <e> stdio`: the flag belongs
                     // to `agent`, so it goes before the `stdio` subcommand.
-                    // Codex: `codex -c model_reasoning_effort=<e> acp` when we
-                    // launch the CLI itself (the standalone adapter has no flag).
-                    if backend == Backend::Codex && client_cfg.args.iter().any(|a| a == "acp") {
-                        if let Some(effort) = opts.effort.as_deref().filter(|e| !e.is_empty()) {
-                            let at = client_cfg.args.iter().position(|a| a == "acp").unwrap_or(0);
-                            client_cfg.args.splice(
-                                at..at,
-                                ["-c".to_string(), format!("model_reasoning_effort={effort}")],
-                            );
-                        }
-                    }
                     if backend == Backend::Grok {
                         if let Some(effort) = opts.effort.as_deref().filter(|e| !e.is_empty()) {
                             let at = client_cfg

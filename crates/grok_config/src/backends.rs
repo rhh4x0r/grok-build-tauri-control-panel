@@ -77,17 +77,11 @@ pub struct BackendDescriptor {
 }
 
 impl BackendDescriptor {
-    /// Extra args appended after the resolved binary, which depend on which
-    /// binary matched (e.g. native `codex` needs the `acp` subcommand while
-    /// the `codex-acp` adapter does not).
-    pub fn args_for_binary(&self, program: &std::path::Path) -> Vec<String> {
-        let name = program
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
+    /// Arguments for the backend's ACP entrypoint. Adapter binaries speak ACP
+    /// directly; the native Codex CLI is not an ACP entrypoint.
+    pub fn args_for_binary(&self, _program: &std::path::Path) -> Vec<String> {
         match self.id {
             Backend::Grok => vec!["agent".into(), "stdio".into()],
-            Backend::Codex if name == "codex" => vec!["acp".into()],
             _ => Vec::new(),
         }
     }
@@ -130,7 +124,7 @@ const CLAUDE: BackendDescriptor = BackendDescriptor {
 const CODEX: BackendDescriptor = BackendDescriptor {
     id: Backend::Codex,
     display_name: "Codex",
-    binary_names: &["codex-acp", "codex"],
+    binary_names: &["codex-acp"],
     // Old @zed-industries package is deprecated and its bundled Codex core
     // rejects gpt-5.6 models ("requires a newer version of Codex").
     npx_packages: &["@agentclientprotocol/codex-acp", "@zed-industries/codex-acp"],
@@ -183,6 +177,16 @@ pub fn resolve_backend(b: Backend, cfg: &GrokConfig) -> Result<ResolvedBackend> 
 
     if let Some(over) = cfg.backend_config(b).and_then(|c| c.binary.clone()) {
         if over.exists() {
+            let canonical = std::fs::canonicalize(&over).unwrap_or_else(|_| over.clone());
+            if b == Backend::Codex
+                && [over.as_path(), canonical.as_path()].iter().any(|path| {
+                    path.file_name().is_some_and(|name| name == "codex" || name == "codex.exe")
+                })
+            {
+                return Err(ConfigError::Invalid(
+                    "Codex requires a codex-acp adapter, not the native codex CLI; remove backends.codex.binary to use the npx adapter fallback".into(),
+                ));
+            }
             let args = desc.args_for_binary(&over);
             return Ok(ResolvedBackend { backend: b, program: over, args, via: LaunchVia::Binary });
         }
@@ -270,9 +274,41 @@ mod tests {
     }
 
     #[test]
-    fn codex_native_binary_gets_acp_subcommand() {
+    fn codex_discovery_only_uses_acp_adapters() {
         let d = descriptor(Backend::Codex);
-        assert_eq!(d.args_for_binary(std::path::Path::new("/usr/local/bin/codex")), vec!["acp".to_string()]);
+        assert_eq!(d.binary_names, &["codex-acp"]);
+        assert_eq!(d.npx_packages[0], "@agentclientprotocol/codex-acp");
         assert!(d.args_for_binary(std::path::Path::new("/usr/local/bin/codex-acp")).is_empty());
     }
+
+    #[test]
+    fn configured_native_codex_is_rejected_before_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("codex");
+        std::fs::write(&binary, "").unwrap();
+        let mut cfg = GrokConfig::default();
+        cfg.backends.insert("codex".into(), BackendConfig {
+            binary: Some(binary),
+            ..Default::default()
+        });
+        let error = resolve_backend(Backend::Codex, &cfg).unwrap_err();
+        assert!(error.to_string().contains("requires a codex-acp adapter"));
+    }
+
+    #[test]
+    fn configured_codex_adapter_starts_without_subcommand() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("codex-acp");
+        std::fs::write(&binary, "").unwrap();
+        let mut cfg = GrokConfig::default();
+        cfg.backends.insert("codex".into(), BackendConfig {
+            binary: Some(binary.clone()),
+            ..Default::default()
+        });
+        let resolved = resolve_backend(Backend::Codex, &cfg).unwrap();
+        assert_eq!(resolved.program, binary);
+        assert_eq!(resolved.via, LaunchVia::Binary);
+        assert!(resolved.args.is_empty());
+    }
+
 }

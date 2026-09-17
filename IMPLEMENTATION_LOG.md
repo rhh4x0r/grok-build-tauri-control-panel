@@ -253,3 +253,11 @@ cargo clippy --workspace --all-targets -- -D warnings → PASS
 ```
 
 **MCP auditor consensus: ALL PASS — zero Critical/High remaining.**
+
+## Codex ACP startup fix — 2026-09-17
+
+- Removed native `codex` from ACP discovery: it has no `acp` subcommand and exits when launched with piped stdio. Discovery now uses `codex-acp` or the existing `@agentclientprotocol/codex-acp` npx fallback.
+- Reject explicit native Codex binary overrides (including symlink targets) with an actionable configuration error.
+- Removed the obsolete native `codex acp` reasoning-flag branch.
+- Validation: all 14 grok_config tests passed, including adapter discovery and override regression coverage; workspace check and strict all-target Clippy passed.
+- Cached codex-acp 1.12.0 successfully completed ACP initialize using an isolated temporary CODEX_HOME. Normal-home handshake was blocked by the task filesystem sandbox; no authenticated model turn was sent.
