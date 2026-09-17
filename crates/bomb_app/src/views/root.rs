@@ -349,6 +349,8 @@ impl Render for RootView {
                 )
             })
             .when(!self.settings_open, |el| el.child(
+                // The split is 100% tall internally; give it only the space below the title bar.
+                div().flex_1().min_h_0().w_full().overflow_hidden().child(
                 h_resizable("main-split")
                     .when(self.sidebar_open, |el| {
                         el.child(
@@ -370,7 +372,7 @@ impl Render for RootView {
                                 .child(self.preview.clone()),
                         )
                     }),
-            )),
+            ))),
             )
             // Root owns overlay state, but the application view must render it.
             .children(Root::render_sheet_layer(window, cx))

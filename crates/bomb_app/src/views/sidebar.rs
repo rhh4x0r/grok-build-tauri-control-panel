@@ -663,6 +663,7 @@ impl SidebarView {
         div()
             .flex()
             .flex_col()
+            .flex_shrink_0()
             .child(self.service_row(a, ui))
             .when_some(usage, |el, u| {
                 el.child(
@@ -771,6 +772,8 @@ impl Render for SidebarView {
         div()
             .id("sidebar")
             .size_full()
+            .min_h_0()
+            .overflow_hidden()
             .flex()
             .flex_col()
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {

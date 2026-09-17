@@ -457,3 +457,9 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 - Setup actions do not send the prompt. The user presses Send again after selecting the destination. If subsequent thread creation fails, the composer restores the unsent draft and attachments; newer edits are preserved with an explicit restore action.
 - Validation: both setup tests passed (staged/untracked preservation and nested new-project isolation/no overwrite), workspace check and strict all-target Clippy passed. Native visual/file-picker interaction remains unverified after the prior Computer Use denial.
 - Development build passed; updated the dev bundle and reopened it for the new setup flow.
+
+## 2026-09-17 — Constrain the sidebar to the visible window
+- Found the remaining footer clipping above the sidebar: the resizable main split renders at 100% height while it is a sibling below the title bar. Wrapped it in a flex-growing, zero-minimum-height viewport so its percentage height resolves against the remaining space instead of extending below the window.
+- Constrained the sidebar overflow to that viewport and prevented service blocks from shrinking. The existing Services scroll region remains available on short windows; its bottom is now inside the main viewport.
+- Native visual verification remains unavailable after the earlier Computer Use denial. Validation uses workspace check, strict all-target Clippy and development build.
+- Workspace check, strict all-target Clippy and development build passed. Updated the dev bundle for relaunch.
