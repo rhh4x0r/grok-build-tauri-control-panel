@@ -89,31 +89,6 @@ pub fn pretty_model(id: &str) -> String {
     }
 }
 
-/// One-line blurb per known model id (Zeron shows one beside each name).
-/// Unknown ids get none; the row then shows the raw id instead.
-pub fn model_blurb(id: &str) -> Option<&'static str> {
-    Some(match id {
-        "grok-4.6" => "Latest Grok, best for agentic coding",
-        "grok-4.5" => "Previous generation, fast and capable",
-        "claude-fable-5-1" => "Newest Claude, Mythos-class",
-        "claude-fable-5" => "Mythos-class, previous point release",
-        "claude-opus-5" => "Frontier Opus for hard problems",
-        "claude-opus-4-8" => "Deep reasoning for hard problems",
-        "claude-sonnet-5" => "Balanced speed and intelligence",
-        "claude-haiku-4-5" => "Fastest and most affordable Claude",
-        "gpt-6-astra" => "Our most capable model",
-        "gpt-5.6-sol" => "Latest frontier agentic coding model",
-        "gpt-5.6-terra" => "Balanced agentic coding, default",
-        "gpt-5.6-luna" => "Fast and affordable agentic coding",
-        "gpt-5.5" => "Proven previous-generation model",
-        "gpt-5.4" => "Older generation, still capable",
-        "gpt-5.4-mini" => "Small and quick for simple tasks",
-        "gpt-5.3-codex-spark" => "Low-latency coding model",
-        "gpt-5-codex" => "Original Codex agent model",
-        _ => return None,
-    })
-}
-
 /// Reasoning levels a backend accepts, and whether we can actually apply
 /// them through its ACP adapter.
 pub fn effort_levels(backend: &str) -> (&'static [&'static str], bool) {

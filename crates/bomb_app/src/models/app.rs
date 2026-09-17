@@ -96,6 +96,7 @@ pub struct AppModel {
     /// Account usage limits (5h / weekly) per backend, refreshed slowly.
     pub usage: Vec<bomb_core::usage::AccountUsage>,
     pub backends: Vec<BackendInfo>,
+    pub models_loading: bool,
     pub prefs: ComposerPrefs,
     pub dev_server: Option<DevServerStatus>,
     /// Names of enabled MCP servers (for the composer picker).
@@ -138,6 +139,7 @@ impl AppModel {
             auth: Vec::new(),
             usage: Vec::new(),
             backends: Vec::new(),
+            models_loading: false,
             prefs: ComposerPrefs::default(),
             dev_server: None,
             mcp_names: Vec::new(),
@@ -401,7 +403,9 @@ impl AppModel {
             move |res, cx| {
                 let _ = this.update(cx, |m, cx| {
                     if let Ok(list) = res {
+                        let auth_changed = list.iter().any(|a| m.auth.iter().find(|old| old.backend == a.backend).is_some_and(|old| old.logged_in != a.logged_in));
                         m.auth = list;
+                        if auth_changed { m.refresh_backends(cx); }
                         cx.notify();
                     }
                 });
@@ -410,6 +414,9 @@ impl AppModel {
     }
 
     pub fn refresh_backends(&mut self, cx: &mut Context<Self>) {
+        if self.models_loading { return; }
+        self.models_loading = true;
+        cx.notify();
         let state = svc(cx);
         let this = cx.entity().downgrade();
         spawn_service(
@@ -417,6 +424,7 @@ impl AppModel {
             async move { services::list_backends(&state).await },
             move |res, cx| {
                 let _ = this.update(cx, |m, cx| {
+                    m.models_loading = false;
                     if let Ok(list) = res {
                         // Keep the preferred backend runnable.
                         if !list.iter().any(|b| b.id == m.prefs.backend && b.available) {
@@ -426,8 +434,8 @@ impl AppModel {
                             }
                         }
                         m.backends = list;
-                        cx.notify();
                     }
+                    cx.notify();
                 });
             },
         );
@@ -625,6 +633,16 @@ impl AppModel {
             .unwrap_or_default()
     }
 
+    pub fn model_ready(&self) -> bool {
+        let selected = self.effective_model();
+        self.backend_info(&self.prefs.backend).is_some_and(|backend| backend.models.contains(&selected))
+    }
+
+    pub fn model_name(&self, backend: &str, model: &str) -> String {
+        self.backend_info(backend).and_then(|b|b.model_names.get(model)).cloned()
+            .unwrap_or_else(|| crate::views::brand::pretty_model(model))
+    }
+
     // ── selection ───────────────────────────────────────────────────────
 
     pub fn select(&mut self, id: Option<Uuid>, cx: &mut Context<Self>) {
@@ -806,10 +824,16 @@ impl AppModel {
 
     /// Send to the selected thread, or start a new one in the active project.
     pub fn send_prompt(&mut self, text: String, images: Vec<ImageInput>, cx: &mut Context<Self>) {
+        if std::env::var("BOMB_SMOKE").ok().as_deref() != Some("1") && !self.model_ready() {
+            self.toast(ToastKind::Warning, "Choose a model from the provider's current list. Open the model picker and refresh if needed.");
+            cx.notify(); return;
+        }
         if self.active_workspace.as_deref().is_some_and(|id| self.workspaces.iter().any(|w| w.id == id && w.archived_at.is_some())) {
             self.fail("This workspace is archived. Start a new workspace to make changes.".into(), cx); return;
         }
-        let prefs = self.prefs.clone();
+        let mut prefs = self.prefs.clone();
+        let model = self.effective_model();
+        prefs.model = (!model.is_empty()).then_some(model);
         let attachments: Vec<ImageAttachment> = images
             .iter()
             .map(|i| ImageAttachment {
@@ -849,7 +873,7 @@ impl AppModel {
                     move |res, cx| {
                         if let Err(e) = res {
                             let _ = weak.update(cx, |t, cx| {
-                                let ch = t.thread.note_system(&format!("send failed: {e}"));
+                                let ch = t.thread.note_failure(&format!("send failed: {e}"), std::time::Instant::now());
                                 t.absorb(&ch, cx);
                             });
                             let _ = this.update(cx, |m, cx| m.fail(e, cx));
@@ -977,7 +1001,7 @@ impl AppModel {
                                                 if let Err(e) = res {
                                                     if let Some(w) = &weak {
                                                         let _ = w.update(cx, |t, cx| {
-                                                            let ch = t.thread.note_system(&format!("send failed: {e}"));
+                                                            let ch = t.thread.note_failure(&format!("send failed: {e}"), std::time::Instant::now());
                                                             t.absorb(&ch, cx);
                                                         });
                                                     }

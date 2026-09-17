@@ -597,6 +597,12 @@ impl SessionRegistry {
     /// Switch a live session's approval stance (composer pills).
     /// Change reasoning effort on a live session, where the agent exposes an
     /// `effort` config option. Ok(false) when it does not.
+    pub async fn backend_model_catalog(&self, backend: Backend) -> Option<grok_acp::ModelCatalog> {
+        let clients: Vec<_> = self.sessions.iter().filter(|entry| entry.metadata.backend == backend).filter_map(|entry| entry.acp_client.clone()).collect();
+        for client in clients { let catalog = client.model_catalog().await; if !catalog.models.is_empty() { return Some(catalog); } }
+        None
+    }
+
     pub async fn speed_option(&self, id: Uuid) -> Result<Option<(String, Vec<String>, Option<String>)>> {
         let client = self.sessions.get(&id).and_then(|e| e.acp_client.clone()).ok_or(CoreError::SessionNotFound(id))?;
         Ok(client.speed_option().await)

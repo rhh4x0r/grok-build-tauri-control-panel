@@ -53,57 +53,20 @@ pub struct BackendInfo {
     pub reason: Option<String>,
     pub default_model: String,
     pub models: Vec<String>,
+    pub model_names: std::collections::HashMap<String, String>,
+    pub model_descriptions: std::collections::HashMap<String, String>,
+    pub model_error: Option<String>,
     pub supports_headless: bool,
 }
 
 pub async fn list_backends(state: &AppState) -> Result<Vec<BackendInfo>, String> {
     let cfg = state.config.read().await.clone();
-    // Grok's model ids move fast — ask the CLI for the live catalog so the
-    // pickers never offer an id that fails every `-m` call.
-    let live_grok_models = state.grok_cli.list_models().await.unwrap_or_default();
-    Ok(grok_config::Backend::ALL
-        .iter()
-        .map(|&b| {
-            let desc = grok_config::descriptor(b);
-            let (available, via, reason) = match grok_config::resolve_backend(b, &cfg) {
-                Ok(r) => {
-                    let via = match r.via {
-                        grok_config::LaunchVia::Binary => {
-                            format!("binary:{}", r.program.display())
-                        }
-                        grok_config::LaunchVia::Npx => "npx".to_string(),
-                    };
-                    (true, Some(via), None)
-                }
-                Err(e) => (false, None, Some(e.to_string())),
-            };
-            let (default_model, models) = if b == grok_config::Backend::Grok
-                && !live_grok_models.is_empty()
-            {
-                let default = live_grok_models
-                    .iter()
-                    .find(|(_, d)| *d)
-                    .map(|(m, _)| m.clone())
-                    .unwrap_or_else(|| cfg.model_for(b));
-                (
-                    default,
-                    live_grok_models.iter().map(|(m, _)| m.clone()).collect(),
-                )
-            } else {
-                (cfg.model_for(b), cfg.models_for(b))
-            };
-            BackendInfo {
-                id: b.key().to_string(),
-                display_name: desc.display_name.to_string(),
-                available,
-                via,
-                reason,
-                default_model,
-                models,
-                supports_headless: desc.supports_headless,
-            }
-        })
-        .collect())
+    let (grok, claude, codex) = tokio::join!(
+        model_catalog::discover(state, grok_config::Backend::Grok, &cfg),
+        model_catalog::discover(state, grok_config::Backend::Claude, &cfg),
+        model_catalog::discover(state, grok_config::Backend::Codex, &cfg),
+    );
+    Ok(vec![grok, claude, codex])
 }
 
 pub async fn save_config(state: &AppState, config: GrokConfig) -> Result<(), String> {
@@ -666,7 +629,7 @@ pub async fn send_prompt(
     let want_backend = backend.as_deref().and_then(grok_config::Backend::from_key);
     let want_model = model.filter(|m| {
         let t = m.trim();
-        !t.is_empty() && !t.eq_ignore_ascii_case("default")
+        !t.is_empty()
     });
 
     // Switching backend/model mid-thread: restart the thread under the new
@@ -2546,3 +2509,5 @@ mod speed_selection_tests {
         assert!(super::speed_value(&["high".into()], true).is_none());
     }
 }
+
+pub mod model_catalog;

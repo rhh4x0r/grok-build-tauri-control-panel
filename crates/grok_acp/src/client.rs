@@ -243,6 +243,7 @@ pub struct AcpClient {
     /// e.g. the Claude adapter's `effort`.
     config_options: RwLock<HashMap<String, Vec<String>>>,
     config_current: RwLock<HashMap<String, String>>,
+    model_catalog: RwLock<crate::ModelCatalog>,
     current_mode: RwLock<Option<String>>,
     /// Host-side terminals for ACP terminal/* (required for run_terminal_command).
     terminals: TerminalRegistry,
@@ -266,6 +267,22 @@ impl AcpClient {
         control_session_id: Uuid,
         connect_opts: ConnectOpts,
     ) -> Result<Arc<Self>> {
+        Self::connect_internal(config, opts, event_bus, control_session_id, connect_opts, false).await
+    }
+
+    /// Metadata-only session: no prompts, tools, login flow, or registered UI thread.
+    pub async fn discover_models(mut config: AcpClientConfig) -> Result<crate::ModelCatalog> {
+        config.read_only = true;
+        let opts = SpawnOptions { plan_mode: true, approval_mode: ApprovalMode::Plan, ..Default::default() };
+        let client = Self::connect_internal(config, &opts, None, Uuid::new_v4(), ConnectOpts::default(), true).await?;
+        let catalog = client.model_catalog().await;
+        client.shutdown().await?;
+        Ok(catalog)
+    }
+
+    pub async fn model_catalog(&self) -> crate::ModelCatalog { self.model_catalog.read().await.clone() }
+
+    async fn connect_internal(config: AcpClientConfig, opts: &SpawnOptions, event_bus: Option<Arc<EventBus>>, control_session_id: Uuid, connect_opts: ConnectOpts, catalog_only: bool) -> Result<Arc<Self>> {
         if !config.cwd.is_absolute() {
             return Err(AcpError::Spawn("cwd must be absolute".into()));
         }
@@ -385,11 +402,16 @@ impl AcpClient {
             available_modes: RwLock::new(Vec::new()),
             config_options: RwLock::new(HashMap::new()),
             config_current: RwLock::new(HashMap::new()),
+            model_catalog: RwLock::new(crate::ModelCatalog::default()),
             current_mode: RwLock::new(None),
             terminals: TerminalRegistry::new(default_cwd),
         });
 
         client.initialize().await?;
+        if catalog_only {
+            client.session_new(opts).await?;
+            return Ok(client);
+        }
         client.authenticate().await?;
         client
             .open_session(opts, connect_opts.resume_acp_session_id.as_deref())
@@ -457,6 +479,7 @@ impl AcpClient {
             available_modes: RwLock::new(Vec::new()),
             config_options: RwLock::new(HashMap::new()),
             config_current: RwLock::new(HashMap::new()),
+            model_catalog: RwLock::new(crate::ModelCatalog::default()),
             current_mode: RwLock::new(None),
             terminals: TerminalRegistry::new(PathBuf::from("/tmp")),
         })
@@ -893,6 +916,7 @@ impl AcpClient {
     /// Record `configOptions` (ACP session config options) from a
     /// session/new//load/resume result.
     async fn capture_config_options(&self, result: &Value) {
+        if let Some(catalog) = crate::ModelCatalog::from_response(result) { *self.model_catalog.write().await = catalog; }
         let Some(arr) = result.get("configOptions").and_then(|v| v.as_array()) else {
             return;
         };
@@ -1005,11 +1029,17 @@ impl AcpClient {
     }
 
     async fn apply_model_after_session(&self, opts: &SpawnOptions) -> Result<()> {
-        let Some(model) = opts.model.as_deref().filter(|m| !m.is_empty() && *m != "default" && *m != "mock") else { return Ok(()); };
-        if let Some(values) = self.config_option_values("model").await {
-            let value = values.iter().find(|value| value.eq_ignore_ascii_case(model))
-                .ok_or_else(|| AcpError::Protocol(format!("The agent does not offer model {model}")))?;
-            self.set_config_option("model", value).await?;
+        let Some(model) = opts.model.as_deref().filter(|m| !m.is_empty() && *m != "mock") else { return Ok(()); };
+        let catalog = self.model_catalog().await;
+        if !catalog.models.is_empty() {
+            let selected = catalog.models.iter().find(|m| m.id.eq_ignore_ascii_case(model))
+                .ok_or_else(|| AcpError::Protocol(format!("The agent does not offer model {model}; refresh the provider model list")))?;
+            if let Some(config_id) = catalog.config_id {
+                self.set_config_option(&config_id, &selected.id).await?;
+            } else if catalog.current.as_deref() != Some(&selected.id) {
+                let sid = self.session_id().await.ok_or(AcpError::SessionNotReady)?;
+                self.request_timeout("session/set_model", Some(json!({"sessionId":sid,"modelId":selected.id}))).await?;
+            }
         }
         Ok(())
     }
@@ -2936,6 +2966,19 @@ impl AcpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn provider_default_and_opus_alias_are_valid_model_selections() {
+        let client = AcpClient::mock_for_tests("claude-catalog", None);
+        client.capture_config_options(&serde_json::json!({"configOptions":[{"id":"model","currentValue":"default","options":[
+            {"value":"default","name":"Default (recommended)"}, {"value":"opus[1m]","name":"Opus 5"}
+        ]}]})).await;
+        for model in ["opus[1m]", "default"] {
+            client.apply_model_after_session(&SpawnOptions {model:Some(model.into()), ..Default::default()}).await.unwrap();
+            assert_eq!(client.config_current.read().await.get("model").map(String::as_str), Some(model));
+        }
+        assert!(client.apply_model_after_session(&SpawnOptions {model:Some("claude-opus-5".into()), ..Default::default()}).await.is_err());
+    }
 
     #[tokio::test]
     async fn codex_model_and_reasoning_use_advertised_config_options() {

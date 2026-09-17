@@ -693,7 +693,7 @@ impl TranscriptView {
                     if !b.available {
                         continue;
                     }
-                    let models: Vec<String> = if b.models.is_empty() { vec![b.default_model.clone()] } else { b.models.clone() };
+                    let models = b.models.clone();
                     for md in models {
                         let app = app.clone();
                         let bid = b.id.clone();

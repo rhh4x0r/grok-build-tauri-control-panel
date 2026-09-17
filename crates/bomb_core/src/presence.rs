@@ -90,6 +90,7 @@ pub enum Mood {
 pub struct Presence {
     pub phase: Phase,
     pub started_at: Option<Instant>,
+    pub finished_at: Option<Instant>,
     pub last_signal_at: Option<Instant>,
     pub prompt_chars: usize,
     pub thought_chars: usize,
@@ -130,7 +131,7 @@ impl Presence {
     }
 
     pub fn elapsed(&self, now: Instant) -> Option<Duration> {
-        self.started_at.map(|s| now.saturating_duration_since(s))
+        self.started_at.map(|s| self.finished_at.unwrap_or(now).saturating_duration_since(s))
     }
 
     /// Apply a phase signal plus a patch. Mirrors `applySignal` in presence.js:
@@ -169,6 +170,7 @@ impl Presence {
         let tools_after_reply = phase == Phase::Tools && self.phase == Phase::Reply;
 
         if phase.is_terminal() {
+            self.finished_at.get_or_insert(now);
             self.phase = phase;
         } else if sticky_tools {
             // stay on tools; patches already applied
@@ -363,6 +365,17 @@ mod tests {
 
     fn t0() -> Instant {
         Instant::now()
+    }
+
+    #[test]
+    fn terminal_time_is_frozen_even_after_duplicate_signals() {
+        for phase in [Phase::Done, Phase::Error] {
+            let now = Instant::now(); let mut p = Presence::default();
+            p.signal(Phase::Send, Patch::default(), now);
+            p.signal(phase, Patch::default(), now + Duration::from_secs(5));
+            p.signal(phase, Patch::default(), now + Duration::from_secs(20));
+            assert_eq!(p.elapsed(now + Duration::from_secs(60)), Some(Duration::from_secs(5)));
+        }
     }
 
     #[test]

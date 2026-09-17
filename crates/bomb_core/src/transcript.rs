@@ -324,6 +324,16 @@ impl Thread {
     }
 
     /// Local system line (dev server started, MCP skipped, …).
+    pub fn note_failure(&mut self, message: &str, now: Instant) -> Vec<Change> {
+        let mut ch = self.close_streams();
+        self.sweep_tools("failed", &mut ch);
+        self.push(Role::Error, Body::Text(message.into()), Utc::now());
+        ch.push(Change::Appended(self.entries.len() - 1));
+        self.end_turn(Phase::Error, message, now);
+        ch.push(Change::Presence);
+        ch
+    }
+
     pub fn note_system(&mut self, text: &str) -> Vec<Change> {
         self.push(Role::System, Body::Text(text.to_string()), Utc::now());
         vec![Change::Appended(self.entries.len() - 1)]
@@ -382,20 +392,8 @@ impl Thread {
                 ch.push(Change::Presence);
                 ch
             }
-            ControlEvent::SessionCompleted { .. } => {
-                // The status change carries the presence transition; this is
-                // just a durable marker.
-                self.protocol("session completed");
-                vec![Change::Protocol]
-            }
-            ControlEvent::Error { message, .. } => {
-                let mut ch = self.close_streams();
-                self.push(Role::Error, Body::Text(message.clone()), Utc::now());
-                ch.push(Change::Appended(self.entries.len() - 1));
-                self.end_turn(Phase::Error, message, now);
-                ch.push(Change::Presence);
-                ch
-            }
+            ControlEvent::SessionCompleted { .. } => self.on_status(SessionStatus::Completed, now),
+            ControlEvent::Error { message, .. } => self.note_failure(message, now),
             ControlEvent::ApprovalRequired {
                 request_id,
                 tool,
@@ -645,6 +643,7 @@ impl Thread {
                 // a terminal update from the agent.
                 self.sweep_tools("completed", &mut ch);
                 let p = &self.presence;
+                if p.phase == Phase::Error { return ch; }
                 if p.turn_active() || p.reply_chars > 0 || p.tool_count > 0 {
                     self.open_tools.clear();
                     self.end_turn(Phase::Done, "Turn finished", now);
@@ -1078,6 +1077,7 @@ fn clip_chars(text: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use grok_events::ToolCallStatus;
     use uuid::Uuid;
 
@@ -1112,6 +1112,22 @@ mod tests {
             session_id: sid(),
             status: s,
             at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn failed_cancelled_and_completed_turns_freeze_elapsed_and_retry_resets_it() {
+        for event in [status(SessionStatus::Failed), status(SessionStatus::Cancelled), ControlEvent::SessionCompleted { session_id: sid(), at: Utc::now() }] {
+            let start = Instant::now(); let mut t = Thread::new();
+            t.note_prompt("hello", vec![], start);
+            t.apply(&event, start + Duration::from_secs(4));
+            assert_eq!(t.presence.elapsed(start + Duration::from_secs(90)), Some(Duration::from_secs(4)));
+            t.note_prompt("retry", vec![], start + Duration::from_secs(100));
+            assert_eq!(t.presence.elapsed(start + Duration::from_secs(102)), Some(Duration::from_secs(2)));
+            t.note_failure("connection failed", start + Duration::from_secs(103));
+            t.apply(&status(SessionStatus::Idle), start + Duration::from_secs(104));
+            assert_eq!(t.presence.phase, Phase::Error);
+            assert_eq!(t.presence.elapsed(start + Duration::from_secs(200)), Some(Duration::from_secs(3)));
         }
     }
 

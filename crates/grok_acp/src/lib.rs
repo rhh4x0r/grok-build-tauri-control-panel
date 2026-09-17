@@ -19,3 +19,6 @@ pub use messages::{
     JsonRpcResponse, PromptBlock, PromptImage, SessionNewParams, SessionPromptParams,
 };
 pub use transport::NdjsonTransport;
+
+mod catalog;
+pub use catalog::{AvailableModel, ModelCatalog};

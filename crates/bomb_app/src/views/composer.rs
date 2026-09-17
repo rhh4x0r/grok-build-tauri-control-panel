@@ -138,6 +138,10 @@ impl ComposerView {
             });
             return;
         }
+        if !self.model.read(cx).model_ready() {
+            self.model.update(cx, |m, cx| { m.toast(ToastKind::Warning, "Refresh provider models and choose an available model before sending."); cx.notify(); });
+            return;
+        }
         let images: Vec<ImageInput> = self
             .attachments
             .drain(..)
@@ -303,7 +307,7 @@ impl ComposerView {
         let app = self.model.clone();
         let this = cx.entity().clone();
         let search = self.model_search.clone();
-        let trigger_label = if model.is_empty() { backend.clone() } else { crate::views::brand::pretty_model(&model) };
+        let trigger_label = if model.is_empty() { backend.clone() } else { m.model_name(&backend, &model) };
         let (_, effort_applies) = crate::views::brand::effort_levels(&backend);
         let eff_label = if effort_applies { crate::views::brand::effort_label(&effort) } else { "" };
         let open = self.model_menu_open;
@@ -456,13 +460,13 @@ impl ComposerView {
                             continue;
                         }
                     }
-                    let models: Vec<String> = if b.models.is_empty() { vec![b.default_model.clone()] } else { b.models.clone() };
+                    let models = b.models.clone();
                     let models: Vec<String> = models
                         .into_iter()
                         .filter(|md| {
                             query.is_empty()
                                 || md.to_lowercase().contains(&query)
-                                || crate::views::brand::pretty_model(md).to_lowercase().contains(&query)
+                                || b.model_names.get(md).is_some_and(|name| name.to_lowercase().contains(&query))
                                 || b.display_name.to_lowercase().contains(&query)
                         })
                         .collect();
@@ -473,7 +477,7 @@ impl ComposerView {
                         let this = this.clone();
                         let (bid, mdl) = (b.id.clone(), md.clone());
                         let available = b.available;
-                        let blurb = crate::views::brand::model_blurb(&md).map(str::to_string).unwrap_or_else(|| md.clone());
+                        let blurb = b.model_descriptions.get(&md).cloned().unwrap_or_else(|| md.clone());
                         let hint = if ix < 9 { Some(format!("⌘{}", ix + 1)) } else { None };
                         ix += 1;
                         list = list.child(
@@ -512,7 +516,7 @@ impl ComposerView {
                                                     .text_size(px(12.5))
                                                     .font_weight(FontWeight::MEDIUM)
                                                     .text_color(ui.text)
-                                                    .child(crate::views::brand::pretty_model(&md)),
+                                                    .child(b.model_names.get(&md).cloned().unwrap_or_else(|| md.clone())),
                                             )
                                             .child(
                                                 div()
@@ -545,8 +549,14 @@ impl ComposerView {
                     }
                 }
                 if !any {
-                    list = list.child(div().px(px(8.)).py(px(10.)).text_size(px(12.)).text_color(ui.text_faint).child(format!("No model matches \"{query}\"")));
+                    let loading = app.read(cx).models_loading;
+                    let message = if loading { "Loading models from providers…".into() }
+                        else if !query.is_empty() { format!("No model matches \"{query}\"") }
+                        else { backends.iter().filter(|b| viewed.as_ref().is_none_or(|id|id == &b.id))
+                            .filter_map(|b| b.model_error.as_ref().or(b.reason.as_ref())).cloned().collect::<Vec<_>>().join("\n") };
+                    list = list.child(div().px_2().py_2().text_xs().text_color(ui.text_muted).whitespace_normal().child(if message.is_empty() {"No provider models available.".into()} else {message}));
                 }
+                list = list.child(Button::new("refresh-models").ghost().small().label(if app.read(cx).models_loading { "Refreshing models…" } else { "Refresh provider models" }).on_click({let app=app.clone(); move |_,_,cx| app.update(cx,|m,cx|m.refresh_backends(cx))}));
                 col = col.child(list);
 
                 // ── reasoning ────────────────────────────────────────
