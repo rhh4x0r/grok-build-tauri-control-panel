@@ -470,3 +470,10 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 - Used assistant-ui's composer and elicitation-form patterns as design guidance (https://www.assistant-ui.com/elements/composer and https://www.assistant-ui.com/elements/elicitation-form), implemented in GPUI using the app's own surfaces, typography, buttons and motion. The toolbar wraps on narrow widths; optional content scrolls independently of the panel header/footer. Added a subtle activity pulse and kept review/Undo behavior.
 - Workspace check and strict all-target Clippy passed. Native visual/interaction verification remains pending after the prior Computer Use denial.
 - Development build passed; updated and reopened the dev bundle.
+
+## 2026-09-17 — Enhance Prompt quick choices and source pickers
+- Replaced the flat-black panel with a subtle opaque charcoal/blue-gray gradient (and a light-theme variant). Added icon buttons for Research, Audit, Planning and Implementation, with an Other menu for the remaining work types.
+- Removed manual target selection from the main flow. Both the visible provider badge and generation target follow the currently selected composer provider, including switches while the panel is open.
+- Added native multi-file selection and a searchable saved-memory picker using Bomb Code's existing memory service. Only explicitly selected memory entries are included. UTF-8 text files up to 18 KB become bounded source snapshots; binary/larger files are explicitly marked as references for later inspection. Existing source roles/removal remain, duplicate snapshots are ignored, and generation waits for selected files to finish loading.
+- Added a regression test for actual text inclusion and explicit binary/large-file reference behavior. Native visual/picker verification remains pending after the prior Computer Use denial.
+- Validation: source-handling regression test, workspace check, strict all-target Clippy and development build passed. Updated and reopened the dev bundle.

@@ -53,6 +53,12 @@ pub struct ComposerView {
     foundry_busy: bool,
     foundry_setup: bool,
     foundry_more: bool,
+    foundry_memory: Vec<grok_memory::MemoryEntry>,
+    foundry_memory_open: bool,
+    foundry_memory_loading: bool,
+    foundry_memory_search: Entity<InputState>,
+    foundry_pending_sources: Vec<String>,
+    foundry_source_loading: bool,
     foundry_depth: String,
     foundry_target: String,
     foundry_work_type: String,
@@ -86,6 +92,8 @@ impl ComposerView {
             },
         )
         .detach();
+        let memory_search=cx.new(|cx|InputState::new(window,cx).placeholder("Search saved memories…"));
+        cx.observe(&memory_search,|_,_,cx|cx.notify()).detach();
         let speed = cx.new(|cx| super::speed::SpeedSelector::new(model.clone(), cx));
         Self {
             speed,
@@ -107,6 +115,12 @@ impl ComposerView {
             foundry_busy: false,
             foundry_setup: false,
             foundry_more: false,
+            foundry_memory: Vec::new(),
+            foundry_memory_open: false,
+            foundry_memory_loading: false,
+            foundry_memory_search: memory_search,
+            foundry_pending_sources: Vec::new(),
+            foundry_source_loading: false,
             foundry_depth: "fast-draft".into(),
             foundry_target: String::new(),
             foundry_work_type: String::new(),
@@ -121,6 +135,7 @@ impl ComposerView {
     fn run_foundry(&mut self, cx: &mut Context<Self>) {
         let original = self.input.read(cx).value().to_string();
         if self.foundry_busy || original.trim().is_empty() { return; }
+        self.foundry_target = match self.model.read(cx).prefs.backend.as_str() {"grok"=>"grok-build","codex"=>"openai-codex","claude"=>"claude-code",_=>"general-assistant"}.into();
         let options = bomb_foundry::PromptOptions {
             depth: self.foundry_depth.clone(), target: self.foundry_target.clone(), work_type: self.foundry_work_type.clone(),
             autonomy: self.foundry_autonomy.read(cx).value().to_string(),
@@ -178,10 +193,36 @@ impl ComposerView {
             .into_any_element()
     }
 
+    fn add_foundry_source(&mut self, value: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.foundry_sources.len()>=20 {self.foundry_message=Some("You can attach up to 20 sources.".into());return;}
+        if self.foundry_sources.iter().any(|(s,_)|s.read(cx).value().as_ref()==value) {return;}
+        let input=cx.new(|cx| {let mut s=InputState::new(window,cx);s.set_value(value,window,cx);s});
+        self.foundry_sources.push((input,"supporting-context".into()));cx.notify();
+    }
+    fn pick_foundry_sources(&mut self, cx: &mut Context<Self>) {
+        let rx=cx.prompt_for_paths(PathPromptOptions{files:true,directories:false,multiple:true,prompt:Some("Attach sources".into())});
+        cx.spawn(async move |weak,cx| {
+            let Ok(Ok(Some(paths)))=rx.await else {return;};
+            let _=weak.update(cx,|v,cx| {
+                v.foundry_source_loading=true;cx.notify();
+                let callback=weak.clone();
+                crate::runtime::spawn_service(cx,async move {
+                    let mut results=Vec::new();for path in paths.into_iter().take(20) {results.push(bomb_core::services::prompt_sources::read(&path).await);}results
+                },move |results,cx| {let _=callback.update(cx,|v,cx| {v.foundry_source_loading=false;for result in results {match result {Ok(s)=>v.foundry_pending_sources.push(s),Err(e)=>v.foundry_message=Some(format!("Could not attach source: {e}"))}}cx.notify();});});
+            });
+        }).detach();
+    }
+    fn load_foundry_memory(&mut self, cx: &mut Context<Self>) {
+        self.foundry_memory_open = !self.foundry_memory_open;
+        if !self.foundry_memory_open {cx.notify();return;}
+        self.foundry_memory_loading=true;let state=crate::runtime::services(cx);let weak=cx.entity().downgrade();
+        crate::runtime::spawn_service(cx,async move {bomb_core::services::memory_list(&state,None).await},move |result,cx|{let _=weak.update(cx,|v,cx|{v.foundry_memory_loading=false;match result {Ok(entries)=>v.foundry_memory=entries,Err(e)=>v.foundry_message=Some(e)}cx.notify();});});cx.notify();
+    }
+
     fn foundry_choice(&self, field: &'static str, selected: &str, options: &'static [(&'static str, &'static str)], cx: &Context<Self>) -> AnyElement {
         let weak = cx.entity().downgrade();
         let current = selected.to_owned();
-        let label = if current.is_empty() { "Choose work type…" } else { bomb_foundry::label(options,&current) };
+        let label = if !options.iter().any(|(id,_)| *id == current) { "Or select other…" } else { bomb_foundry::label(options,&current) };
         Button::new(field).outline().small().w_full().label(label.to_owned()).dropdown_caret(true)
             .dropdown_menu(move |mut menu,_,_| {
                 for (id,label) in options {
@@ -194,8 +235,14 @@ impl ComposerView {
             }).into_any_element()
     }
     fn foundry_panel(&self, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
-        let target=self.foundry_choice("foundry-target",&self.foundry_target,bomb_foundry::TARGETS,cx);
-        let work=self.foundry_choice("foundry-work-type",&self.foundry_work_type,bomb_foundry::WORK_TYPES,cx);
+        let backend=self.model.read(cx).prefs.backend.clone();
+        let target=match backend.as_str() {"grok"=>"Grok Build","claude"=>"Claude Code","codex"=>"OpenAI Codex",_=>"Current provider"};
+        let mut work=div().flex().flex_wrap().gap_2();
+        for (id,label,icon) in [("research-only","Research",Lucide::Search),("repository-audit","Audit",Lucide::ShieldCheck),("planning-docs","Planning",Lucide::ListTodo),("implementation","Implementation",Lucide::Code)] {
+            work=work.child(Button::new(SharedString::from(format!("enhance-work-{id}"))).outline().small().icon(icon).label(label).selected(self.foundry_work_type==id).when(self.foundry_work_type==id,|b|b.primary()).on_click(cx.listener(move |v,_,_,cx|{v.foundry_work_type=id.into();cx.notify();})));
+        }
+        let other=self.foundry_choice("foundry-work-type",&self.foundry_work_type,&[
+            ("implementation-plus-verification","Implementation + verification"),("production-readiness-audit","Production readiness"),("refactor-migration","Refactor / migration"),("content-creation","Content creation"),("mixed-workflow","Mixed workflow")],cx);
         let context_label = if self.foundry_more { "Additional context".to_owned() } else if !self.foundry_sources.is_empty() || !self.foundry_autonomy.read(cx).value().is_empty() { "Context added · Edit".to_owned() } else { "Add context · optional".to_owned() };
         let mut panel=div().id("foundry-intake-body").w_full().max_h(px(300.)).overflow_y_scroll().p_4().flex().flex_col().gap_3()
             .child(div().text_xs().text_color(ui.text_muted).child("How much detail?"))
@@ -203,9 +250,10 @@ impl ComposerView {
                 .child(Button::new("foundry-fast").outline().small().flex_1().icon(Lucide::Zap).label("Fast Draft").when(self.foundry_depth=="fast-draft",|b|b.primary()).on_click(cx.listener(|v,_,_,cx|{v.foundry_depth="fast-draft".into();cx.notify();})))
                 .child(Button::new("foundry-full").outline().small().flex_1().icon(Lucide::Layers).label("Full Project").when(self.foundry_depth=="full-project",|b|b.primary()).on_click(cx.listener(|v,_,_,cx|{v.foundry_depth="full-project".into();cx.notify();}))))
             .child(div().text_xs().text_color(ui.text_faint).child(if self.foundry_depth=="fast-draft" {"Focused instructions for a smaller task."} else {"Detailed phases, checks, and a clear handoff."}))
-            .child(div().flex().flex_wrap().gap_3()
-                .child(div().flex_1().min_w(px(180.)).flex().flex_col().gap_1().child(div().text_xs().text_color(ui.text_muted).child("What are you doing?")).child(work))
-                .child(div().flex_1().min_w(px(180.)).flex().flex_col().gap_1().child(div().text_xs().text_color(ui.text_muted).child("Who is the prompt for?")).child(target)))
+            .child(div().text_xs().text_color(ui.text_muted).child("What are you doing?"))
+            .child(work).child(other)
+            .child(div().flex().items_center().gap_2().text_xs().text_color(ui.text_muted)
+                .child(crate::views::brand::brand_mark(&backend,14.,true,ui)).child(format!("For {target} · follows your selected provider")))
             .child(Button::new("foundry-more").ghost().small().icon(if self.foundry_more {Lucide::ChevronDown} else {Lucide::ChevronRight}).label(context_label).on_click(cx.listener(|v,_,_,cx|{v.foundry_more = !v.foundry_more;cx.notify();})));
         if self.foundry_more {
             panel=panel
@@ -216,10 +264,33 @@ impl ComposerView {
                     let input=cx.new(|cx|InputState::new(window,cx).placeholder("URL, file path, reference text or requirement"));
                     v.foundry_sources.push((input,"supporting-context".into()));cx.notify();
                 }))));
+            panel=panel.child(div().flex().flex_wrap().gap_2()
+                .child(Button::new("foundry-file").outline().small().icon(Lucide::Paperclip).label(if self.foundry_source_loading {"Adding files…"} else {"Attach files"}).disabled(self.foundry_source_loading || self.foundry_sources.len()>=20).on_click(cx.listener(|v,_,_,cx|v.pick_foundry_sources(cx))))
+                .child(Button::new("foundry-memory").outline().small().icon(Lucide::Brain).label("From memory").disabled(self.foundry_memory_loading).on_click(cx.listener(|v,_,_,cx|v.load_foundry_memory(cx)))));
+            if self.foundry_memory_open {
+                panel=panel.child(Input::new(&self.foundry_memory_search));
+                let query=self.foundry_memory_search.read(cx).value().to_lowercase();
+                let entries: Vec<_>=self.foundry_memory.iter().filter(|m|format!("{} {} {}",m.scope,m.content,m.tags.join(" ")).to_lowercase().contains(&query)).collect();
+                if entries.is_empty() { panel=panel.child(div().text_xs().text_color(ui.text_muted).child(if self.foundry_memory_loading {"Loading saved memories…"} else {"No matching saved memories."})); }
+                let mut list=div().id("enhance-memory-list").max_h(px(150.)).overflow_y_scroll().flex().flex_col().gap_1();
+                for entry in entries.iter().take(50) {
+                    let value=format!("Saved Bomb Code memory [{}] (user-selected reference):\n{}",entry.scope,entry.content);
+                    let preview=format!("{} · {}",entry.scope,entry.content.chars().take(90).collect::<String>());
+                    list=list.child(Button::new(SharedString::from(format!("pick-memory-{}",entry.id))).ghost().small().icon(Lucide::Plus).label(preview).disabled(self.foundry_sources.len()>=20 || value.len()>20_000).on_click(cx.listener(move |v,_,window,cx|{v.add_foundry_source(value.clone(),window,cx);v.foundry_memory_open=false;cx.notify();})));
+                }
+                panel=panel.child(list);
+            }
         for (i,(input,role)) in self.foundry_sources.iter().enumerate() {
+            let value=input.read(cx).value().to_string();
+            let snapshot=value.starts_with("File reference:") || value.starts_with("Saved Bomb Code memory");
+            let source_view=if snapshot {
+                let title=value.lines().next().unwrap_or("Source").to_string();
+                let note=if value.contains("Contents not included:") {"File reference · contents not included".to_owned()} else {format!("Included · {} characters",value.chars().count())};
+                div().flex().flex_col().gap_1().text_xs().child(div().overflow_hidden().text_ellipsis().whitespace_nowrap().child(title)).child(div().text_color(ui.text_faint).child(note)).into_any_element()
+            } else {Input::new(input).into_any_element()};
             let weak=cx.entity().downgrade();let selected=role.clone();
             panel=panel.child(div().flex().items_center().gap_1()
-                .child(div().flex_1().min_w_0().child(Input::new(input)))
+                .child(div().flex_1().min_w_0().child(source_view))
                 .child(Button::new(SharedString::from(format!("source-role-{i}"))).ghost().small().label(bomb_foundry::label(bomb_foundry::SOURCE_ROLES,role).to_owned()).dropdown_menu(move |mut menu,_,_| {
                     for (id,label) in bomb_foundry::SOURCE_ROLES {
                         let weak=weak.clone();let role=id.to_string();
@@ -228,9 +299,9 @@ impl ComposerView {
                 }))
                 .child(Button::new(SharedString::from(format!("source-remove-{i}"))).ghost().small().label("Remove").on_click(cx.listener(move |v,_,_,cx| {if i<v.foundry_sources.len() {v.foundry_sources.remove(i);}cx.notify();}))));
         }
-            panel=panel.child(div().text_xs().text_color(ui.text_faint).child("References guide the prompt; they aren’t opened during enhancement."));
+            panel=panel.child(div().text_xs().text_color(ui.text_faint).child("Selected text files and memory are included. Binary or large files are linked for later inspection."));
         }
-        let card=div().w_full().max_w(px(520.)).rounded(px(16.)).bg(ui.bg).border_1().border_color(ui.border).shadow_lg().overflow_hidden().flex().flex_col()
+        let card=div().w_full().max_w(px(520.)).rounded(px(16.)).bg(linear_gradient(145., linear_color_stop(if ui.dark {hsla(0.64,0.10,0.15,0.98)} else {hsla(0.64,0.15,0.99,1.)},0.), linear_color_stop(if ui.dark {hsla(0.64,0.07,0.09,0.98)} else {hsla(0.64,0.12,0.95,1.)},1.))).border_1().border_color(ui.border).shadow_lg().overflow_hidden().flex().flex_col()
             .child(div().flex().items_center().gap_2().px_4().py_3().border_b_1().border_color(ui.border)
                 .child(Icon::from(Lucide::Sparkles).size(px(16.)).text_color(ui.text_muted))
                 .child(div().flex_1().text_sm().font_weight(FontWeight::SEMIBOLD).child("Enhance Prompt"))
@@ -238,7 +309,7 @@ impl ComposerView {
             .child(panel)
             .child(div().flex().items_center().flex_wrap().gap_3().px_4().py_3().border_t_1().border_color(ui.border)
                 .child(div().flex_1().text_xs().text_color(ui.text_faint).child(if self.foundry_work_type.is_empty() {"Choose a work type to continue."} else {"Review the result before sending."}))
-                .child(Button::new("foundry-generate").primary().small().icon(Lucide::Sparkles).label("Enhance Prompt").disabled(self.foundry_work_type.is_empty() || self.input.read(cx).value().trim().is_empty()).on_click(cx.listener(|v,_,_,cx|v.run_foundry(cx)))));
+                .child(Button::new("foundry-generate").primary().small().icon(Lucide::Sparkles).label("Enhance Prompt").disabled(self.foundry_source_loading || self.foundry_work_type.is_empty() || self.input.read(cx).value().trim().is_empty()).on_click(cx.listener(|v,_,_,cx|v.run_foundry(cx)))));
         div().w_full().max_w(px(Layout::COMPOSER_MAX)).flex().justify_end().mb_2().child(card).into_any_element()
     }
 
@@ -1423,6 +1494,7 @@ impl Render for ComposerView {
             self.foundry_undo = None;
             self.foundry_message = None;
         }
+        for value in std::mem::take(&mut self.foundry_pending_sources) {self.add_foundry_source(value,window,cx);}
         if self.sent_draft.as_ref().is_some_and(|(_,_,serial)|*serial!=self.model.read(cx).start_failure_serial) {
             if let Some((text,images,_))=self.sent_draft.take() { self.failed_draft=Some((text,images)); }
             self.destination_message=Some("The thread could not start. Your unsent prompt was kept; choose a destination or retry Send.".into());

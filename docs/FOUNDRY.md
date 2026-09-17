@@ -1,8 +1,8 @@
 # Foundry
 
-For everyday use, type your request and click **Enhance Prompt**. The sparkle button sits immediately to the right of attachments. A compact panel asks for **Fast Draft / Full Project**, **target agent**, and **work type**. Work type requires an explicit choice rather than a silent guess. Expand **Add context** to add approval notes and sources classified as source of truth, supporting context, historical plan, reference implementation, or unverified assumption.
+For everyday use, type your request and click **Enhance Prompt**. The sparkle button sits immediately to the right of attachments. A compact panel asks for **Fast Draft / Full Project**, **work type**; the target agent follows the currently selected provider. Work type requires an explicit choice rather than a silent guess. Expand **Add context** to add approval notes and sources classified as source of truth, supporting context, historical plan, reference implementation, or unverified assumption.
 
-Click **Enhance Prompt** to create a structured contract with the selected provider/model. The target agent is the intended recipient, independent of the model doing the generation. Review the contract in the composer, edit, and Send when ready; **Undo** restores your original. Attachments stay attached but are not inspected by prompt generation. Errors preserve the draft, and late results never replace a changed draft or another thread's input.
+Click **Enhance Prompt** to create a structured contract with the selected provider/model. The intended target updates automatically when you change providers in the composer. Review the contract in the composer, edit, and Send when ready; **Undo** restores your original. Chat attachments stay attached but are not inspected by prompt generation; files selected through the panel's source picker follow the source inclusion rules below. Errors preserve the draft, and late results never replace a changed draft or another thread's input.
 
 The choices and contract headings follow the website's [intake schema](https://github.com/jedisherpa/prompt-foundry/blob/main/src/lib/schema/project-contract.ts). Bomb Code generates through the selected ACP model; it does not call the website or promise identical wording to its deterministic local compiler. Confirmed target, depth, work type, original request, source roles and approval notes are retained in the generated output.
 
@@ -39,3 +39,7 @@ This release runs stages sequentially. Provider-folder installation, scheduled/p
 ## Choosing where to send the generated prompt
 
 Submitting a new thread checks the destination before clearing the composer. If setup is missing, choose an existing folder, create a new project with the name/location picker, or use a temporary chat. Initialize Git is available for an existing folder; it creates an empty first commit without committing existing files. Existing uncommitted files must be committed separately before they appear in an isolated branch. After setup, press Send again. A thread-start failure restores the unsent prompt and attachments.
+
+## Sources for enhancement
+
+Under Add context, choose **Attach files**, **From memory**, or **Add source** for a manual reference. The memory picker searches saved Bomb Code notes across scopes; only entries you select are included. UTF-8 text files up to 18 KB are included as bounded snapshots. Larger files and binary formats are labeled as path references with their contents explicitly not included. Source rows show whether content was included, retain authority-role controls, and can be removed before generation. Generation is disabled while selected files are being added.

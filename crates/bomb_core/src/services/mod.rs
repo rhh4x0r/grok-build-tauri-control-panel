@@ -2,6 +2,7 @@
 
 pub mod project_overview;
 pub mod thread_setup;
+pub mod prompt_sources;
 pub mod workspaces;
 
 use std::path::PathBuf;
