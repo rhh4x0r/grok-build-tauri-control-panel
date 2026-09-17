@@ -88,6 +88,7 @@ pub struct AppModel {
     pub thread_order: Vec<Uuid>,
     pub threads: HashMap<Uuid, Entity<ThreadModel>>,
     pub selected: Option<Uuid>,
+    pub new_thread_open: bool,
     pub auth: Vec<BackendAuth>,
     /// Account usage limits (5h / weekly) per backend, refreshed slowly.
     pub usage: Vec<bomb_core::usage::AccountUsage>,
@@ -129,6 +130,7 @@ impl AppModel {
             thread_order: Vec::new(),
             threads: HashMap::new(),
             selected: None,
+            new_thread_open: false,
             auth: Vec::new(),
             usage: Vec::new(),
             backends: Vec::new(),
@@ -228,6 +230,10 @@ impl AppModel {
             self.active_project = Some(w.project_root);
             self.select(w.threads.first().and_then(|t| Uuid::parse_str(t).ok()), cx);
             self.active_workspace = Some(id);
+            if self.selected.is_none() {
+                self.new_thread_open = true;
+                if self.prefs.mode == "yolo" { self.prefs.mode = "plan".into(); }
+            }
             self.prefs.temporary = w.inline;
             self.prefs.worktree = !w.inline;
             if w.inline { self.prefs.mode = "plan".into(); }
@@ -246,6 +252,8 @@ impl AppModel {
     }
 
     pub fn new_workspace_thread(&mut self, cx: &mut Context<Self>) {
+        self.new_thread_open = true;
+        if self.prefs.mode == "yolo" { self.prefs.mode = "plan".into(); }
         self.selected = None;
         cx.notify();
     }
@@ -263,8 +271,8 @@ impl AppModel {
             self.open_workspace(w.id.clone(), cx);
         } else {
             self.set_active_project(root, cx);
-            self.prefs.temporary = true;
-            self.prefs.mode = "plan".into();
+            self.new_thread_open = true;
+            self.set_new_intent(true, cx);
             cx.notify();
         }
     }
@@ -619,6 +627,7 @@ impl AppModel {
             return;
         }
         self.selected = id;
+        self.new_thread_open = false;
         self.review = None;
         self.active_workspace = id.and_then(|id| self.workspaces.iter().find(|w| w.threads.contains(&id.to_string())).map(|w| w.id.clone()));
         if let Some(w) = self.active_workspace.as_deref().and_then(|id| self.workspaces.iter().find(|w| w.id == id)) {
@@ -655,6 +664,8 @@ impl AppModel {
 
     /// Deselect: the composer starts a fresh thread in the active project.
     pub fn new_thread(&mut self, cx: &mut Context<Self>) {
+        self.new_thread_open = true;
+        if self.prefs.mode == "yolo" { self.prefs.mode = "plan".into(); }
         self.source_thread = None;
         self.active_workspace = None;
         self.prefs.temporary = false;
@@ -1038,11 +1049,7 @@ impl AppModel {
     }
 
     pub fn cycle_mode(&mut self, cx: &mut Context<Self>) {
-        let i = APPROVAL_CYCLE
-            .iter()
-            .position(|m| *m == self.prefs.mode)
-            .unwrap_or(0);
-        let next = APPROVAL_CYCLE[(i + 1) % APPROVAL_CYCLE.len()];
+        let next = next_shortcut_mode(&self.prefs.mode);
         self.set_mode(next, cx);
     }
 
@@ -1235,6 +1242,8 @@ impl AppModel {
     }
 
     pub fn set_active_project(&mut self, root: String, cx: &mut Context<Self>) {
+        self.new_thread_open = false;
+        if self.prefs.mode == "yolo" { self.prefs.mode = "plan".into(); }
         self.source_thread = None;
         self.active_project = Some(root);
         self.overview_branch = None;
@@ -1521,4 +1530,19 @@ pub fn project_name(root: &str) -> String {
         .map(|s| s.to_string_lossy().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| root.to_string())
+}
+
+fn next_shortcut_mode(current: &str) -> &'static str {
+    match current { "plan" => "ask", "ask" => "auto", _ => "plan" }
+}
+
+#[cfg(test)]
+mod mode_shortcut_tests {
+    #[test]
+    fn shortcut_never_enters_full_access() {
+        assert_eq!(super::next_shortcut_mode("plan"), "ask");
+        assert_eq!(super::next_shortcut_mode("ask"), "auto");
+        assert_eq!(super::next_shortcut_mode("auto"), "plan");
+        assert_eq!(super::next_shortcut_mode("yolo"), "plan");
+    }
 }

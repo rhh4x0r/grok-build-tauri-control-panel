@@ -25,20 +25,29 @@ Later launches:
 open "/Applications/Bomb Code.app"
 ```
 
-## First coding session
+## First conversation
 
-1. Open the **Sessions** tab.
-2. Set **Project directory** to an absolute path of a git repo you want to work in.
-3. Leave **Plan mode** on (safer).
-4. Click **Start ACP Session** (uses `grok agent stdio`).
-5. Select the session in the list, type a prompt, **Send Prompt**.
-6. Watch **Live Events** for tool calls / plan updates.
+1. Follow the center welcome screen to **Sign in** to your chosen provider. If its CLI is missing, install it and use **Refresh connections**. The sidebar footer shows connection status.
+2. Use **Choose project** or **Add project** to select a folder. If Git is missing from that folder, **Initialize Git repo** creates a local repository without committing or uploading files. A new repository needs an initial commit before you can create an isolated workspace.
+3. Choose **Start conversation** or the sidebar's **New chat**. The composer opens with a visible **Isolated workspace** label for change-making conversations. **Ask a question** uses a read-only conversation instead.
+4. Keep **Plan** to investigate and propose changes, or choose **Ask first** to request tool approvals. Type your request and press Enter or the send button; Shift+Enter adds a newline.
+5. Responses, tool activity, and approval cards appear in the conversation. **Changes** opens file review. **Dev sidebar** opens the preview and its Start/Stop server controls.
+
+Click **Bomb Code** above the folder selector to return Home. Clicking a project opens its Git overview; clicking a conversation reopens it. **Settings** (⌘,) opens in the main window, and **Back** returns to your work.
+
+### Approval modes
+
+- **Plan** is the initial default. **Ask first** requests approval for tools, subject to your permission rules. **Auto** uses the agent's automatic approval policy.
+- **Shift+Tab** cycles Plan → Ask first → Auto without moving focus in the conversation screen. Normal keyboard navigation remains available in Settings, menus, dialogs, and other text fields.
+- **Full access** is under Advanced in the mode menu and requires explicit confirmation. It allows automatic tool execution, including destructive commands, but deny rules still apply. It is excluded from keyboard cycling and is not inherited by new conversations.
 
 ### Optional MCP
 
-- **MCP** tab → pick `filesystem` or `github` → **Add**.
-- For GitHub: save `GITHUB_TOKEN` under credentials first — without it the server is skipped at session start (the thread will say why). Linear needs `LINEAR_API_KEY`; X needs `X_API_BEARER`; stdio servers need Node/npx on PATH.
-- On Sessions, set **MCP attach** to those names (e.g. `github`).
+- Open **Settings → MCP** to add servers from the catalog and manage credentials; use **Back** to return.
+- Servers that need credentials are skipped until configured. For example, GitHub uses `GITHUB_TOKEN`; Linear uses `LINEAR_API_KEY`; X uses `X_API_BEARER`. Stdio servers may require Node/npx.
+- Before sending a new conversation's first message, use the composer's **mcp** picker to choose additional servers. Auto-attach servers are included automatically.
+
+Scheduler and Extensions currently have backend services but no dedicated desktop screens.
 
 ## Config locations (safe)
 
@@ -68,6 +77,6 @@ cargo run -p bomb_app
 
 ## Safety
 
-- Default: **plan mode on**, **always-approve off**. With always-approve off, each tool permission shows an approval card in the thread (Allow once / Always / Deny).
-- High-risk MCP (browser, grok-build, custom) requires explicit attach approval.
-- Do not enable Always approve unless you trust the workspace.
+- Plan is the initial default, and Full access requires explicit opt-in. Approval cards offer Allow once / Always / Deny according to the selected mode and permission rules.
+- Deny rules take precedence even under Full access. Read-only question conversations cannot escalate into editing; choose Make changes to start an isolated workspace.
+- High-risk MCP servers require explicit attachment approval.

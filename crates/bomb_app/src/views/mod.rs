@@ -15,3 +15,6 @@ pub mod transcript;
 pub mod workspaces;
 
 pub mod project;
+
+pub mod approval_mode;
+pub mod welcome;

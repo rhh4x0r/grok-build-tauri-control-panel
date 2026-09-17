@@ -102,24 +102,23 @@ fn general_page(cx: &App) -> SettingPage {
                             vec![
                                 ("plan".into(), "plan · propose, no execution".into()),
                                 ("ask".into(), "ask · confirm every tool".into()),
-                                ("auto".into(), "auto · approve safe actions".into()),
-                                ("yolo".into(), "yolo · approve everything".into()),
+                                ("auto".into(), "auto · agent approval policy".into()),
                             ],
-                            |cx| settings(cx).read(cx).config.as_ref().and_then(|c| c.approval_mode_default.clone()).unwrap_or_else(|| "plan".into()).into(),
+                            |cx| settings(cx).read(cx).config.as_ref().and_then(|c| c.approval_mode_default.clone()).filter(|m| m != "yolo").unwrap_or_else(|| "plan".into()).into(),
                             |v, cx| settings(cx).update(cx, |m, cx| m.edit_config(|c| c.approval_mode_default = Some(v.to_string()), cx)),
                         ),
                     )
-                    .description("Deny rules always win, even in yolo."),
+                    .description("Full access requires explicit opt-in from a conversation’s mode menu. Deny rules always apply."),
                 )
                 .item(
                     SettingItem::new(
-                        "Isolate each thread in a git worktree",
+                        "Use isolated workspaces for changes",
                         SettingField::switch(
                             |cx| settings(cx).read(cx).config.as_ref().map(|c| c.worktree_isolation_default).unwrap_or(true),
                             |v, cx| settings(cx).update(cx, |m, cx| m.edit_config(|c| c.worktree_isolation_default = v, cx)),
                         ),
                     )
-                    .description("New threads get their own worktree and thread/<id> branch; Land merges them back."),
+                    .description("Changes run in a separate workspace and branch. Multiple conversations can share a workspace."),
                 )
                 .item(
                     SettingItem::new(

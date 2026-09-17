@@ -16,15 +16,17 @@
 - **Multi-session registry** with concurrent `DashMap` access
 - **Git worktree** isolation for parallel agents
 - **Interactive tool approvals** (allow once / always / deny per request), deny rules enforced ahead of yolo, permission presets (safe / workspace / yolo) + sandbox profiles
-- **Native GPUI app** — one window: threads on the left, the conversation in the middle, a Settings window (⌘,) for MCP, memory, worktrees, permissions and diagnostics. Follows the system light/dark appearance.
-- **Thread-per-worktree isolation** — each new thread in a git project gets its own worktree + `thread/<id>` branch (pure git, works with every backend), grouped by project in the sidebar. **Land** merges a thread back into the project branch; conflicts route through **Sync**, which pulls main into the worktree so the thread's own agent can resolve them. Threads get smart names from their first prompt.
+- **Native GPUI app** — one window with projects and conversations in the sidebar, a conversation composer, and an in-window Settings screen (⌘,) with a Back button. Follows system light/dark appearance.
+- **Guided welcome** — connect a provider, choose a project, and start a conversation. The sidebar has labeled Add project and New chat actions.
+- **Isolated workspaces** — changes run on a separate `bomb/<prompt-slug>-<id>` branch with checkpoints. Multiple conversations can share a workspace. Ask a question keeps files unchanged. The Changes panel offers explicit review, push/PR, and local merge actions.
+- **Project overview** — local branch map, recent commits, committed-file comparisons, workspace conversations, and GitHub PR status when GitHub CLI access is available. Plain folders offer Initialize Git repo; initialization does not commit or upload files.
 - **MCP management** — catalog (filesystem, GitHub, Linear, X, Playwright, custom), doctor, credentials store, pre-spawn health checks, session attachment. Servers needing credentials (e.g. `GITHUB_TOKEN`, `LINEAR_API_KEY`, `X_API_BEARER`) are skipped with a visible reason until the secret is set.
-- **Extensions** — skills, plugins CRUD (config + CLI)
+- **Extensions backend** — skills/plugins services exist; a dedicated desktop management screen is not yet available.
 - **Memory** — structured store + MEMORY.md flush/dream
-- **Scheduler** — interval, cron, one-shot routines (persisted; survive restart; each job needs an explicit working directory)
+- **Scheduler backend** — interval, cron, and one-shot routines with persistence and explicit working directories; a desktop scheduling screen is not yet available.
 - **Persistence** — SQLite session/transcript recovery
 - **Diff engine** — before/after capture and summaries
-- **Live Dev Server** control in the thread header (start, open, stop)
+- **Dev sidebar** — preview and explicit Start server / Stop server controls, opened from the conversation toolbar.
 - **macOS app** install under `/Applications/Bomb Code.app`
 
 ## Quick start
@@ -33,7 +35,7 @@
 
 1. [Rust](https://rustup.rs/) (stable) + Xcode CLT on macOS
 2. Grok Build CLI on `PATH` or at `~/.grok/bin/grok`
-3. Grok auth (`grok` login / panel Login)
+3. Grok auth (`grok` login or Sign in on the app’s welcome screen)
 
 ### Install from source (macOS)
 
@@ -87,7 +89,7 @@ scripts/          # install / run helpers
 
 - No API keys or credentials are committed to this repository.
 - Secrets live under `~/.grok/` with restricted permissions.
-- Prefer **plan mode** for untrusted repos; use **yolo** only when you accept the risk.
+- **Plan** is the initial default. **Full access** (`yolo`) requires explicit confirmation in the mode menu, is excluded from Shift+Tab cycling, and is not inherited by new conversations. Deny rules still apply.
 - Do not log `XAI_API_KEY` or MCP tokens.
 
 ## Contributing

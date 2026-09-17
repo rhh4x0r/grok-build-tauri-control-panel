@@ -108,10 +108,8 @@ impl SidebarView {
         }
     }
 
-    /// Zeron's spaces filter: folder mark + project name + caret (29px,
-    /// 13px medium), and a square 29px button on the right (here: new thread).
+    /// Selected project folder and switcher; labeled create actions sit below.
     fn header(&self, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
-        let hover = ui.hover;
         let projects = self.model.read(cx).projects.clone();
         let model = self.model.clone();
         let project = self
@@ -167,23 +165,7 @@ impl SidebarView {
                         }))
                     }),
             )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .id("new-thread")
-                    .size(px(29.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(8.))
-                    .text_color(ui.text_muted)
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(hover))
-                    .on_click(cx.listener(|_, _, window, cx| {
-                        window.dispatch_action(Box::new(NewThread), cx);
-                    }))
-                    .child(div().size(px(16.)).child(Icon::from(Lucide::Plus))),
-            )
+
     }
 
     /// A project section: disclosure header (folder mark, name, hairline,
@@ -706,11 +688,10 @@ impl SidebarView {
                 .or_else(|| a.plan.clone())
                 .unwrap_or_else(|| "signed in".into())
         } else if runnable {
-            "click to sign in".into()
+            "signed out · connect from Home".into()
         } else {
             "not installed".into()
         };
-        let hover = ui.hover;
         let display = a.display_name.clone();
         let menu_model = model.clone();
         let menu_backend = backend.clone();
@@ -723,17 +704,6 @@ impl SidebarView {
             .px_2()
             .py_1()
             .rounded(px(6.))
-            .when(!logged_in && runnable, |el| {
-                el.cursor_pointer()
-                    .hover(move |s| s.bg(hover))
-                    .on_click(move |_, window, cx| {
-                        if backend == "grok" {
-                            crate::views::login_dialog::open_login_dialog(model.clone(), window, cx);
-                        } else {
-                            model.update(cx, |m, cx| m.sign_in(&backend, cx));
-                        }
-                    })
-            })
             .child(crate::views::brand::brand_mark(&a.backend, 14., logged_in, ui))
             .child(div().text_sm().text_color(ui.text).child(display.clone()))
             .child(div().size(px(6.)).rounded_full().bg(dot))
@@ -841,6 +811,11 @@ impl Render for SidebarView {
                     ),
             )
             .child(self.header(&ui, cx))
+            .child(div().flex().gap_1().px(px(Layout::SPACE_SM)).pb(px(Layout::SPACE_SM))
+                .child(Button::new("sidebar-add-project").ghost().small().icon(Lucide::FolderPlus).label("Add project")
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::actions::OpenProject), cx)))
+                .child(Button::new("sidebar-new-chat").ghost().small().icon(Lucide::Plus).label("New chat")
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(NewThread), cx))))
             .child(div().px(px(Layout::SPACE_SM)).pb(px(Layout::SPACE_XS)).child(Input::new(&self.search).cleanable(true).appearance(true)))
             .child(
                 div()
@@ -862,7 +837,7 @@ impl Render for SidebarView {
                                             .pb(px(Layout::SPACE_SM))
                                             .text_size(px(12.))
                                             .text_color(ui.text_faint)
-                                            .child("No sessions yet"),
+                                            .child(if self.model.read(cx).projects.is_empty() { "No projects yet — add a folder" } else { "No conversations yet — start a new chat" }),
                                     )
                                 })
                         } else {

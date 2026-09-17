@@ -672,6 +672,7 @@ impl ComposerView {
                 menu = menu.min_w(px(320.)).max_w(px(340.)).check_side(Side::Right)
                     .item(PopupMenuItem::label("Approval mode"));
                 for m in APPROVAL_CYCLE {
+                    if m == "yolo" { menu = menu.separator().item(PopupMenuItem::label("Advanced · explicit opt-in")); }
                     let app = app.clone();
                     let (label, icon, description) = mode_presentation(m);
                     menu = menu.item(PopupMenuItem::element(move |_, cx| {
@@ -684,11 +685,11 @@ impl ComposerView {
                                     .text_color(if m == "yolo" { ui.warning } else { ui.text }).child(label))
                                 .child(div().text_size(px(11.)).line_height(px(15.)).text_color(ui.text_muted)
                                     .whitespace_normal().child(description)))
-                    }).checked(m == mode).on_click(move |_, _, cx| {
-                        app.update(cx, |a, cx| a.set_mode(m, cx));
+                    }).checked(m == mode).on_click(move |_, window, cx| {
+                        super::approval_mode::request(app.clone(), m, window, cx);
                     }));
                 }
-                menu.separator().item(PopupMenuItem::label("Permission rules still apply · Shift+Tab to cycle"))
+                menu.separator().item(PopupMenuItem::label("Shift+Tab: Plan → Ask first → Auto"))
             })
             .into_any_element()
     }
@@ -875,6 +876,7 @@ impl Render for ComposerView {
                             .gap(px(Layout::SPACE_XS))
                             .px(px(10.))
                             .child(footer_label(Lucide::MessageCircle, location_label, &ui))
+                            .when(worktree_on, |el| el.child(footer_label(Lucide::GitBranch, "Isolated workspace".into(), &ui)))
                             .when_some(branch, |el, b| el.child(footer_label(Lucide::GitBranch, b, &ui)))
                             .when(!has_thread && new_target, |el| {
                                 el.child(
@@ -885,7 +887,7 @@ impl Render for ComposerView {
                                         .dropdown_menu(move |menu, _, _| {
                                             let questions = app.clone(); let changes = app.clone();
                                             menu.item(PopupMenuItem::new("Ask a question — leave files unchanged").on_click(move |_, _, cx| questions.update(cx, |m, cx| m.set_new_intent(true, cx))))
-                                                .item(PopupMenuItem::new("Make changes — start a workspace").on_click(move |_, _, cx| changes.update(cx, |m, cx| m.set_new_intent(false, cx))))
+                                                .item(PopupMenuItem::new("Make changes — isolated workspace").on_click(move |_, _, cx| changes.update(cx, |m, cx| m.set_new_intent(false, cx))))
                                         })
                                 )
                             })

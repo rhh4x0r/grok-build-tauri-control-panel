@@ -388,6 +388,15 @@ impl Render for ThreadView {
         let composer = self.composer.clone();
 
         let Some(thread) = thread else {
+            let m = self.model.read(cx);
+            let ready = m.auth.iter().any(|a| a.backend == m.prefs.backend && a.logged_in && a.runnable);
+            let first_conversation_ready = m.threads.is_empty() && !m.new_thread_open && !m.prefs.temporary
+                && m.active_project.as_ref().and_then(|root| m.project_overviews.get(root))
+                    .is_some_and(|r| r.as_ref().is_ok_and(|o| o.git_detected && !o.branches.is_empty()));
+            if m.active_project.is_none() || (m.new_thread_open && !ready) || first_conversation_ready {
+                return super::welcome::setup(self.model.clone(), &ui, cx);
+            }
+
             let needs_overview = self.model.read(cx).active_project.as_ref().is_some_and(|root| {
                 let m = self.model.read(cx);
                 !m.project_overviews.contains_key(root) && !m.overview_loading.contains(root)
@@ -400,7 +409,7 @@ impl Render for ThreadView {
                 .overflow_hidden()
                 .flex()
                 .flex_col()
-                .child(div().flex_1().min_h_0().child(if self.model.read(cx).active_project.is_some() && self.model.read(cx).active_workspace.is_none() && !self.model.read(cx).prefs.temporary {
+                .child(div().flex_1().min_h_0().child(if !self.model.read(cx).new_thread_open && self.model.read(cx).active_project.is_some() && self.model.read(cx).active_workspace.is_none() && !self.model.read(cx).prefs.temporary {
                     crate::views::workspaces::project_page(self.model.clone(), &ui, cx)
                 } else { self.welcome(&ui, cx).into_any_element() }))
                 .child(composer)
