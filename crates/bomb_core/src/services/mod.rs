@@ -167,7 +167,7 @@ fn spawn_in_terminal(cmd: &str) -> std::io::Result<()> {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -224,7 +224,7 @@ pub async fn logout_grok(state: &AppState) -> Result<grok_cli_wrapper::AuthStatu
     state.grok_cli.logout().await.map_err(err)
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeStatus {
     pub grok_binary: String,
@@ -489,7 +489,7 @@ pub async fn start_session(
 
     // Durable memory rides along: global notes + this project's notes are
     // injected with the thread's first prompt.
-    let memory_context = build_memory_context(&state, &requested_cwd).await;
+    let memory_context = build_memory_context(state, &requested_cwd).await;
     let connect_opts = grok_control_core::ConnectOpts {
         resume_acp_session_id: None,
         transcript_context: None,
@@ -521,7 +521,7 @@ pub async fn start_session(
         });
     }
     let _ = state.persistence.set_kv("last_cwd", &cwd);
-    persist_session(&state, id).await;
+    persist_session(state, id).await;
     Ok(SessionIdResponse {
         id: id.to_string(),
     })
@@ -533,7 +533,7 @@ pub async fn start_mock_session(
 ) -> Result<SessionIdResponse, String> {
     let id = state.registry.spawn_mock(&cwd).await.map_err(err)?;
     let _ = state.persistence.set_kv("last_cwd", &cwd);
-    persist_session(&state, id).await;
+    persist_session(state, id).await;
     Ok(SessionIdResponse {
         id: id.to_string(),
     })
@@ -547,7 +547,7 @@ pub async fn list_sessions(
 
 /// Live + SQLite-restored threads for the UI thread list.
 pub async fn list_threads(state: &AppState) -> Result<Vec<ThreadDto>, String> {
-    Ok(build_thread_list(&state))
+    Ok(build_thread_list(state))
 }
 
 pub async fn get_session(
@@ -584,6 +584,7 @@ pub async fn agent_supports_images(state: &AppState, id: String) -> Result<bool,
     Ok(state.registry.image_prompts_supported(id).await.unwrap_or(true))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn send_prompt(
     state: &AppState,
     id: String,
@@ -620,13 +621,13 @@ pub async fn send_prompt(
                 want_backend.unwrap_or(cur.backend).key(),
                 want_model.clone().unwrap_or_else(|| cur.model.clone()),
             );
-            persist_session(&state, id).await;
+            persist_session(state, id).await;
             state.registry.remove_session(id).await.map_err(err)?;
             let _ = state
                 .persistence
                 .append_message(id, "system", &label, Utc::now());
             resume_saved_session(
-                &state,
+                state,
                 id,
                 want_backend,
                 want_model.clone(),
@@ -642,7 +643,7 @@ pub async fn send_prompt(
     // Auto-resume so "Send" picks up the same thread id + transcript.
     if !state.registry.is_live(id) {
         resume_saved_session(
-            &state,
+            state,
             id,
             want_backend,
             want_model,
@@ -664,7 +665,7 @@ pub async fn send_prompt(
         let slug = prompt_slug(&prompt);
         if !slug.is_empty() {
             let _ = state.registry.set_label(id, &slug);
-            emit_thread_label(&state, id, &slug);
+            emit_thread_label(state, id, &slug);
         }
         let explainer = state.explainer.clone();
         let registry = state.registry.clone();
@@ -738,7 +739,7 @@ pub async fn send_prompt(
         format!("→ prompt accepted ({prompt_len} chars) · agent stream open"),
         Utc::now(),
     );
-    persist_session(&state, id).await;
+    persist_session(state, id).await;
     Ok(())
 }
 
@@ -771,11 +772,13 @@ async fn resume_saved_session(
         ));
     }
 
-    let mut opts = SpawnOptions::default();
-    opts.mode = if rec.mode.eq_ignore_ascii_case("headless") {
-        grok_control_core::AgentMode::Headless
-    } else {
-        grok_control_core::AgentMode::Acp
+    let mut opts = SpawnOptions {
+        mode: if rec.mode.eq_ignore_ascii_case("headless") {
+            grok_control_core::AgentMode::Headless
+        } else {
+            grok_control_core::AgentMode::Acp
+        },
+        ..SpawnOptions::default()
     };
     let recorded_backend = extract_backend_from_meta(&rec.metadata_json);
     opts.backend = override_backend.unwrap_or(recorded_backend);
@@ -906,7 +909,7 @@ fn emit_thread_label(state: &AppState, id: Uuid, label: &str) {
 pub(crate) fn project_memory_scope(project_root: &str) -> String {
     use std::hash::{Hash, Hasher};
     let clean = project_root.trim_end_matches('/');
-    let base = clean.split('/').filter(|s| !s.is_empty()).last().unwrap_or("project");
+    let base = clean.split('/').rfind(|s| !s.is_empty()).unwrap_or("project");
     let mut h = std::collections::hash_map::DefaultHasher::new();
     clean.hash(&mut h);
     format!("{base}-{:06x}", h.finish() & 0xff_ffff)
@@ -974,7 +977,7 @@ fn build_transcript_context(state: &AppState, id: Uuid) -> Option<String> {
 pub async fn cancel_session(state: &AppState, id: String) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
     state.registry.cancel_session(id).await.map_err(err)?;
-    persist_session(&state, id).await;
+    persist_session(state, id).await;
     Ok(())
 }
 
@@ -986,7 +989,7 @@ pub async fn remove_session(
     let id = Uuid::parse_str(&id).map_err(err)?;
     // Capture worktree context before the records disappear.
     let wt_ctx = if remove_worktree.unwrap_or(false) {
-        thread_worktree_context(&state, id).await.ok()
+        thread_worktree_context(state, id).await.ok()
     } else {
         None
     };
@@ -1089,7 +1092,7 @@ pub async fn set_approval_mode(
         .set_approval_mode(id, mode)
         .await
         .map_err(err)?;
-    persist_session(&state, id).await;
+    persist_session(state, id).await;
     Ok(())
 }
 
@@ -1162,7 +1165,7 @@ pub async fn rename_thread(
     let label: String = label.chars().take(60).collect();
 
     if state.registry.set_label(id, &label).is_ok() {
-        persist_session(&state, id).await;
+        persist_session(state, id).await;
     } else {
         // Saved thread: patch the label inside the persisted metadata.
         let mut rec = state.persistence.get_session(id).map_err(err)?;
@@ -1176,7 +1179,7 @@ pub async fn rename_thread(
         rec.updated_at = Utc::now();
         state.persistence.upsert_session(&rec).map_err(err)?;
     }
-    emit_thread_label(&state, id, &label);
+    emit_thread_label(state, id, &label);
     Ok(())
 }
 
@@ -1278,7 +1281,7 @@ pub async fn land_thread(
     id: String,
 ) -> Result<ThreadMergeResult, String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
-    let (worktree, root, branch, label) = thread_worktree_context(&state, id).await?;
+    let (worktree, root, branch, label) = thread_worktree_context(state, id).await?;
     let title = if label.is_empty() { branch.clone() } else { label.clone() };
 
     let _ = state
@@ -1344,7 +1347,7 @@ pub async fn sync_thread(
     id: String,
 ) -> Result<ThreadMergeResult, String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
-    let (worktree, root, branch, label) = thread_worktree_context(&state, id).await?;
+    let (worktree, root, branch, label) = thread_worktree_context(state, id).await?;
     let title = if label.is_empty() { branch.clone() } else { label.clone() };
     let target_branch = state.worktrees.current_branch(&root).await.map_err(err)?;
 
@@ -2239,7 +2242,7 @@ pub async fn detect_dev_server(
     cwd: Option<String>,
     session_id: Option<String>,
 ) -> Result<crate::devserver::DetectedProject, String> {
-    let path = resolve_preview_cwd(&state, cwd, session_id)?;
+    let path = resolve_preview_cwd(state, cwd, session_id)?;
     crate::devserver::DevServerManager::detect(&path)
 }
 
@@ -2249,7 +2252,7 @@ pub async fn start_dev_server(
     session_id: Option<String>,
     open_browser: Option<bool>,
 ) -> Result<crate::devserver::DevServerStatus, String> {
-    let path = resolve_preview_cwd(&state, cwd, session_id)?;
+    let path = resolve_preview_cwd(state, cwd, session_id)?;
     let _ = state.persistence.set_kv("last_cwd", &path.display().to_string());
     state
         .dev_server
@@ -2278,6 +2281,6 @@ pub async fn reveal_project(
     cwd: Option<String>,
     session_id: Option<String>,
 ) -> Result<(), String> {
-    let path = resolve_preview_cwd(&state, cwd, session_id)?;
+    let path = resolve_preview_cwd(state, cwd, session_id)?;
     crate::devserver::DevServerManager::reveal_project(&path).await
 }

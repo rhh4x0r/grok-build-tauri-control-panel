@@ -440,9 +440,11 @@ impl SessionRegistry {
     /// Spawn a mock ACP session for tests / offline UI development.
     pub async fn spawn_mock(&self, cwd: &str) -> Result<Uuid> {
         let id = Uuid::new_v4();
-        let mut opts = SpawnOptions::default();
-        opts.model = Some("mock".into());
-        opts.mode = AgentMode::Acp;
+        let opts = SpawnOptions {
+            model: Some("mock".into()),
+            mode: AgentMode::Acp,
+            ..SpawnOptions::default()
+        };
         self.spawn_agent_with_id(id, cwd, opts, None, ConnectOpts::default(), false)
             .await?;
         Ok(id)

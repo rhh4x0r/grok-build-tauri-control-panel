@@ -44,7 +44,7 @@ where
     });
     cx.spawn(async move |cx| {
         if let Ok(v) = rx.recv().await {
-            let _ = cx.update(|cx| on_done(v, cx));
+            cx.update(|cx| on_done(v, cx));
         }
     })
     .detach();

@@ -65,7 +65,6 @@ impl Layout {
     pub const SIDEBAR: f32 = 256.0;
     pub const BUBBLE_RADIUS: f32 = 16.0;
     pub const PANEL_RADIUS: f32 = 10.0;
-    pub const CONTROL_RADIUS: f32 = 6.0;
     pub const COMPOSER_RADIUS: f32 = 26.0;
     pub const CONTENT_MAX: f32 = 880.0;
     pub const COMPOSER_MAX: f32 = 768.0;
@@ -79,12 +78,9 @@ pub struct Ui {
     pub bg: Hsla,
     /// Shell / sidebar plane.
     pub surface: Hsla,
-    /// Opaque pills and chips.
-    pub surface_raised: Hsla,
     pub hover: Hsla,
     pub active: Hsla,
     pub border: Hsla,
-    pub border_strong: Hsla,
     pub text: Hsla,
     pub text_muted: Hsla,
     pub text_faint: Hsla,
@@ -109,11 +105,9 @@ impl Ui {
                 dark,
                 bg: grey(0x06),
                 surface: grey(0x0d),
-                surface_raised: neutral(0.235),
                 hover: hsla(0.0, 0.0, 0.92, 0.11),
                 active: hsla(0.0, 0.0, 0.92, 0.16),
                 border: hsla(0.0, 0.0, 1.0, 0.08),
-                border_strong: hsla(0.0, 0.0, 1.0, 0.14),
                 text: neutral(0.922),
                 text_muted: neutral(0.708),
                 text_faint: neutral(0.556),
@@ -132,11 +126,9 @@ impl Ui {
                 dark,
                 bg: grey(0xff),
                 surface: neutral(0.968),
-                surface_raised: neutral(0.940),
                 hover: hsla(0.0, 0.0, 0.10, 0.06),
                 active: hsla(0.0, 0.0, 0.10, 0.10),
                 border: hsla(0.0, 0.0, 0.0, 0.10),
-                border_strong: hsla(0.0, 0.0, 0.0, 0.17),
                 text: neutral(0.25),
                 text_muted: neutral(0.439),
                 text_faint: neutral(0.535),
@@ -159,15 +151,6 @@ impl Ui {
             hsla(0.0, 0.0, 1.0, alpha)
         } else {
             hsla(0.0, 0.0, 0.0, alpha * 0.8)
-        }
-    }
-
-    /// Hairline ink for borders (edges need more ink on white).
-    pub fn hairline(&self, alpha: f32) -> Hsla {
-        if self.dark {
-            hsla(0.0, 0.0, 1.0, alpha)
-        } else {
-            hsla(0.0, 0.0, 0.0, (alpha * 1.4).min(0.5))
         }
     }
 

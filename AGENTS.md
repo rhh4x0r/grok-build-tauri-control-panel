@@ -34,6 +34,7 @@ cargo check --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p bomb_app   # desktop UI
+BOMB_SMOKE=1 cargo run -p bomb_app   # headless: one mock turn + settings load, then quit
 ```
 
 ## Security defaults

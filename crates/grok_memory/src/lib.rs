@@ -149,7 +149,7 @@ impl MemoryService {
         if entries.is_empty() {
             return None;
         }
-        entries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.updated_at));
         let mut out = String::new();
         for e in entries {
             let line = format!("- {}\n", e.content.replace('\n', " ").trim());

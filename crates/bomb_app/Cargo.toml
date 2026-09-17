@@ -19,6 +19,7 @@ grok_control_core = { path = "../grok_control_core" }
 grok_events = { path = "../grok_events" }
 grok_mcp = { path = "../grok_mcp" }
 grok_memory = { path = "../grok_memory" }
+grok_permissions = { path = "../grok_permissions" }
 grok_persistence = { path = "../grok_persistence" }
 grok_worktree = { path = "../grok_worktree" }
 serde.workspace = true

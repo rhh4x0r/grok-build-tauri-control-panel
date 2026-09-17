@@ -1795,8 +1795,6 @@ impl AcpClient {
                                 .unwrap_or(m),
                             if m.contains("create") {
                                 ToolCallStatus::Running
-                            } else if m.contains("wait") {
-                                ToolCallStatus::Completed
                             } else {
                                 ToolCallStatus::Completed
                             },

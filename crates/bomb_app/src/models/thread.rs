@@ -84,13 +84,6 @@ impl ThreadModel {
         cx.notify();
     }
 
-    pub fn toggle_group(&mut self, first_entry_id: u64, cx: &mut Context<Self>) {
-        if !self.collapsed_groups.remove(&first_entry_id) {
-            self.collapsed_groups.insert(first_entry_id);
-        }
-        cx.notify();
-    }
-
     pub fn after_hydrate(&mut self, cx: &mut Context<Self>) {
         self.markdown.clear();
         self.tail_version += 1;

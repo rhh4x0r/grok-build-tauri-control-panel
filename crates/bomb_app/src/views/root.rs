@@ -8,7 +8,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::actions::{
-    CycleApprovalMode, NewMockSession, NewThread, OpenProject, OpenSettings, RevealProject, StopTurn,
+    CycleApprovalMode, DeleteThread, LandThread, NewMockSession, NewThread, OpenProject, OpenSettings,
+    RevealProject, StopTurn, SyncThread, ToggleExplainer,
 };
 use crate::models::app::{project_name, AppModel, ToastKind};
 use crate::theme::{Layout, Ui};
@@ -165,8 +166,43 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &StopTurn, _, cx| {
                 this.model.update(cx, |m, cx| m.cancel_selected(cx));
             }))
-            .on_action(cx.listener(|_, _: &OpenSettings, _, _| {
-                tracing::info!("settings requested (Phase 4)");
+            .on_action(cx.listener(|_, _: &OpenSettings, _, cx| {
+                crate::views::settings::open_settings_window(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleExplainer, _, cx| {
+                if let Some(t) = this.model.read(cx).selected_thread() {
+                    t.update(cx, |t, cx| {
+                        t.explain_open = !t.explain_open;
+                        cx.notify();
+                    });
+                }
+            }))
+            .on_action(cx.listener(|this, _: &LandThread, _, cx| {
+                let sel = this.model.read(cx).selected;
+                if let Some(id) = sel {
+                    this.model.update(cx, |m, cx| m.land_thread(id, cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &SyncThread, _, cx| {
+                let sel = this.model.read(cx).selected;
+                if let Some(id) = sel {
+                    this.model.update(cx, |m, cx| m.sync_thread(id, cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &DeleteThread, window, cx| {
+                let sel = this.model.read(cx).selected;
+                if let Some(id) = sel {
+                    let m = this.model.clone();
+                    window.open_alert_dialog(cx, move |dlg, _, _| {
+                        let m = m.clone();
+                        dlg.title("Delete this thread?")
+                            .description("Its transcript and worktree are removed. This cannot be undone.")
+                            .on_ok(move |_, _, cx| {
+                                m.update(cx, |a, cx| a.remove_thread(id, cx));
+                                true
+                            })
+                    });
+                }
             }))
             .size_full()
             .flex()

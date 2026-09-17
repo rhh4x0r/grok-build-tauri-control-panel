@@ -711,6 +711,7 @@ dependencies = [
  "grok_events",
  "grok_mcp",
  "grok_memory",
+ "grok_permissions",
  "grok_persistence",
  "grok_worktree",
  "serde",

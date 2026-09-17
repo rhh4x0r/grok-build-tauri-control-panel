@@ -15,6 +15,9 @@ gpui_kit::actions!(
         CycleApprovalMode,
         SendPrompt,
         StopTurn,
+        LandThread,
+        SyncThread,
+        DeleteThread,
     ]
 );
 
@@ -46,6 +49,19 @@ pub fn init(cx: &mut App) {
                 MenuItem::action("Reveal Project in Finder", RevealProject),
                 MenuItem::separator(),
                 MenuItem::action("New Mock Session (debug)", NewMockSession),
+            ],
+            disabled: false,
+        },
+        Menu {
+            name: "Thread".into(),
+            items: vec![
+                MenuItem::action("Stop Turn", StopTurn),
+                MenuItem::action("Cycle Approval Mode", CycleApprovalMode),
+                MenuItem::separator(),
+                MenuItem::action("Sync from Project Branch", SyncThread),
+                MenuItem::action("Land into Project Branch", LandThread),
+                MenuItem::separator(),
+                MenuItem::action("Delete Thread…", DeleteThread),
             ],
             disabled: false,
         },

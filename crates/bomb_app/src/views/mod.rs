@@ -3,6 +3,7 @@ pub mod login_dialog;
 pub mod meter;
 pub mod motion;
 pub mod root;
+pub mod settings;
 pub mod sidebar;
 pub mod status_line;
 pub mod thread_view;

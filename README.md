@@ -16,6 +16,7 @@
 - **Multi-session registry** with concurrent `DashMap` access
 - **Git worktree** isolation for parallel agents
 - **Interactive tool approvals** (allow once / always / deny per request), deny rules enforced ahead of yolo, permission presets (safe / workspace / yolo) + sandbox profiles
+- **Native GPUI app** — one window: threads on the left, the conversation in the middle, a Settings window (⌘,) for MCP, memory, worktrees, permissions and diagnostics. Follows the system light/dark appearance.
 - **Thread-per-worktree isolation** — each new thread in a git project gets its own worktree + `thread/<id>` branch (pure git, works with every backend), grouped by project in the sidebar. **Land** merges a thread back into the project branch; conflicts route through **Sync**, which pulls main into the worktree so the thread's own agent can resolve them. Threads get smart names from their first prompt.
 - **MCP management** — catalog (filesystem, GitHub, Linear, X, Playwright, custom), doctor, credentials store, pre-spawn health checks, session attachment. Servers needing credentials (e.g. `GITHUB_TOKEN`, `LINEAR_API_KEY`, `X_API_BEARER`) are skipped with a visible reason until the secret is set.
 - **Extensions** — skills, plugins CRUD (config + CLI)
@@ -23,7 +24,7 @@
 - **Scheduler** — interval, cron, one-shot routines (persisted; survive restart; each job needs an explicit working directory)
 - **Persistence** — SQLite session/transcript recovery
 - **Diff engine** — before/after capture and summaries
-- **Live Dev Server** control for project preview
+- **Live Dev Server** control in the thread header (start, open, stop)
 - **macOS app** install under `/Applications/Bomb Code.app`
 
 ## Quick start

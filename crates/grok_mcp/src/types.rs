@@ -314,7 +314,7 @@ pub fn mask_payload_for_preview(payload: &serde_json::Value) -> serde_json::Valu
     out
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddMcpRequest {
     pub name: String,
@@ -340,7 +340,7 @@ pub struct AddMcpRequest {
     pub credential_keys: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateMcpRequest {
     pub name: String,

@@ -213,6 +213,7 @@ impl TranscriptView {
         fade_in(("user", id), bubble).into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn agent_row(
         &self,
         id: u64,
@@ -221,7 +222,7 @@ impl TranscriptView {
         last: bool,
         at: &str,
         ui: &Ui,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) -> AnyElement {
         let body = div()
             .flex()
@@ -385,7 +386,7 @@ impl TranscriptView {
         state: &Entity<TextViewState>,
         expanded: bool,
         ui: &Ui,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) -> AnyElement {
         let thread = self.thread.clone();
         let hover = ui.hover;
@@ -492,10 +493,18 @@ impl TranscriptView {
         let detail = expanded.then(|| {
             let mut blocks: Vec<AnyElement> = Vec::new();
             if !r.args.trim().is_empty() {
-                blocks.push(mono_block(&r.args, &mono, ui.text_muted, ui));
+                blocks.push(if looks_like_diff(&r.args) {
+                    diff_block(("args-diff", id), &r.args)
+                } else {
+                    mono_block(&r.args, &mono, ui.text_muted, ui)
+                });
             }
             if let Some(res) = r.result.as_deref().filter(|s| !s.trim().is_empty()) {
-                blocks.push(mono_block(res, &mono, ui.text, ui));
+                blocks.push(if looks_like_diff(res) {
+                    diff_block(("res-diff", id), res)
+                } else {
+                    mono_block(res, &mono, ui.text, ui)
+                });
             }
             div().flex().flex_col().gap_1().pl_8().pr_2().pb_2().children(blocks)
         });
@@ -513,7 +522,7 @@ impl TranscriptView {
         state: &Entity<TextViewState>,
         doc: &PlanDoc,
         ui: &Ui,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) -> AnyElement {
         let card = div()
             .flex()
@@ -689,6 +698,28 @@ impl Render for TranscriptView {
                     }),
             )
     }
+}
+
+/// Unified-diff heuristics: hunk headers or +++/--- file markers.
+fn looks_like_diff(text: &str) -> bool {
+    let mut markers = 0;
+    for l in text.lines().take(40) {
+        if l.starts_with("@@ ") || l.starts_with("+++ ") || l.starts_with("--- ") || l.starts_with("diff --git") {
+            markers += 1;
+        }
+    }
+    markers >= 2
+}
+
+/// Render a diff through the markdown view so tree-sitter-diff highlights it.
+fn diff_block(id: impl Into<ElementId>, text: &str) -> AnyElement {
+    let md = format!("```diff\n{}\n```", text.trim_end());
+    div()
+        .text_xs()
+        .max_h(px(400.))
+        .overflow_hidden()
+        .child(TextView::markdown(id, md).selectable(true))
+        .into_any_element()
 }
 
 fn mono_block(text: &str, mono: &SharedString, color: Hsla, ui: &Ui) -> AnyElement {
