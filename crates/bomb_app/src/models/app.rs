@@ -400,7 +400,7 @@ impl AppModel {
                 self.prefs.backend = meta.backend.clone();
                 let known = self
                     .backend_info(&meta.backend)
-                    .map(|b| b.models.iter().any(|m| *m == meta.model) || b.default_model == meta.model)
+                    .map(|b| b.models.contains(&meta.model) || b.default_model == meta.model)
                     .unwrap_or(false);
                 self.prefs.model = if meta.model.is_empty() || !known { None } else { Some(meta.model.clone()) };
                 if let Some(mode) = meta.approval_mode.clone() {
