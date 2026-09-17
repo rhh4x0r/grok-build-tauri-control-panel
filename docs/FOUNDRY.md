@@ -1,6 +1,10 @@
 # Foundry
 
-For everyday use, type your request in the chat composer and click **Run through Foundry**. The selected provider/model rewrites it automatically and places the improved prompt back in the composer. Review, edit, and Send when ready; **Undo** restores your original. Attachments stay attached. Errors leave your draft intact, and a late result never replaces a changed draft or another thread's input.
+For everyday use, type your request and click **Run through Foundry**. A compact panel asks for **Fast Draft / Full Project**, **target agent**, and **work type**. Work type requires an explicit choice rather than a silent guess. You can also add approval notes and sources classified as source of truth, supporting context, historical plan, reference implementation, or unverified assumption.
+
+Click **Generate prompt** to create a structured contract with the selected provider/model. The target agent is the intended recipient, independent of the model doing the generation. Review the contract in the composer, edit, and Send when ready; **Undo** restores your original. Attachments stay attached but are not inspected by prompt generation. Errors preserve the draft, and late results never replace a changed draft or another thread's input.
+
+The choices and contract headings follow the website's [intake schema](https://github.com/jedisherpa/prompt-foundry/blob/main/src/lib/schema/project-contract.ts). Bomb Code generates through the selected ACP model; it does not call the website or promise identical wording to its deterministic local compiler. Confirmed target, depth, work type, original request, source roles and approval notes are retained in the generated output.
 
 The sidebar **Foundry** screen remains available for advanced contract, graph and saved-skill editing. You do not need to open it to improve a prompt.
 

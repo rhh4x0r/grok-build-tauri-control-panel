@@ -443,3 +443,10 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 - Reused Foundry’s transient read-only ACP generation path; prompt-writing instructions preserve intent and scale detail to the request instead of requiring every task to become a plan. The advanced editor remains optional in the sidebar.
 - Validation: two output-parser tests passed (clean extraction, missing/empty/incomplete output), workspace check and strict all-target Clippy passed. Native interaction remains unverified after the prior Computer Use denial.
 - Development build passed; updated the app bundle and reopened it with the simplified composer action.
+
+## 2026-09-17 — Foundry intake and structured contracts
+- Compared the website’s current intake/schema/compiler through its repository. Replaced the immediate short rewrite with an inline composer setup: Fast Draft / Full Project, five target agents, nine explicitly selected work types, optional approval notes and classified sources. Generation stays in the composer; review, Undo and manual Send remain.
+- Added validated PromptOptions and generation of a structured ProjectContract through the selected ACP model. Confirmed request, depth, target, work type and source roles are pinned; user approval notes survive provider changes. Malformed responses preserve the draft. The target agent is separate from the generator model and does not alter chat permissions.
+- Rendered contracts with readable website-style headings, phases, responsibilities, bullet lists and original request instead of raw JSON section bodies. Source references are included without being fetched. This aligns intake/format, not byte-for-byte output from the website’s deterministic compiler.
+- Validation: 179 workspace tests passed (two existing opt-in tests ignored), workspace check and strict all-target Clippy passed. Added Tetris intake, missing work-type, pinned choice/approval and malformed response coverage. Native visual interaction remains unverified after the earlier Computer Use denial.
+- Development build passed; updated and reopened the dev app with the new intake flow.

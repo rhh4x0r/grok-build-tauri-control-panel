@@ -45,6 +45,12 @@ pub struct ComposerView {
     provider_filter: Option<String>,
     speed: Entity<super::speed::SpeedSelector>,
     foundry_busy: bool,
+    foundry_setup: bool,
+    foundry_depth: String,
+    foundry_target: String,
+    foundry_work_type: String,
+    foundry_autonomy: Entity<InputState>,
+    foundry_sources: Vec<(Entity<InputState>, String)>,
     foundry_result: Option<(String, String, Option<uuid::Uuid>)>,
     foundry_undo: Option<(String, String, Option<uuid::Uuid>)>,
     foundry_message: Option<String>,
@@ -86,6 +92,12 @@ impl ComposerView {
             model_search: cx.new(|cx| InputState::new(window, cx).placeholder("Search models…")),
             provider_filter: None,
             foundry_busy: false,
+            foundry_setup: false,
+            foundry_depth: "fast-draft".into(),
+            foundry_target: String::new(),
+            foundry_work_type: String::new(),
+            foundry_autonomy: cx.new(|cx|InputState::new(window,cx).placeholder("e.g. Build and test locally; ask before deploying")),
+            foundry_sources: Vec::new(),
             foundry_result: None,
             foundry_undo: None,
             foundry_message: None,
@@ -95,6 +107,13 @@ impl ComposerView {
     fn run_foundry(&mut self, cx: &mut Context<Self>) {
         let original = self.input.read(cx).value().to_string();
         if self.foundry_busy || original.trim().is_empty() { return; }
+        let options = bomb_foundry::PromptOptions {
+            depth: self.foundry_depth.clone(), target: self.foundry_target.clone(), work_type: self.foundry_work_type.clone(),
+            autonomy: self.foundry_autonomy.read(cx).value().to_string(),
+            sources: self.foundry_sources.iter().map(|(input,role)|bomb_foundry::PromptSource {value:input.read(cx).value().to_string(),role:role.clone()}).collect(),
+        };
+        if let Err(error) = options.document(&original) { self.foundry_message=Some(error);cx.notify();return; }
+        self.foundry_setup = false;
         let m = self.model.read(cx);
         let backend = m.prefs.backend.clone();
         let model = m.effective_model();
@@ -104,19 +123,71 @@ impl ComposerView {
         self.foundry_message = None;
         let weak = cx.entity().downgrade();
         crate::runtime::spawn_service(cx, async move {
-            let result = bomb_core::foundry::generate_prompt(state, original.clone(), backend, model).await;
+            let result = bomb_core::foundry::generate_prompt(state, original.clone(), backend, model, options).await;
             (original, result)
         }, move |(original, result), cx| {
             let _ = weak.update(cx, |v,cx| {
                 v.foundry_busy = false;
                 match result {
                     Ok(prompt) => v.foundry_result = Some((original, prompt, thread)),
-                    Err(error) => v.foundry_message = Some(format!("Couldn’t improve prompt: {error}")),
+                    Err(error) => v.foundry_message = Some(format!("Couldn’t generate prompt: {error}")),
                 }
                 cx.notify();
             });
         });
         cx.notify();
+    }
+
+    fn foundry_choice(&self, field: &'static str, selected: &str, options: &'static [(&'static str, &'static str)], cx: &Context<Self>) -> AnyElement {
+        let weak = cx.entity().downgrade();
+        let current = selected.to_owned();
+        let label = if current.is_empty() { "Choose work type…" } else { bomb_foundry::label(options,&current) };
+        Button::new(field).ghost().small().label(label.to_owned()).icon(Lucide::ChevronDown)
+            .dropdown_menu(move |mut menu,_,_| {
+                for (id,label) in options {
+                    let weak=weak.clone();let value=id.to_string();
+                    menu=menu.item(PopupMenuItem::new(*label).checked(current==*id).on_click(move |_,_,cx| {
+                        let _=weak.update(cx,|v,cx| { match field { "foundry-target"=>v.foundry_target=value.clone(), "foundry-work-type"=>v.foundry_work_type=value.clone(), _=>{} } cx.notify(); });
+                    }));
+                }
+                menu
+            }).into_any_element()
+    }
+    fn foundry_panel(&self, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
+        let target=self.foundry_choice("foundry-target",&self.foundry_target,bomb_foundry::TARGETS,cx);
+        let work=self.foundry_choice("foundry-work-type",&self.foundry_work_type,bomb_foundry::WORK_TYPES,cx);
+        let mut panel=div().id("foundry-intake").w_full().max_h(px(340.)).overflow_y_scroll().mb_2().p_3().rounded_lg().bg(ui.bg).border_1().border_color(ui.border).flex().flex_col().gap_2()
+            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("What kind of prompt do you need?"))
+            .child(div().flex().items_center().flex_wrap().gap_2().child(div().text_sm().child("Depth"))
+                .child(Button::new("foundry-fast").ghost().small().label(if self.foundry_depth=="fast-draft" {"✓ Fast Draft"} else {"Fast Draft"}).on_click(cx.listener(|v,_,_,cx|{v.foundry_depth="fast-draft".into();cx.notify();})))
+                .child(Button::new("foundry-full").ghost().small().label(if self.foundry_depth=="full-project" {"✓ Full Project"} else {"Full Project"}).on_click(cx.listener(|v,_,_,cx|{v.foundry_depth="full-project".into();cx.notify();}))))
+            .child(div().text_xs().text_color(ui.text_muted).child(if self.foundry_depth=="fast-draft" {"A proportionate contract with safe defaults."} else {"A complete project contract with phases, checks and approval boundaries."}))
+            .child(div().flex().items_center().flex_wrap().gap_2().child(div().text_sm().child("Target agent")).child(target).child(div().text_sm().child("Work type")).child(work))
+            .child(div().text_xs().text_color(ui.text_muted).child("Target is who will use the prompt. Choose the work type explicitly; this does not change your chat’s approval mode."))
+            .child(div().text_sm().child("Approval notes (optional)"))
+            .child(Input::new(&self.foundry_autonomy))
+            .child(div().flex().items_center().gap_2().child(div().text_sm().child("Sources of truth (optional)"))
+                .child(Button::new("foundry-add-source").ghost().small().label("+ Add source").disabled(self.foundry_sources.len()>=20).on_click(cx.listener(|v,_,window,cx| {
+                    let input=cx.new(|cx|InputState::new(window,cx).placeholder("URL, file path, reference text or requirement"));
+                    v.foundry_sources.push((input,"supporting-context".into()));cx.notify();
+                }))));
+        for (i,(input,role)) in self.foundry_sources.iter().enumerate() {
+            let weak=cx.entity().downgrade();let selected=role.clone();
+            panel=panel.child(div().flex().items_center().gap_1()
+                .child(div().flex_1().min_w_0().child(Input::new(input)))
+                .child(Button::new(SharedString::from(format!("source-role-{i}"))).ghost().small().label(bomb_foundry::label(bomb_foundry::SOURCE_ROLES,role).to_owned()).dropdown_menu(move |mut menu,_,_| {
+                    for (id,label) in bomb_foundry::SOURCE_ROLES {
+                        let weak=weak.clone();let role=id.to_string();
+                        menu=menu.item(PopupMenuItem::new(*label).checked(selected==*id).on_click(move |_,_,cx| {let _=weak.update(cx,|v,cx|{if let Some(source)=v.foundry_sources.get_mut(i) {source.1=role.clone();}cx.notify();});}));
+                    } menu
+                }))
+                .child(Button::new(SharedString::from(format!("source-remove-{i}"))).ghost().small().label("Remove").on_click(cx.listener(move |v,_,_,cx| {if i<v.foundry_sources.len() {v.foundry_sources.remove(i);}cx.notify();}))));
+        }
+        panel.child(div().text_xs().text_color(ui.text_muted).child("References are included in the contract; generating does not read them or execute your task."))
+            .child(div().flex().gap_2()
+                .child(Button::new("foundry-generate").small().label("Generate prompt").disabled(self.foundry_work_type.is_empty() || self.input.read(cx).value().trim().is_empty()).on_click(cx.listener(|v,_,_,cx|v.run_foundry(cx))))
+                .child(Button::new("foundry-cancel").ghost().small().label("Cancel").on_click(cx.listener(|v,_,_,cx|{v.foundry_setup=false;cx.notify();}))))
+            .into_any_element()
     }
 
     fn slash_catalog(&self, cx: &App) -> serde_json::Value {
@@ -1264,7 +1335,7 @@ impl Render for ComposerView {
             if self.model.read(cx).selected == thread && self.input.read(cx).value().as_ref() == original {
                 self.input.update(cx, |s,cx| s.set_value(prompt.clone(), window, cx));
                 self.foundry_undo = Some((original, prompt, thread));
-                self.foundry_message = Some("Prompt improved · Review and send when ready".into());
+                self.foundry_message = Some("Prompt generated · Review and send when ready".into());
             } else {
                 self.foundry_message = Some("Draft changed while Foundry was working; your edits were kept. Run it again when ready.".into());
             }
@@ -1364,6 +1435,7 @@ impl Render for ComposerView {
             ui.pill_border()
         };
         let slash_menu = self.slash_menu(&ui, cx);
+        let setup = self.foundry_setup.then(||self.foundry_panel(&ui,cx));
         let tray = self.tray(&ui, cx);
         let model_picker = self.model_selector(&ui, cx);
         let mode_picker = self.mode_picker(&ui, cx);
@@ -1382,11 +1454,15 @@ impl Render for ComposerView {
             .items_center()
             .px_6()
             .pb_4()
+            .when_some(setup, |el,panel|el.child(panel))
             .child(div().w_full().flex().items_center().flex_wrap().gap_2().pb_1()
                 .child(Button::new("run-foundry").ghost().small()
-                    .label(if self.foundry_busy { "Improving prompt…" } else { "Run through Foundry" })
+                    .label(if self.foundry_busy { "Generating prompt…" } else { "Run through Foundry" })
                     .disabled(self.foundry_busy || busy || starting || self.input.read(cx).value().trim().is_empty() || !self.model.read(cx).model_ready())
-                    .on_click(cx.listener(|v,_,_,cx|v.run_foundry(cx))))
+                    .on_click(cx.listener(|v,_,_,cx| {
+                        if v.foundry_target.is_empty() { v.foundry_target = match v.model.read(cx).prefs.backend.as_str() { "grok"=>"grok-build", "codex"=>"openai-codex", "claude"=>"claude-code", _=>"general-assistant" }.into(); }
+                        v.foundry_setup = !v.foundry_setup;v.foundry_message=None;cx.notify();
+                    })))
                 .when_some(self.foundry_message.clone(), |el,message|el.child(div().text_xs().text_color(ui.text_muted).child(message)))
                 .when(self.foundry_undo.is_some(), |el|el.child(Button::new("undo-foundry").ghost().small().label("Undo").on_click(cx.listener(|v,_,window,cx| {
                     if let Some((original,_,_)) = v.foundry_undo.take() { v.input.update(cx,|s,cx|s.set_value(original,window,cx)); }

@@ -1,5 +1,7 @@
 //! Foundry's portable authoring model and deterministic, framework-free run reducer.
 pub mod contract;
+pub mod intake;
+pub use intake::*;
 pub mod graph;
 pub mod run;
 pub mod store;
