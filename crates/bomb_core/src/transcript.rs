@@ -183,6 +183,14 @@ impl Thread {
     /// Rebuild from persisted rows (roles written by `persist_control_event`
     /// and `send_prompt`). Approval cards come back inert.
     pub fn hydrate(&mut self, rows: &[TranscriptEntry]) {
+        self.hydrate_rows(rows);
+        // Nothing can still be running in a saved copy: the agent that ran
+        // those tools is gone, and any live turn will re-open its own rows.
+        let mut ch = Vec::new();
+        self.sweep_tools("completed", &mut ch);
+    }
+
+    fn hydrate_rows(&mut self, rows: &[TranscriptEntry]) {
         self.entries.clear();
         self.protocol_log.clear();
         self.open_tools.clear();
@@ -1320,6 +1328,25 @@ mod tests {
         t.apply(&msg("🧠 loaded brain"), now);
         assert!(t.entries.is_empty());
         assert_eq!(t.protocol_log.len(), 3);
+    }
+
+    #[test]
+    fn hydrate_settles_tools_left_running() {
+        // A saved copy whose tool rows never got a terminal status (the agent
+        // replayed them as one-shot `tool_call`s) must not show "working".
+        let rows = vec![
+            TranscriptEntry { role: "tool".into(), body: r#"{"id":"a","tool":"Bash","status":"running","args":"ls"}"#.into(), at: "".into(), seq: 1 },
+            TranscriptEntry { role: "tool".into(), body: r#"{"id":"b","tool":"Read","status":"pending","args":"f"}"#.into(), at: "".into(), seq: 2 },
+        ];
+        let mut t = Thread::new();
+        t.hydrate(&rows);
+        for e in &t.entries {
+            match &e.body {
+                Body::Tool(r) => assert_eq!(r.status, "completed"),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert!(t.open_tools.is_empty());
     }
 
     #[test]

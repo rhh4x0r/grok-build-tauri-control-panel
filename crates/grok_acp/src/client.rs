@@ -2260,6 +2260,21 @@ impl AcpClient {
                         payload: json!({ "channel": "plan_doc", "text": plan }),
                     });
                 }
+                // A `tool_call` normally opens a call, but a replayed history
+                // (session/load) and some agents send the finished call in one
+                // go: status + content included. Honour it, or the row stays
+                // "running" forever.
+                let status = update
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .map(map_tool_status)
+                    .unwrap_or(ToolCallStatus::Running);
+                let result_summary = if matches!(status, ToolCallStatus::Running | ToolCallStatus::Pending) {
+                    None
+                } else {
+                    extract_text_content(update.get("content"))
+                        .or_else(|| update.get("rawOutput").map(|v| v.to_string()))
+                };
                 bus.emit_tool_call(
                     sid,
                     ToolCallEvent {
@@ -2273,24 +2288,24 @@ impl AcpClient {
                             .unwrap_or_else(|| Uuid::new_v4().to_string()),
                         tool: tool_name,
                         args_summary: raw_input.map(|v| v.to_string()).unwrap_or_default(),
-                        status: ToolCallStatus::Running,
-                        result_summary: None,
+                        status,
+                        result_summary,
                         at: Utc::now(),
                     },
                 );
+                emit_images(
+                    bus,
+                    sid,
+                    update.get("toolCallId").or_else(|| update.get("id")).and_then(|v| v.as_str()),
+                    extract_image_blocks(update.get("content")),
+                );
             }
             "tool_call_update" | "toolcallupdate" => {
-                let status = update
+                let tool_status = update
                     .get("status")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("running");
-                let tool_status = match status {
-                    "completed" | "done" | "success" => ToolCallStatus::Completed,
-                    "failed" | "error" => ToolCallStatus::Failed,
-                    "denied" | "rejected" => ToolCallStatus::Denied,
-                    "pending" => ToolCallStatus::Pending,
-                    _ => ToolCallStatus::Running,
-                };
+                    .map(map_tool_status)
+                    .unwrap_or(ToolCallStatus::Running);
                 bus.emit_tool_call(
                     sid,
                     ToolCallEvent {
@@ -2727,6 +2742,17 @@ fn permission_summary(params: &Option<Value>, tool: &str) -> String {
 }
 
 /// Pull plain text from ACP ContentBlock shapes (and common variants).
+/// ACP tool status strings → our enum; unknown strings count as running.
+fn map_tool_status(s: &str) -> ToolCallStatus {
+    match s {
+        "completed" | "done" | "success" => ToolCallStatus::Completed,
+        "failed" | "error" => ToolCallStatus::Failed,
+        "denied" | "rejected" => ToolCallStatus::Denied,
+        "pending" => ToolCallStatus::Pending,
+        _ => ToolCallStatus::Running,
+    }
+}
+
 fn extract_text_content(content: Option<&Value>) -> Option<String> {
     let content = content?;
     if let Some(s) = content.as_str() {
