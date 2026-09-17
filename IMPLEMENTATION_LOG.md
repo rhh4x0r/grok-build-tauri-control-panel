@@ -292,3 +292,7 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 - Added a regression test through image-event persistence, database reopen, and transcript hydration, checking the preserved bytes and attachment metadata.
 - Validation: workspace check and strict all-target Clippy passed; full workspace tests passed (123 passed, 2 existing opt-in tests ignored). The first run timed out in the existing workspace lifecycle test; a full rerun passed. Development build passed.
 - Relaunched Bomb Code Dev and verified provider logos, model tooltip, the paired intent controls, and the restored potato image in the saved conversation. The screenshot capture still clips the right side of the conversation, so this does not establish full-width visual layout correctness.
+
+## 2026-09-16 — Remove sidebar Questions category
+- Removed the confusing repeated Questions label and the extra header row for conversations nested beneath projects. Provider logo, title, and time/status now share one row.
+- Workspace check, strict all-target Clippy, and development build passed. Relaunched Bomb Code Dev and visually verified the labels are absent.

@@ -241,7 +241,7 @@ impl SidebarView {
             for id in &w.threads {
                 if let Ok(id) = Uuid::parse_str(id) {
                     if let Some(t) = self.model.read(cx).threads.get(&id).cloned() {
-                        group = group.child(self.thread_row(id, &t, "Questions", self.model.read(cx).selected == Some(id), ui, cx));
+                        group = group.child(self.thread_row(id, &t, "", self.model.read(cx).selected == Some(id), ui, cx));
                     }
                 }
             }
@@ -351,7 +351,7 @@ impl SidebarView {
                     });
                 }))
             })
-            .child(
+            .when(!project.is_empty(), |el| el.child(
                 div()
                     .flex()
                     .items_center()
@@ -367,7 +367,7 @@ impl SidebarView {
                             .child(project.to_string()),
                     )
                     .child(div().text_size(px(11.)).child(corner)),
-            )
+            ))
             .child(
                 div()
                     .flex()
@@ -383,7 +383,8 @@ impl SidebarView {
                             .text_ellipsis()
                             .whitespace_nowrap()
                             .child(title),
-                    ),
+                    )
+                    .when(project.is_empty(), |el| el.child(div().text_size(px(11.)).text_color(if waiting { ui.warning } else if working { ui.accent } else { ui.text_faint }).child(if waiting { "Input".into() } else if working { "Working".into() } else { time_ago(&tm.meta.updated_at) }))),
             )
             .when_some(branch, |el, b| {
                 el.child(
