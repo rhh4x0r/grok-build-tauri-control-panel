@@ -34,7 +34,15 @@ pub struct RootView {
 
 impl RootView {
     pub fn new(model: Entity<AppModel>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        cx.observe(&model, |_, _, cx| cx.notify()).detach();
+        cx.observe(&model, |this, _, cx| {
+            let request = this.model.update(cx, |m, _| m.file_reveal_request.take());
+            if let Some(path) = request {
+                this.preview_open = true;
+                this.model.update(cx, |m, _| m.review_open = false);
+                this.preview.update(cx, |panel, cx| panel.reveal_file(path, cx));
+            }
+            cx.notify();
+        }).detach();
         let sidebar = cx.new(|cx| SidebarView::new(model.clone(), window, cx));
         let thread = cx.new(|cx| ThreadView::new(model.clone(), window, cx));
         let preview = cx.new(|cx| PreviewPanel::new(model.clone(), cx));

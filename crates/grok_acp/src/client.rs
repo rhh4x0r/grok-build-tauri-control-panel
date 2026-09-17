@@ -242,6 +242,7 @@ pub struct AcpClient {
     /// Session config options the agent advertised (id → selectable values),
     /// e.g. the Claude adapter's `effort`.
     config_options: RwLock<HashMap<String, Vec<String>>>,
+    config_current: RwLock<HashMap<String, String>>,
     current_mode: RwLock<Option<String>>,
     /// Host-side terminals for ACP terminal/* (required for run_terminal_command).
     terminals: TerminalRegistry,
@@ -383,6 +384,7 @@ impl AcpClient {
             resume_session_supported: RwLock::new(false),
             available_modes: RwLock::new(Vec::new()),
             config_options: RwLock::new(HashMap::new()),
+            config_current: RwLock::new(HashMap::new()),
             current_mode: RwLock::new(None),
             terminals: TerminalRegistry::new(default_cwd),
         });
@@ -454,6 +456,7 @@ impl AcpClient {
             resume_session_supported: RwLock::new(false),
             available_modes: RwLock::new(Vec::new()),
             config_options: RwLock::new(HashMap::new()),
+            config_current: RwLock::new(HashMap::new()),
             current_mode: RwLock::new(None),
             terminals: TerminalRegistry::new(PathBuf::from("/tmp")),
         })
@@ -891,8 +894,10 @@ impl AcpClient {
             return;
         };
         let mut map = HashMap::new();
+        let mut current = HashMap::new();
         for opt in arr {
             let Some(id) = opt.get("id").and_then(|v| v.as_str()) else { continue };
+            if let Some(value) = opt.get("currentValue").and_then(Value::as_str) { current.insert(id.to_string(), value.to_string()); }
             let values: Vec<String> = opt
                 .get("options")
                 .and_then(|v| v.as_array())
@@ -908,15 +913,27 @@ impl AcpClient {
                 .unwrap_or_default();
             map.insert(id.to_string(), values);
         }
-        if !map.is_empty() {
+        {
             info!(options = ?map.keys().collect::<Vec<_>>(), "ACP agent config options");
             *self.config_options.write().await = map;
+            *self.config_current.write().await = current;
         }
     }
 
     /// Values the agent advertised for a config option, if it has one.
     pub async fn config_option_values(&self, id: &str) -> Option<Vec<String>> {
         self.config_options.read().await.get(id).cloned()
+    }
+
+    /// Only expose speed settings explicitly advertised by this session's agent.
+    pub async fn speed_option(&self) -> Option<(String, Vec<String>, Option<String>)> {
+        let options = self.config_options.read().await;
+        for id in ["service_tier", "fast_mode", "fastMode", "fast", "speed"] {
+            if let Some(values) = options.get(id).filter(|v| !v.is_empty()) {
+                return Some((id.into(), values.clone(), self.config_current.read().await.get(id).cloned()));
+            }
+        }
+        None
     }
 
     /// `session/set_config_option`: set an advertised option (e.g. `effort`).
@@ -936,7 +953,9 @@ impl AcpClient {
             return Ok(true);
         }
         let params = json!({ "sessionId": sid, "configId": id, "value": value });
-        self.request_timeout("session/set_config_option", Some(params)).await?;
+        let result = self.request_timeout("session/set_config_option", Some(params)).await?;
+        self.capture_config_options(&result).await;
+        self.config_current.write().await.insert(id.to_string(), value.clone());
         info!(%id, %value, "ACP config option set");
         Ok(true)
     }
@@ -2895,6 +2914,17 @@ impl AcpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn speed_requires_an_advertised_option_and_tracks_its_current_value() {
+        let client = AcpClient::mock_for_tests("speed", None);
+        client.capture_config_options(&serde_json::json!({"configOptions":[{"id":"effort","options":[{"value":"high"}]}]})).await;
+        assert!(client.speed_option().await.is_none());
+        client.capture_config_options(&serde_json::json!({"configOptions":[{"id":"service_tier","currentValue":"fast","options":[{"value":"standard"},{"value":"fast"}]}]})).await;
+        assert_eq!(client.speed_option().await, Some(("service_tier".into(), vec!["standard".into(), "fast".into()], Some("fast".into()))));
+        client.capture_config_options(&serde_json::json!({"configOptions":[]})).await;
+        assert!(client.speed_option().await.is_none());
+    }
 
     #[tokio::test]
     async fn inline_cannot_write_even_if_approval_mode_changes() {

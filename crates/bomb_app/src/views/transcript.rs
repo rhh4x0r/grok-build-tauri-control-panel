@@ -7,7 +7,7 @@ use bomb_core::transcript::{ApprovalCard, Body, Entry, PlanDoc, Role, ToolRow};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::assets::IconName as Lucide;
-use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::component::{Icon, IconName, Sizable};
 use std::sync::Arc;
 use crate::models::app::AppModelHandle;
@@ -255,8 +255,10 @@ impl TranscriptView {
             .pt_4()
             .pb_2()
             .when(!images.is_empty(), |el| {
-                el.child(div().flex().gap_2().justify_end().children(images.iter().map(|im| {
+                el.child(div().flex().gap_2().justify_end().children(images.iter().enumerate().map(|(ix, im)| {
                     div()
+                        .id(("user-image", id * 64 + ix as u64))
+                        .context_menu({ let source = super::image_actions::Source::Attachment(im.clone()); move |menu, _, _| super::image_actions::menu(menu, source.clone()) })
                         .size(px(120.))
                         .rounded(px(10.))
                         .overflow_hidden()
@@ -321,6 +323,7 @@ impl TranscriptView {
                     let im = im.clone();
                     div()
                         .id(("att-img", id * 64 + ix as u64))
+                        .context_menu({ let source = super::image_actions::Source::Attachment(im.clone()); move |menu, _, _| super::image_actions::menu(menu, source.clone()) })
                         .max_w(px(420.))
                         .rounded(px(10.))
                         .overflow_hidden()
@@ -344,6 +347,7 @@ impl TranscriptView {
                         .border_color(ui.border)
                         .cursor_pointer()
                         .on_click(move |_, _, _| open_path(&path))
+                        .context_menu({ let source = super::image_actions::Source::File(p.clone()); move |menu, _, _| super::image_actions::menu(menu, source.clone()) })
                         .child(crate::views::motion::reveal(
                             ("reveal", id * 64 + ix as u64),
                             img(p.clone()).max_w(px(420.)).max_h(px(420.)).object_fit(ObjectFit::Contain),
@@ -729,6 +733,9 @@ impl TranscriptView {
         let rid = card.request_id.clone();
         let open = card.is_open();
         let mono = ui.mono.clone();
+        let expanded = self.thread.read(cx).expanded.contains(&id);
+        let thread = self.thread.clone();
+        let summary = approval_summary(&card.summary);
 
         let mut buttons: Vec<AnyElement> = Vec::new();
         if open {
@@ -782,15 +789,18 @@ impl TranscriptView {
                             .text_xs()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(if open { ui.warning } else { ui.text_muted })
-                            .child(if open { "Needs your OK" } else { "Approval" }),
+                            .child(if open { "Permission requested" } else { "Permission request" }),
                     )
-                    .child(div().text_xs().font_family(mono.clone()).text_color(ui.text_faint).child(card.tool.clone()))
+                    .child(Icon::from(Lucide::Shield).size(px(14.)).text_color(ui.text_muted))
+                    .child(div().text_xs().font_family(mono.clone()).text_color(ui.text_faint).child(card.tool.split_whitespace().next().unwrap_or("Tool").to_string()))
                     .child(div().flex_1())
-                    .when_some(card.resolution.clone(), |el, r| {
-                        el.child(div().text_xs().text_color(ui.text_faint).child(r))
+                    .when_some(card.resolution.clone().filter(|r| r != "restored"), |el, r| {
+                        el.child(div().text_xs().text_color(ui.text_faint).child(card.options.iter().find(|o| o.id == r).map(|o| o.label.clone()).unwrap_or(r)))
                     }),
             )
-            .child(div().text_sm().font_family(mono).text_color(ui.text).whitespace_normal().child(card.summary.clone()))
+            .child(div().text_sm().font_family(mono).text_color(ui.text).whitespace_normal().child(summary))
+            .child(Button::new(("approval-details", id)).ghost().small().label(if expanded { "Hide details" } else { "Details" }).on_click(move |_, _, cx| thread.update(cx, |t, cx| t.toggle_expanded(id, cx))))
+            .when(expanded, |el| el.child(div().text_xs().font_family(ui.mono.clone()).text_color(ui.text_muted).whitespace_normal().child(card.summary.clone())))
             .when_some(card.explanation.clone(), |el, ex| {
                 el.child(div().text_sm().text_color(ui.text_muted).child(ex))
             })
@@ -1429,5 +1439,30 @@ mod tests {
         );
         let one = [row("Sparkle")];
         assert_eq!(tool_group_summary(one.iter()), "Sparkle");
+    }
+}
+
+/// Keep the requested target readable; preserve the full request in Details.
+fn approval_summary(summary: &str) -> String {
+    if let Some(start) = summary.find('{') {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&summary[start..]) {
+            // Shell commands and edits need their complete scope visible.
+            if value.get("command").is_none() && value.get("new_string").is_none() && value.get("content").is_none() {
+                if let Some(path) = value.get("file_path").or_else(|| value.get("path")).and_then(|v| v.as_str()) {
+                    return path.to_string();
+                }
+            }
+        }
+    }
+    summary.to_string()
+}
+
+#[cfg(test)]
+mod approval_display_tests {
+    use super::approval_summary;
+    #[test]
+    fn read_target_is_concise_but_commands_and_invalid_payloads_remain_visible() {
+        assert_eq!(approval_summary(r#"Read /tmp/a.png: {"file_path":"/tmp/a.png"}"#), "/tmp/a.png");
+        for text in [r#"Shell: {"command":"rm file","path":"/tmp"}"#, "Read: {broken", r#"Edit: {"path":"a","new_string":"b"}"#] { assert_eq!(approval_summary(text), text); }
     }
 }

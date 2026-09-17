@@ -41,6 +41,7 @@ pub struct ComposerView {
     model_menu_open: bool,
     model_search: Entity<InputState>,
     provider_filter: Option<String>,
+    speed: Entity<super::speed::SpeedSelector>,
 }
 
 impl ComposerView {
@@ -58,7 +59,9 @@ impl ComposerView {
             }
         })
         .detach();
+        let speed = cx.new(|cx| super::speed::SpeedSelector::new(model.clone(), cx));
         Self {
+            speed,
             model,
             input,
             attachments: Vec::new(),
@@ -847,6 +850,7 @@ impl Render for ComposerView {
                                             .flex_shrink_0()
                                             .gap(px(2.))
                                             .child(model_picker)
+                                            .child(self.speed.clone())
                                             .child(mode_picker)
                                             .children(mcp_picker)
                                             .child(

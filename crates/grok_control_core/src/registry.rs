@@ -597,6 +597,18 @@ impl SessionRegistry {
     /// Switch a live session's approval stance (composer pills).
     /// Change reasoning effort on a live session, where the agent exposes an
     /// `effort` config option. Ok(false) when it does not.
+    pub async fn speed_option(&self, id: Uuid) -> Result<Option<(String, Vec<String>, Option<String>)>> {
+        let client = self.sessions.get(&id).and_then(|e| e.acp_client.clone()).ok_or(CoreError::SessionNotFound(id))?;
+        Ok(client.speed_option().await)
+    }
+
+    pub async fn set_speed_option(&self, id: Uuid, option: &str, value: &str) -> Result<bool> {
+        let client = self.sessions.get(&id).and_then(|e| e.acp_client.clone()).ok_or(CoreError::SessionNotFound(id))?;
+        let Some((advertised, values, _)) = client.speed_option().await else { return Ok(false); };
+        if advertised != option || !values.iter().any(|v| v == value) { return Ok(false); }
+        client.set_config_option(option, value).await.map_err(Into::into)
+    }
+
     pub async fn set_effort(&self, id: Uuid, effort: &str) -> Result<bool> {
         let client = self
             .sessions

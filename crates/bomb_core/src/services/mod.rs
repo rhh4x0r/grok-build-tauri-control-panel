@@ -2502,3 +2502,5 @@ mod image_restore_tests {
         assert!(std::path::Path::new(images[0].name.as_deref().unwrap()).is_file());
     }
 }
+
+pub mod scratch;

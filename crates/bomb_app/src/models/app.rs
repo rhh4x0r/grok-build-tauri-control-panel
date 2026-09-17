@@ -89,6 +89,7 @@ pub struct AppModel {
     pub threads: HashMap<Uuid, Entity<ThreadModel>>,
     pub selected: Option<Uuid>,
     pub new_thread_open: bool,
+    pub file_reveal_request: Option<std::path::PathBuf>,
     pub auth: Vec<BackendAuth>,
     /// Account usage limits (5h / weekly) per backend, refreshed slowly.
     pub usage: Vec<bomb_core::usage::AccountUsage>,
@@ -131,6 +132,7 @@ impl AppModel {
             threads: HashMap::new(),
             selected: None,
             new_thread_open: false,
+            file_reveal_request: None,
             auth: Vec::new(),
             usage: Vec::new(),
             backends: Vec::new(),
@@ -674,6 +676,28 @@ impl AppModel {
         // Fresh thread → backend default model, never a stale id.
         self.prefs.model = None;
         cx.notify();
+    }
+
+    /// A folder-free chat still needs a private working directory for tools.
+    pub fn temporary_chat(&mut self, cx: &mut Context<Self>) {
+        let Some(home) = std::env::var_os("HOME") else { return; };
+        let base = std::path::PathBuf::from(home).join(".bombcode/chats");
+        let weak = cx.entity().downgrade();
+        spawn_service(cx, async move {
+            services::scratch::create(&base).await
+        }, move |result, cx| {
+            let _ = weak.update(cx, |m, cx| match result {
+                Ok(path) => {
+                    m.new_thread(cx);
+                    m.active_project = Some(path.to_string_lossy().into_owned());
+                    m.prefs.temporary = false;
+                    m.prefs.mode = "plan".into();
+                    m.prefs.worktree = true;
+                    cx.notify();
+                }
+                Err(error) => { m.toast(ToastKind::Error, format!("Could not start temporary chat: {error}")); cx.notify(); }
+            });
+        });
     }
 
     /// Return to the welcome screen without removing projects or conversations.
@@ -1525,6 +1549,7 @@ fn session_of(ev: &ControlEvent) -> Option<Uuid> {
 }
 
 pub fn project_name(root: &str) -> String {
+    if root.contains("/.bombcode/chats/") { return "Temporary chat".into(); }
     std::path::Path::new(root)
         .file_name()
         .map(|s| s.to_string_lossy().to_string())

@@ -5,6 +5,7 @@ use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::Icon;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::Sizable;
+use gpui_kit::base::Selectable;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -17,17 +18,46 @@ pub struct PreviewPanel {
     webview: Option<Entity<gpui_wry::WebView>>,
     loaded_url: Option<String>,
     error: Option<String>,
+    files: Entity<super::file_tree::FileTree>,
+    show_files: bool,
+    context_root: Option<std::path::PathBuf>,
 }
 
 impl PreviewPanel {
     pub fn new(model: Entity<AppModel>, cx: &mut Context<Self>) -> Self {
         cx.observe(&model, |_, _, cx| cx.notify()).detach();
+        let files = cx.new(|_| super::file_tree::FileTree::new());
         Self {
+            files,
+            show_files: false,
+            context_root: None,
             model,
             webview: None,
             loaded_url: None,
             error: None,
         }
+    }
+
+    pub fn reveal_file(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        self.show_files = true;
+        self.sync_root(cx);
+        let root = self.current_root(cx);
+        self.files.update(cx, |tree, cx| tree.reveal(path, root, cx));
+        cx.notify();
+    }
+
+    fn sync_root(&mut self, cx: &mut Context<Self>) {
+        let root = self.current_root(cx);
+        if root != self.context_root {
+            self.context_root = root;
+            self.files = cx.new(|_| super::file_tree::FileTree::new());
+        }
+    }
+
+    fn current_root(&self, cx: &App) -> Option<std::path::PathBuf> {
+        let m = self.model.read(cx);
+        m.selected.and_then(|id| m.threads.get(&id)).map(|t| std::path::PathBuf::from(&t.read(cx).meta.cwd))
+            .or_else(|| m.active_project.as_ref().map(std::path::PathBuf::from))
     }
 
     /// Point the webview at `url`, creating it on first use.
@@ -62,12 +92,16 @@ impl PreviewPanel {
 
 impl Render for PreviewPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_root(cx);
         let ui = Ui::of(cx);
         let status = self.model.read(cx).dev_server.clone();
         let running = status.as_ref().map(|s| s.running).unwrap_or(false);
         let url = status.as_ref().and_then(|s| s.url.clone()).filter(|_| running);
         let message = status.as_ref().map(|s| s.message.clone()).unwrap_or_default();
-        if let Some(u) = &url {
+        if self.show_files {
+            self.webview = None;
+            self.loaded_url = None;
+        } else if let Some(u) = &url {
             self.ensure(u, window, cx);
         } else if self.webview.is_some() {
             // Server stopped: drop the native view (hides it).
@@ -90,10 +124,23 @@ impl Render for PreviewPanel {
                 .child(div().size(px(13.)).child(Icon::from(icon)))
         };
 
+        let tabs = div().flex().items_center().gap_1().p_2().border_b_1().border_color(ui.border)
+            .child(Button::new("dev-tab").ghost().small().label("Dev server").selected(!self.show_files)
+                .on_click(cx.listener(|this, _, _, cx| { this.show_files = false; cx.notify(); })))
+            .child(Button::new("files-tab").ghost().small().label("File tree").selected(self.show_files)
+                .on_click(cx.listener(|this, _, _, cx| { this.show_files = true; cx.notify(); })))
+            .child(div().flex_1())
+            .child(icon_button("sidebar-close", Lucide::X, ui.text_muted).on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleDevPreview), cx)));
+        if self.show_files {
+            if let Some(root) = self.current_root(cx) { self.files.update(cx, |tree, cx| tree.set_root(root, cx)); }
+            return div().size_full().flex().flex_col().border_l_1().border_color(ui.border).child(tabs)
+                .child(div().flex_1().min_h_0().child(self.files.clone())).into_any_element();
+        }
         div()
             .size_full()
             .flex()
             .flex_col()
+            .child(tabs)
             .border_l_1()
             .border_color(ui.border)
             .child(Button::new("preview-changes-tab").ghost().small().label("Changes").on_click({
@@ -162,6 +209,6 @@ impl Render for PreviewPanel {
                                 }),
                         )
                     }),
-            )
+            ).into_any_element()
     }
 }

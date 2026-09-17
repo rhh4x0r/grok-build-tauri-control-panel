@@ -90,6 +90,7 @@ pub fn setup(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                 .text_color(ui.text_muted)
                 .child(detail),
         );
+    let temporary = model.clone();
     match step {
         Step::Connect => {
             content = content
@@ -174,6 +175,9 @@ pub fn setup(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
             );
         }
     }
+    content = content.child(Button::new("welcome-temporary").ghost().label("Temporary chat")
+        .on_click(move |_, _, cx| temporary.update(cx, |m, cx| m.temporary_chat(cx))))
+        .child(div().text_xs().text_color(ui.text_faint).child("No project needed · saved in ~/.bombcode/chats"));
     content.into_any_element()
 }
 

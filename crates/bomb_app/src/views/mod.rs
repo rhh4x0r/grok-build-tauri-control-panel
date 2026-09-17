@@ -18,3 +18,7 @@ pub mod project;
 
 pub mod approval_mode;
 pub mod welcome;
+
+pub mod file_tree;
+pub mod image_actions;
+pub mod speed;
