@@ -463,3 +463,10 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 - Constrained the sidebar overflow to that viewport and prevented service blocks from shrinking. The existing Services scroll region remains available on short windows; its bottom is now inside the main viewport.
 - Native visual verification remains unavailable after the earlier Computer Use denial. Validation uses workspace check, strict all-target Clippy and development build.
 - Workspace check, strict all-target Clippy and development build passed. Updated the dev bundle for relaunch.
+
+## 2026-09-17 — Native Enhance Prompt composer controls
+- Renamed the action to Enhance Prompt and moved its sparkle button immediately right of the attachment control, before Send. Removed the detached full-width action row; the trigger retains selected styling while open and displays Enhancing during generation.
+- Replaced the full-width form with a compact, right-aligned composer panel: native selected depth buttons, labeled work-type/target dropdowns, progressive disclosure for optional context, close/Escape dismissal, and a clear primary action. Existing input values and source-role controls are retained when optional fields are collapsed.
+- Used assistant-ui's composer and elicitation-form patterns as design guidance (https://www.assistant-ui.com/elements/composer and https://www.assistant-ui.com/elements/elicitation-form), implemented in GPUI using the app's own surfaces, typography, buttons and motion. The toolbar wraps on narrow widths; optional content scrolls independently of the panel header/footer. Added a subtle activity pulse and kept review/Undo behavior.
+- Workspace check and strict all-target Clippy passed. Native visual/interaction verification remains pending after the prior Computer Use denial.
+- Development build passed; updated and reopened the dev bundle.

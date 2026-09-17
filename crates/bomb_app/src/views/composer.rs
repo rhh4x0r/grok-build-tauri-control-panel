@@ -14,7 +14,7 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::progress::ProgressCircle;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{Disableable, Icon, Side, Sizable};
+use gpui_kit::component::{Disableable, Icon, Side, Sizable, Selectable};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -52,6 +52,7 @@ pub struct ComposerView {
     destination_ready: Option<(String,String)>,
     foundry_busy: bool,
     foundry_setup: bool,
+    foundry_more: bool,
     foundry_depth: String,
     foundry_target: String,
     foundry_work_type: String,
@@ -105,6 +106,7 @@ impl ComposerView {
             destination_ready: None,
             foundry_busy: false,
             foundry_setup: false,
+            foundry_more: false,
             foundry_depth: "fast-draft".into(),
             foundry_target: String::new(),
             foundry_work_type: String::new(),
@@ -142,7 +144,7 @@ impl ComposerView {
                 v.foundry_busy = false;
                 match result {
                     Ok(prompt) => v.foundry_result = Some((original, prompt, thread)),
-                    Err(error) => v.foundry_message = Some(format!("Couldn’t generate prompt: {error}")),
+                    Err(error) => v.foundry_message = Some(format!("Couldn’t enhance prompt: {error}")),
                 }
                 cx.notify();
             });
@@ -180,7 +182,7 @@ impl ComposerView {
         let weak = cx.entity().downgrade();
         let current = selected.to_owned();
         let label = if current.is_empty() { "Choose work type…" } else { bomb_foundry::label(options,&current) };
-        Button::new(field).ghost().small().label(label.to_owned()).icon(Lucide::ChevronDown)
+        Button::new(field).outline().small().w_full().label(label.to_owned()).dropdown_caret(true)
             .dropdown_menu(move |mut menu,_,_| {
                 for (id,label) in options {
                     let weak=weak.clone();let value=id.to_string();
@@ -194,14 +196,19 @@ impl ComposerView {
     fn foundry_panel(&self, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
         let target=self.foundry_choice("foundry-target",&self.foundry_target,bomb_foundry::TARGETS,cx);
         let work=self.foundry_choice("foundry-work-type",&self.foundry_work_type,bomb_foundry::WORK_TYPES,cx);
-        let mut panel=div().id("foundry-intake").w_full().max_h(px(340.)).overflow_y_scroll().mb_2().p_3().rounded_lg().bg(ui.bg).border_1().border_color(ui.border).flex().flex_col().gap_2()
-            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("What kind of prompt do you need?"))
-            .child(div().flex().items_center().flex_wrap().gap_2().child(div().text_sm().child("Depth"))
-                .child(Button::new("foundry-fast").ghost().small().label(if self.foundry_depth=="fast-draft" {"✓ Fast Draft"} else {"Fast Draft"}).on_click(cx.listener(|v,_,_,cx|{v.foundry_depth="fast-draft".into();cx.notify();})))
-                .child(Button::new("foundry-full").ghost().small().label(if self.foundry_depth=="full-project" {"✓ Full Project"} else {"Full Project"}).on_click(cx.listener(|v,_,_,cx|{v.foundry_depth="full-project".into();cx.notify();}))))
-            .child(div().text_xs().text_color(ui.text_muted).child(if self.foundry_depth=="fast-draft" {"A proportionate contract with safe defaults."} else {"A complete project contract with phases, checks and approval boundaries."}))
-            .child(div().flex().items_center().flex_wrap().gap_2().child(div().text_sm().child("Target agent")).child(target).child(div().text_sm().child("Work type")).child(work))
-            .child(div().text_xs().text_color(ui.text_muted).child("Target is who will use the prompt. Choose the work type explicitly; this does not change your chat’s approval mode."))
+        let context_label = if self.foundry_more { "Additional context".to_owned() } else if !self.foundry_sources.is_empty() || !self.foundry_autonomy.read(cx).value().is_empty() { "Context added · Edit".to_owned() } else { "Add context · optional".to_owned() };
+        let mut panel=div().id("foundry-intake-body").w_full().max_h(px(300.)).overflow_y_scroll().p_4().flex().flex_col().gap_3()
+            .child(div().text_xs().text_color(ui.text_muted).child("How much detail?"))
+            .child(div().flex().gap_2()
+                .child(Button::new("foundry-fast").outline().small().flex_1().icon(Lucide::Zap).label("Fast Draft").when(self.foundry_depth=="fast-draft",|b|b.primary()).on_click(cx.listener(|v,_,_,cx|{v.foundry_depth="fast-draft".into();cx.notify();})))
+                .child(Button::new("foundry-full").outline().small().flex_1().icon(Lucide::Layers).label("Full Project").when(self.foundry_depth=="full-project",|b|b.primary()).on_click(cx.listener(|v,_,_,cx|{v.foundry_depth="full-project".into();cx.notify();}))))
+            .child(div().text_xs().text_color(ui.text_faint).child(if self.foundry_depth=="fast-draft" {"Focused instructions for a smaller task."} else {"Detailed phases, checks, and a clear handoff."}))
+            .child(div().flex().flex_wrap().gap_3()
+                .child(div().flex_1().min_w(px(180.)).flex().flex_col().gap_1().child(div().text_xs().text_color(ui.text_muted).child("What are you doing?")).child(work))
+                .child(div().flex_1().min_w(px(180.)).flex().flex_col().gap_1().child(div().text_xs().text_color(ui.text_muted).child("Who is the prompt for?")).child(target)))
+            .child(Button::new("foundry-more").ghost().small().icon(if self.foundry_more {Lucide::ChevronDown} else {Lucide::ChevronRight}).label(context_label).on_click(cx.listener(|v,_,_,cx|{v.foundry_more = !v.foundry_more;cx.notify();})));
+        if self.foundry_more {
+            panel=panel
             .child(div().text_sm().child("Approval notes (optional)"))
             .child(Input::new(&self.foundry_autonomy))
             .child(div().flex().items_center().gap_2().child(div().text_sm().child("Sources of truth (optional)"))
@@ -221,11 +228,18 @@ impl ComposerView {
                 }))
                 .child(Button::new(SharedString::from(format!("source-remove-{i}"))).ghost().small().label("Remove").on_click(cx.listener(move |v,_,_,cx| {if i<v.foundry_sources.len() {v.foundry_sources.remove(i);}cx.notify();}))));
         }
-        panel.child(div().text_xs().text_color(ui.text_muted).child("References are included in the contract; generating does not read them or execute your task."))
-            .child(div().flex().gap_2()
-                .child(Button::new("foundry-generate").small().label("Generate prompt").disabled(self.foundry_work_type.is_empty() || self.input.read(cx).value().trim().is_empty()).on_click(cx.listener(|v,_,_,cx|v.run_foundry(cx))))
-                .child(Button::new("foundry-cancel").ghost().small().label("Cancel").on_click(cx.listener(|v,_,_,cx|{v.foundry_setup=false;cx.notify();}))))
-            .into_any_element()
+            panel=panel.child(div().text_xs().text_color(ui.text_faint).child("References guide the prompt; they aren’t opened during enhancement."));
+        }
+        let card=div().w_full().max_w(px(520.)).rounded(px(16.)).bg(ui.bg).border_1().border_color(ui.border).shadow_lg().overflow_hidden().flex().flex_col()
+            .child(div().flex().items_center().gap_2().px_4().py_3().border_b_1().border_color(ui.border)
+                .child(Icon::from(Lucide::Sparkles).size(px(16.)).text_color(ui.text_muted))
+                .child(div().flex_1().text_sm().font_weight(FontWeight::SEMIBOLD).child("Enhance Prompt"))
+                .child(Button::new("foundry-close").ghost().small().icon(Lucide::X).label("Close").on_click(cx.listener(|v,_,_,cx|{v.foundry_setup=false;cx.notify();}))))
+            .child(panel)
+            .child(div().flex().items_center().flex_wrap().gap_3().px_4().py_3().border_t_1().border_color(ui.border)
+                .child(div().flex_1().text_xs().text_color(ui.text_faint).child(if self.foundry_work_type.is_empty() {"Choose a work type to continue."} else {"Review the result before sending."}))
+                .child(Button::new("foundry-generate").primary().small().icon(Lucide::Sparkles).label("Enhance Prompt").disabled(self.foundry_work_type.is_empty() || self.input.read(cx).value().trim().is_empty()).on_click(cx.listener(|v,_,_,cx|v.run_foundry(cx)))));
+        div().w_full().max_w(px(Layout::COMPOSER_MAX)).flex().justify_end().mb_2().child(card).into_any_element()
     }
 
     fn slash_catalog(&self, cx: &App) -> serde_json::Value {
@@ -1400,7 +1414,7 @@ impl Render for ComposerView {
             if self.model.read(cx).selected == thread && self.input.read(cx).value().as_ref() == original {
                 self.input.update(cx, |s,cx| s.set_value(prompt.clone(), window, cx));
                 self.foundry_undo = Some((original, prompt, thread));
-                self.foundry_message = Some("Prompt generated · Review and send when ready".into());
+                self.foundry_message = Some("Prompt enhanced · Review before sending".into());
             } else {
                 self.foundry_message = Some("Draft changed while Foundry was working; your edits were kept. Run it again when ready.".into());
             }
@@ -1536,19 +1550,13 @@ impl Render for ComposerView {
             .pb_4()
             .when_some(destination, |el,panel|el.child(panel))
             .when_some(setup, |el,panel|el.child(panel))
-            .child(div().w_full().flex().items_center().flex_wrap().gap_2().pb_1()
-                .child(Button::new("run-foundry").ghost().small()
-                    .label(if self.foundry_busy { "Generating prompt…" } else { "Run through Foundry" })
-                    .disabled(self.foundry_busy || busy || starting || self.input.read(cx).value().trim().is_empty() || !self.model.read(cx).model_ready())
-                    .on_click(cx.listener(|v,_,_,cx| {
-                        if v.foundry_target.is_empty() { v.foundry_target = match v.model.read(cx).prefs.backend.as_str() { "grok"=>"grok-build", "codex"=>"openai-codex", "claude"=>"claude-code", _=>"general-assistant" }.into(); }
-                        v.foundry_setup = !v.foundry_setup;v.foundry_message=None;cx.notify();
-                    })))
+            .when(self.foundry_busy || self.foundry_message.is_some() || self.foundry_undo.is_some(), |el|el.child(div().w_full().max_w(px(Layout::COMPOSER_MAX)).flex().items_center().flex_wrap().gap_2().pb_2()
+                .when(self.foundry_busy, |el|el.child(super::motion::breathe("enhance-working",0.45,div().flex().items_center().gap_2().text_xs().text_color(ui.text_muted).child(Icon::from(Lucide::Sparkles).size(px(12.))).child("Enhancing your prompt… Your draft is safe."))))
                 .when_some(self.foundry_message.clone(), |el,message|el.child(div().text_xs().text_color(ui.text_muted).child(message)))
                 .when(self.foundry_undo.is_some(), |el|el.child(Button::new("undo-foundry").ghost().small().label("Undo").on_click(cx.listener(|v,_,window,cx| {
                     if let Some((original,_,_)) = v.foundry_undo.take() { v.input.update(cx,|s,cx|s.set_value(original,window,cx)); }
                     v.foundry_message = None; cx.notify();
-                })))))
+                }))))))
             .on_action(cx.listener(|this, _: &CycleApprovalMode, _, cx| {
                 this.model.update(cx, |m, cx| m.cycle_mode(cx));
                 cx.stop_propagation();
@@ -1580,6 +1588,7 @@ impl Render for ComposerView {
                 cx.notify();
             }))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
+                if ev.keystroke.key == "escape" && this.foundry_setup {this.foundry_setup=false;cx.stop_propagation();cx.notify();return;}
                 let k = &ev.keystroke;
                 if k.modifiers.platform && k.key == "v" && this.paste_from_clipboard(cx) {
                     cx.stop_propagation();
@@ -1638,6 +1647,9 @@ impl Render for ComposerView {
                                             .flex()
                                             .items_center()
                                             .flex_shrink_0()
+                                            .max_w(relative(0.8))
+                                            .flex_wrap()
+                                            .justify_end()
                                             .gap(px(2.))
                                             .child(model_picker)
                                             .child(self.speed.clone())
@@ -1663,6 +1675,13 @@ impl Render for ComposerView {
                                                             .child(Icon::from(Lucide::Paperclip)),
                                                     ),
                                             )
+                .child(Button::new("run-foundry").ghost().small().icon(Lucide::Sparkles).rounded_full().selected(self.foundry_setup)
+                    .label(if self.foundry_busy { "Enhancing…" } else { "Enhance Prompt" })
+                    .disabled(self.foundry_busy || busy || starting || self.input.read(cx).value().trim().is_empty() || !self.model.read(cx).model_ready())
+                    .on_click(cx.listener(|v,_,_,cx| {
+                        if v.foundry_target.is_empty() { v.foundry_target = match v.model.read(cx).prefs.backend.as_str() { "grok"=>"grok-build", "codex"=>"openai-codex", "claude"=>"claude-code", _=>"general-assistant" }.into(); }
+                        v.foundry_setup = !v.foundry_setup;v.foundry_message=None;cx.notify();
+                    })))
                                             .child(div().w(px(6.)))
                                             .child(send_button),
                                     ),
