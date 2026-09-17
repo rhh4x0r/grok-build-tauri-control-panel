@@ -295,7 +295,9 @@ impl SidebarView {
                 let app = self.model.clone();
                 let wid = w.id.clone();
                 let active = self.model.read(cx).active_workspace.as_deref() == Some(&w.id);
-                let title = w.name.clone();
+                let title = single_thread.and_then(|id| self.model.read(cx).threads.get(&id))
+                    .map(|t| t.read(cx).title()).unwrap_or_else(|| w.name.clone());
+                let row_title = title.clone();
                 let menu_model = self.model.clone();
                 let menu_id = wid.clone();
                 let count = w.threads.len();
@@ -345,7 +347,13 @@ impl SidebarView {
                             let app = menu_model.clone();
                             let wid = menu_id.clone();
                             let name = title.clone();
-                            let menu = menu.item(PopupMenuItem::new("Rename workspace…").on_click(move |_, window, cx| crate::views::workspaces::text_action(app.clone(), wid.clone(), "rename", "Workspace name", name.clone(), window, cx)));
+                            let menu = menu.item(PopupMenuItem::new("Rename thread…").on_click(move |_, window, cx| {
+                                if let Some(id) = single_thread {
+                                    open_rename_dialog(app.clone(), id, name.clone(), window, cx);
+                                } else {
+                                    crate::views::workspaces::text_action(app.clone(), wid.clone(), "rename", "Thread name", name.clone(), window, cx);
+                                }
+                            }));
                             if let Some(id) = single_thread { thread_lifecycle_menu(menu, menu_model.clone(), id, false) } else { menu }
                         })
                         .child(
@@ -363,7 +371,7 @@ impl SidebarView {
                                         .overflow_hidden()
                                         .text_ellipsis()
                                         .whitespace_nowrap()
-                                        .child(w.name.clone()),
+                                        .child(row_title),
                                 )
                                 .child(corner),
                         )
@@ -527,7 +535,7 @@ impl SidebarView {
             .context_menu(move |mut menu, _, _| {
                 let m = menu_model.clone();
                 let t = current_title.clone();
-                menu = menu.item(PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
+                menu = menu.item(PopupMenuItem::new("Rename thread…").on_click(move |_, window, cx| {
                     open_rename_dialog(m.clone(), id, t.clone(), window, cx);
                 }));
                 if has_worktree {
@@ -936,7 +944,7 @@ fn confirm_delete(model: Entity<AppModel>, id: Uuid, window: &mut Window, cx: &m
     window.open_alert_dialog(cx, move |dlg, _, _| {
         let model = model.clone();
         dlg.confirm().title("Delete this thread?")
-            .description("Archiving hides it instead and keeps everything. Deleting removes its transcript; the workspace and files are kept.")
+            .description("Archiving hides it instead and keeps everything. Deleting removes its transcript; the branch and files are kept.")
             .on_ok(move |_, window, cx| {
                 tracing::info!(%id, "delete: first confirmation accepted");
                 let model = model.clone();

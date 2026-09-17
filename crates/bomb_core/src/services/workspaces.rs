@@ -128,7 +128,7 @@ pub fn workspace(state: &AppState, id: &str) -> Result<WorkspaceRecord, String> 
         .map_err(err)?
         .into_iter()
         .find(|w| w.id == id)
-        .ok_or_else(|| "Workspace not found".into())
+        .ok_or_else(|| "Thread not found".into())
 }
 
 pub fn ensure_idle(state: &AppState, w: &WorkspaceRecord) -> Result<(), String> {
@@ -138,7 +138,7 @@ pub fn ensure_idle(state: &AppState, w: &WorkspaceRecord) -> Result<(), String> 
         .unwrap_or_else(|e| e.into_inner())
         .contains(&w.id)
     {
-        return Err("This workspace is finishing a turn or checkpoint. Please wait.".into());
+        return Err("This thread is finishing a turn or checkpoint. Please wait.".into());
     }
     for t in &w.threads {
         if let Ok(id) = Uuid::parse_str(t) {
@@ -151,7 +151,7 @@ pub fn ensure_idle(state: &AppState, w: &WorkspaceRecord) -> Result<(), String> 
                         | grok_events::SessionStatus::Cancelled
                 ) {
                     return Err(
-                        "This workspace is busy. Wait for its current conversation to finish."
+                        "This thread is busy. Wait for its current conversation to finish."
                             .into(),
                     );
                 }
@@ -243,7 +243,7 @@ pub async fn fetch_project(root: String) -> Result<(), String> {
 
 pub async fn rename_workspace(state: &AppState, id: String, name: String) -> Result<(), String> {
     if name.trim().is_empty() {
-        return Err("Workspace name cannot be empty".into());
+        return Err("Thread name cannot be empty".into());
     }
     let mut w = workspace(state, &id)?;
     w.name = name.trim().into();
@@ -264,7 +264,7 @@ pub async fn archive_workspace(state: &AppState, id: String) -> Result<(), Strin
         .map_err(err)?
     {
         return Err(
-            "Save a checkpoint before archiving; this workspace has unsaved changes".into(),
+            "Save a checkpoint before archiving; this thread has unsaved changes".into(),
         );
     }
     for t in &w.threads {
@@ -294,7 +294,7 @@ pub async fn workspace_action(
     let w = workspace(state, &id)?;
     ensure_idle(state, &w)?;
     if w.inline || w.archived_at.is_some() {
-        return Err("Create an active workspace to make changes".into());
+        return Err("Create an active thread to make changes".into());
     }
     let path = Path::new(&w.path);
     if matches!(action.as_str(), "push" | "pr")
@@ -330,7 +330,7 @@ pub async fn workspace_action(
             {
                 grok_worktree::MergeOutcome::Merged => format!("Updated from {base}"),
                 grok_worktree::MergeOutcome::Conflicts { files } => format!(
-                    "Resolve these conflicts in this workspace: {}",
+                    "Resolve these conflicts in this thread: {}",
                     files.join(", ")
                 ),
             }
@@ -339,7 +339,7 @@ pub async fn workspace_action(
             run_git(path, &["push", "-u", "origin", &w.branch])
                 .await
                 .map_err(err)?;
-            "Workspace pushed".into()
+            "Branch pushed".into()
         }
         "pr" => {
             run_git(path, &["push", "-u", "origin", &w.branch])
@@ -379,7 +379,7 @@ pub async fn workspace_action(
                 || !state.worktrees.is_clean(path).await.map_err(err)?
             {
                 return Err(
-                    "Both the project checkout and workspace must be clean before merging".into(),
+                    "Both the project checkout and the thread’s working copy must be clean before merging".into(),
                 );
             }
             let base = default_branch(root).await?;
@@ -396,7 +396,7 @@ pub async fn workspace_action(
                 grok_worktree::MergeOutcome::Conflicts { .. } => {
                     state.worktrees.merge_abort(root).await;
                     return Err(
-                        "Merge conflicts: Update the workspace and resolve conflicts there first"
+                        "Merge conflicts: Update the thread and resolve conflicts there first"
                             .into(),
                     );
                 }
@@ -488,7 +488,7 @@ pub async fn workspace_action(
                 .map_err(err)?;
             "Checkpoint restored as a new commit".into()
         }
-        _ => return Err("Unknown workspace action".into()),
+        _ => return Err("Unknown thread action".into()),
     };
     for t in &w.threads {
         if let Ok(id) = Uuid::parse_str(t) {
@@ -519,7 +519,7 @@ impl WorkspaceTurn {
             .unwrap_or_else(|e| e.into_inner())
             .insert(id.into())
         {
-            return Err("Workspace is busy".into());
+            return Err("Thread is busy".into());
         }
         Ok(Self {
             active,

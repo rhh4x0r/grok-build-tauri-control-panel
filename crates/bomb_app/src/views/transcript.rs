@@ -820,6 +820,10 @@ impl TranscriptView {
     }
 
     fn line_row(&self, id: u64, role: Role, text: &str, ui: &Ui) -> AnyElement {
+        // Normalize old saved creation notices without rewriting conversation history.
+        let renamed = (role == Role::System).then(|| text.strip_prefix("Workspace created")).flatten()
+            .map(|suffix| format!("Thread created{suffix}"));
+        let text = renamed.as_deref().unwrap_or(text);
         let color = match role {
             Role::Error => ui.danger,
             _ => ui.text_faint,

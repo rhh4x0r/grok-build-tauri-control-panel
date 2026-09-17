@@ -418,7 +418,7 @@ pub async fn start_session(
     let mut workspace_record = None;
     if let Some(wid) = opts.workspace_id.clone() {
         let w = workspaces::workspace(state, &wid)?;
-        if w.archived_at.is_some() { return Err("This workspace is archived".into()); }
+        if w.archived_at.is_some() { return Err("This thread is archived".into()); }
         workspaces::ensure_idle(state, &w)?;
         spawn_cwd = w.path.clone();
         opts.project_root = Some(w.project_root.clone());
@@ -431,20 +431,20 @@ pub async fn start_session(
         if !root.is_absolute() || !root.is_dir() { return Err("Choose an existing absolute project folder".into()); }
         let inline = !opts.isolate_worktree;
         if !inline && !grok_worktree::is_git_repo(root).await {
-            return Err("Create a Git repository before starting a workspace, or choose Inline to ask read-only questions".into());
+            return Err("Create a Git repository before starting a thread, or choose Inline to ask read-only questions".into());
         }
         let base = workspaces::workspace_base(root).await.unwrap_or_else(|_| "HEAD".into());
-        let name = opts.prompt.as_deref().map(prompt_slug).filter(|s| !s.is_empty()).unwrap_or_else(|| "New workspace".into());
+        let name = opts.prompt.as_deref().map(prompt_slug).filter(|s| !s.is_empty()).unwrap_or_else(|| "New thread".into());
         let branch;
         if !inline {
             let slug: String = name.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).take(35).collect();
             let wt = state.worktrees.create(root, CreateWorktreeRequest {
                 name: format!("{}-{}", slug.trim_matches('-'), &id.to_string()[..8]), base_ref: Some(base.clone()), prefer_grok_cli: false,
-            }).await.map_err(|e| format!("Could not create workspace: {e}. The project folder was not changed."))?;
+            }).await.map_err(|e| format!("Could not create thread: {e}. The project folder was not changed."))?;
             spawn_cwd = wt.path.display().to_string();
             branch = wt.branch.unwrap_or_default();
             opts.worktree = Some(wt.name);
-            isolation_note = Some(format!("Workspace created · {branch} · automatic checkpoints on"));
+            isolation_note = Some(format!("Thread created · {branch} · automatic checkpoints on"));
         } else {
             branch = state.worktrees.current_branch(root).await.unwrap_or_default();
             opts.read_only = true;
@@ -622,7 +622,7 @@ pub async fn send_prompt(
     let _gate = state.workspace_gate.lock().await;
     let workspace = state.persistence.workspace_for_session(id).map_err(err)?;
     if let Some(w) = &workspace {
-        if w.archived_at.is_some() { return Err("This workspace is archived".into()); }
+        if w.archived_at.is_some() { return Err("This thread is archived".into()); }
         workspaces::ensure_idle(state, w)?;
     }
     let images = images.unwrap_or_default();
@@ -727,12 +727,12 @@ pub async fn send_prompt(
     if let Some(effort) = effort { state.registry.set_effort(id, &effort).await.map_err(err)?; }
     if let Some(enabled) = fast_mode {
         if let Some((option, values, _)) = state.registry.speed_option(id).await.map_err(err)? {
-            let value = speed_value(&values, enabled).ok_or_else(|| "The connected agent does not offer the selected speed. Choose Agent default and try again.".to_string())?;
+            let value = speed_value(&values, enabled).ok_or_else(|| "The connected agent does not offer the selected speed. Refresh provider models and try again.".to_string())?;
             if !state.registry.set_speed_option(id, &option, &value).await.map_err(err)? {
-                return Err("The agent could not apply that speed. Choose Agent default and try again.".into());
+                return Err("The agent could not apply the selected speed. Refresh provider models and try again.".into());
             }
         } else if enabled {
-            return Err("Fast mode is not exposed for this model by the connected agent. Choose Standard or Agent default and send again.".into());
+            return Err("Fast mode is not exposed for this model by the connected agent. Turn Fast mode off and send again.".into());
         }
     }
     let prompt_len = prompt.len();
@@ -1106,7 +1106,7 @@ pub async fn set_plan_mode(
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
     if !enabled && state.persistence.workspace_for_session(id).map_err(err)?.is_some_and(|w| w.inline) {
-        return Err("Inline is read-only. Create a workspace to make changes.".into());
+        return Err("Inline is read-only. Create a thread to make changes.".into());
     }
     state
         .registry
@@ -1179,7 +1179,7 @@ pub async fn set_approval_mode(
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
     if mode != "plan" && state.persistence.workspace_for_session(id).map_err(err)?.is_some_and(|w| w.inline) {
-        return Err("Inline is read-only. Create a workspace to make changes.".into());
+        return Err("Inline is read-only. Create a thread to make changes.".into());
     }
     let mode = match mode.to_lowercase().as_str() {
         "plan" => grok_control_core::ApprovalMode::Plan,
@@ -1239,7 +1239,7 @@ pub async fn set_always_approve(
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
     if enabled && state.persistence.workspace_for_session(id).map_err(err)?.is_some_and(|w| w.inline) {
-        return Err("Inline is read-only. Create a workspace to make changes.".into());
+        return Err("Inline is read-only. Create a thread to make changes.".into());
     }
 
     state

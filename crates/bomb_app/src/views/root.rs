@@ -274,7 +274,7 @@ impl Render for RootView {
                     window.open_alert_dialog(cx, move |dlg, _, _| {
                         let m = m.clone();
                         dlg.confirm().title("Delete this thread?")
-                            .description("Its transcript is removed. The workspace and files are kept. This cannot be undone.")
+                            .description("Its transcript is removed. The branch and files are kept. This cannot be undone.")
                             .on_ok(move |_, _, cx| {
                                 m.update(cx, |a, cx| a.remove_thread(id, cx));
                                 true

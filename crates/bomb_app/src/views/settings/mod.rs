@@ -112,13 +112,13 @@ fn general_page(cx: &App) -> SettingPage {
                 )
                 .item(
                     SettingItem::new(
-                        "Use isolated workspaces for changes",
+                        "Use isolated branches for changes",
                         SettingField::switch(
                             |cx| settings(cx).read(cx).config.as_ref().map(|c| c.worktree_isolation_default).unwrap_or(true),
                             |v, cx| settings(cx).update(cx, |m, cx| m.edit_config(|c| c.worktree_isolation_default = v, cx)),
                         ),
                     )
-                    .description("Changes run in a separate workspace and branch. Multiple conversations can share a workspace."),
+                    .description("Each thread can make changes on an isolated branch, keeping your project folder unchanged."),
                 )
                 .item(
                     SettingItem::new(
@@ -138,7 +138,7 @@ fn general_page(cx: &App) -> SettingPage {
                         "Sandbox profile",
                         SettingField::dropdown(
                             vec![
-                                ("workspace".into(), "workspace · read/write the project".into()),
+                                ("workspace".into(), "Project files · read/write the project".into()),
                                 ("read_only".into(), "read-only".into()),
                                 ("strict".into(), "strict · minimal FS, no network".into()),
                                 ("unrestricted".into(), "unrestricted".into()),

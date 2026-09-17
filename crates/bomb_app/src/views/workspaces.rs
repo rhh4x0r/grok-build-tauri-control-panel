@@ -18,7 +18,7 @@ pub fn confirm_action(
     let action = action.to_string();
     window.open_alert_dialog(cx, move |d, _, _| {
         let (model, id, action, value) = (model.clone(), id.clone(), action.clone(), value.clone());
-        d.title("Confirm workspace action")
+        d.title("Confirm thread action")
             .description(description.clone())
             .on_ok(move |_, _, cx| {
                 model.update(cx, |m, cx| {
@@ -135,7 +135,7 @@ impl Render for ReviewPanel {
             );
         let (Some(w), Some(r)) = (w, review) else {
             return body
-                .child("Select an active workspace to review its changes.")
+                .child("Select an active thread to review its changes.")
                 .into_any_element();
         };
         body = body.child(div().text_xs().text_color(ui.text_muted).child(format!(
@@ -248,7 +248,7 @@ impl Render for ReviewPanel {
                             wid.clone(),
                             "checkpoint",
                             "Checkpoint message",
-                            "Save workspace changes".into(),
+                            "Save thread changes".into(),
                             window,
                             cx,
                         )
@@ -257,7 +257,7 @@ impl Render for ReviewPanel {
             if r.checkpoints.len() > 1 {
                 let app = self.model.clone();
                 let wid = id.clone();
-                actions = actions.child(Button::new("squash-checkpoints").ghost().small().label("Squash checkpoints…").on_click(move |_, window, cx| text_action(app.clone(), wid.clone(), "squash", "Squash message — git reset --soft to merge-base, then commit (backup branch kept)", "Complete workspace changes".into(), window, cx)));
+                actions = actions.child(Button::new("squash-checkpoints").ghost().small().label("Squash checkpoints…").on_click(move |_, window, cx| text_action(app.clone(), wid.clone(), "squash", "Squash message — git reset --soft to merge-base, then commit (backup branch kept)", "Complete thread changes".into(), window, cx)));
             }
             let app = self.model.clone();
             let wid = id.clone();

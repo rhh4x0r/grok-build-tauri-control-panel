@@ -67,44 +67,19 @@ impl Render for SpeedSelector {
         self.refresh(false, cx);
         let m = self.model.read(cx);
         if m.prefs.backend != "codex" && self.option.is_none() { return div().into_any_element(); }
-        let chosen = m.prefs.fast_mode;
-        let current = self.option.as_ref().and_then(|(option, _, value)| value.as_deref().map(|value| speed_label(option, value)));
-        let label = match chosen {
-            Some(true) => "Fast · On".to_string(), Some(false) => "Fast · Off".to_string(),
-            None => match current.as_deref() { Some("Fast" | "Priority") => "Fast · On".into(), Some("Standard") => "Fast · Off".into(), _ => "Fast · Default".into() }
-        };
+        let chosen = m.prefs.fast_mode.unwrap_or(false);
+        let label = if chosen { "Fast · On" } else { "Fast · Off" };
         let model = self.model.clone();
         Button::new("speed-selector").ghost().small().label(label).dropdown_caret(true)
             .tooltip("Applies to your next prompt. Fast mode uses more allowance; availability is checked when the agent connects.")
             .dropdown_menu(move |mut menu, _, _| {
-                for (label, value) in [("Agent default", None), ("Standard", Some(false)), ("Fast", Some(true))] {
+                for (label, value) in [("Off (standard)", false), ("On (fast)", true)] {
                     let model = model.clone();
-                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                        model.update(cx, |m, cx| { m.prefs.fast_mode = value; cx.notify(); });
+                    menu = menu.item(PopupMenuItem::new(label).checked(value == chosen).on_click(move |_, _, cx| {
+                        model.update(cx, |m, cx| { m.prefs.fast_mode = Some(value); cx.notify(); });
                     }));
                 }
                 menu
             }).into_any_element()
-    }
-}
-
-fn speed_label(option: &str, value: &str) -> String {
-    match (option, value) {
-        ("fast-mode" | "fast_mode" | "fastMode" | "fast", "true" | "on" | "enabled") => "Fast".into(),
-        ("fast-mode" | "fast_mode" | "fastMode" | "fast", "false" | "off" | "disabled") => "Standard".into(),
-        (_, "fast") => "Fast".into(),
-        (_, "standard" | "normal" | "default") => "Standard".into(),
-        (_, "priority") => "Priority".into(),
-        _ => value.replace('_', " "),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::speed_label;
-    #[test]
-    fn codex_fast_mode_has_readable_labels() {
-        assert_eq!(speed_label("fast-mode", "on"), "Fast");
-        assert_eq!(speed_label("fast-mode", "off"), "Standard");
     }
 }

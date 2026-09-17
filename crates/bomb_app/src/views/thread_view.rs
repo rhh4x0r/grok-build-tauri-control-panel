@@ -273,7 +273,7 @@ impl ThreadView {
                     }),
             )
             .child("·")
-            .child(div().text_xs().child(if temporary { "Ask questions · your files stay unchanged" } else { "Make changes · saved in a workspace" }))
+            .child(div().text_xs().child(if temporary { "Ask questions · your files stay unchanged" } else { "Make changes · saved in a thread" }))
             .when(temporary, |el| el.child(Button::new("question-make-changes").outline().small().label("Make changes…").on_click(move |_, _, cx| app2.update(cx, |m, cx| m.workspace_from_inline(cx)))))
     }
 
@@ -297,7 +297,7 @@ impl ThreadView {
             .unwrap_or_else(|| "Changes".into());
         let changes_hint = review
             .map(|r| format!("View file changes · {} · {} commits ahead, {} behind", r.branch, r.ahead, r.behind))
-            .unwrap_or_else(|| format!("View file changes in {}", branch.unwrap_or_else(|| "this workspace".into())));
+            .unwrap_or_else(|| format!("View file changes in {}", branch.unwrap_or_else(|| "this thread".into())));
         let action = |id: &'static str, label: &str, icon: Lucide| {
             Button::new(id)
                 .ghost()
@@ -308,7 +308,7 @@ impl ThreadView {
                 .font_weight(FontWeight::NORMAL)
                 .text_color(ui.text_muted)
                 .icon(Icon::from(icon).size(px(14.)))
-                .accessibility_label(if label.is_empty() { "More workspace actions" } else { label })
+                .accessibility_label(if label.is_empty() { "More thread actions" } else { label })
                 .when(!label.is_empty(), |button| button.child(
                     div().text_size(px(12.)).font_weight(FontWeight::NORMAL).child(label.to_string()),
                 ))
@@ -334,14 +334,14 @@ impl ThreadView {
             )
             .child(div().flex_1())
             .child(action("new-workspace-thread", "New chat", Lucide::Plus)
-                .tooltip("Start a new conversation in this workspace")
+                .tooltip("Start a new conversation in this thread")
                 .on_click({
                     let app = app.clone();
                     move |_, _, cx| app.update(cx, |m, cx| m.new_workspace_thread(cx))
                 }))
             .when(!has_worktree, |el| el.child(
                 action("inline-convert", "Make changes", Lucide::GitBranch)
-                    .tooltip("Create a workspace to make changes to this project")
+                    .tooltip("Create a thread to make changes to this project")
                     .on_click({
                         let app = app.clone();
                         move |_, _, cx| app.update(cx, |m, cx| m.workspace_from_inline(cx))
@@ -371,7 +371,7 @@ impl ThreadView {
                     .dropdown_menu(move |mut menu, _, cx| {
                         if has_worktree {
                             let app = app.clone();
-                            menu = menu.item(PopupMenuItem::new("Merge latest default branch into workspace")
+                            menu = menu.item(PopupMenuItem::new("Merge latest default branch into thread")
                                 .on_click(move |_, _, cx| app.update(cx, |m, cx| m.sync_thread(thread_id, cx))));
                         }
                         let archived = app.read(cx).archived.contains(&thread_id);

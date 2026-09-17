@@ -121,7 +121,7 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                 .child(Icon::from(Lucide::GitBranch).size(px(18.)).text_color(ui.text_muted))
                 .child(div().text_size(px(16.)).font_weight(FontWeight::MEDIUM).child("Git not detected")))
             .child(div().text_size(px(12.)).text_color(ui.text_muted)
-                .child("Initialize a repository to track changes and create workspaces in this folder."))
+                .child("Initialize a repository to track changes and create threads in this folder."))
             .child(div().flex().child(Button::new("initialize-git").outline().small()
                 .label(if loading { "Initializing…" } else { "Initialize Git repo" }).disabled(loading)
                 .on_click(move |_, _, cx| app.update(cx, |m, cx| m.initialize_project_git(root.clone(), cx)))))
@@ -178,7 +178,7 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                     .outline()
                     .small()
                     .icon(Lucide::Plus)
-                    .label("New workspace")
+                    .label("New thread")
                     .on_click(|_, window, cx| {
                         window.dispatch_action(Box::new(crate::actions::NewThread), cx)
                     }),
@@ -325,7 +325,7 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                     Button::new("open-workspace")
                         .outline()
                         .small()
-                        .label("Open workspace")
+                        .label("Open thread")
                         .on_click(move |_, _, cx| {
                             app.update(cx, |m, cx| m.open_workspace(id.clone(), cx))
                         }),

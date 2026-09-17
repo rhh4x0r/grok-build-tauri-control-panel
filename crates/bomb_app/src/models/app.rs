@@ -66,7 +66,7 @@ impl Default for ComposerPrefs {
             worktree: true,
             mcp_servers: Vec::new(),
             effort: "high".into(),
-            fast_mode: None,
+            fast_mode: Some(false),
             temporary: false,
         }
     }
@@ -253,13 +253,13 @@ impl AppModel {
         self.new_thread(cx);
         self.source_thread = source;
         self.prefs.mode = "ask".into();
-        self.toast(ToastKind::Info, "Your next message starts a workspace with this conversation as context.");
+        self.toast(ToastKind::Info, "Your next message starts a thread with this conversation as context.");
         cx.notify();
     }
 
     pub fn new_workspace_thread(&mut self, cx: &mut Context<Self>) {
         self.new_thread_open = true;
-        self.prefs.fast_mode = None;
+        self.prefs.fast_mode = Some(false);
         if self.prefs.mode == "yolo" { self.prefs.mode = "plan".into(); }
         self.selected = None;
         cx.notify();
@@ -305,8 +305,8 @@ impl AppModel {
         let state = svc(cx);
         let this = cx.entity().downgrade();
         spawn_service(cx, async move {
-            if action == "archive" { services::workspaces::archive_workspace(&state, id).await.map(|_| "Workspace archived; branch and conversations kept".into()) }
-            else if action == "rename" { services::workspaces::rename_workspace(&state, id, value).await.map(|_| "Workspace renamed".into()) }
+            if action == "archive" { services::workspaces::archive_workspace(&state, id).await.map(|_| "Thread archived; branch and conversations kept".into()) }
+            else if action == "rename" { services::workspaces::rename_workspace(&state, id, value).await.map(|_| "Thread renamed".into()) }
             else { services::workspaces::workspace_action(&state, id, action, value).await }
         }, move |res, cx| {
             let _ = this.update(cx, |m, cx| {
@@ -650,7 +650,7 @@ impl AppModel {
             return;
         }
         self.selected = id;
-        self.prefs.fast_mode = None;
+        self.prefs.fast_mode = Some(false);
         self.new_thread_open = false;
         self.review = None;
         self.active_workspace = id.and_then(|id| self.workspaces.iter().find(|w| w.threads.contains(&id.to_string())).map(|w| w.id.clone()));
@@ -688,6 +688,7 @@ impl AppModel {
 
     /// Deselect: the composer starts a fresh thread in the active project.
     pub fn new_thread(&mut self, cx: &mut Context<Self>) {
+        self.prefs.fast_mode = Some(false);
         self.new_thread_open = true;
         if self.prefs.mode == "yolo" { self.prefs.mode = "plan".into(); }
         self.source_thread = None;
@@ -829,7 +830,7 @@ impl AppModel {
             cx.notify(); return;
         }
         if self.active_workspace.as_deref().is_some_and(|id| self.workspaces.iter().any(|w| w.id == id && w.archived_at.is_some())) {
-            self.fail("This workspace is archived. Start a new workspace to make changes.".into(), cx); return;
+            self.fail("This thread is archived. Start a new thread to make changes.".into(), cx); return;
         }
         let mut prefs = self.prefs.clone();
         let model = self.effective_model();
@@ -1073,7 +1074,7 @@ impl AppModel {
 
     pub fn set_mode(&mut self, mode: &str, cx: &mut Context<Self>) {
         if mode != "plan" && (self.prefs.temporary || self.active_workspace.as_deref().is_some_and(|id| self.workspaces.iter().any(|w| w.id == id && w.inline))) {
-            self.toast(ToastKind::Info, "This conversation is for questions. Choose Make changes to continue in a workspace.");
+            self.toast(ToastKind::Info, "This conversation is for questions. Choose Make changes to continue in a thread.");
             cx.notify(); return;
         }
         let previous = self.prefs.mode.clone();
@@ -1160,7 +1161,7 @@ impl AppModel {
     }
 
     pub fn set_backend(&mut self, backend: &str, model: Option<String>, cx: &mut Context<Self>) {
-        if self.prefs.backend != backend || self.prefs.model != model { self.prefs.fast_mode = None; }
+        if self.prefs.backend != backend || self.prefs.model != model { self.prefs.fast_mode = Some(false); }
         self.prefs.backend = backend.to_string();
         self.prefs.model = model;
         let (levels, _) = crate::views::brand::effort_levels(backend);

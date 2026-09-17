@@ -920,7 +920,7 @@ impl Render for ComposerView {
                             .gap(px(Layout::SPACE_XS))
                             .px(px(10.))
                             .child(footer_label(Lucide::MessageCircle, location_label, &ui))
-                            .when(worktree_on, |el| el.child(footer_label(Lucide::GitBranch, "Isolated workspace".into(), &ui)))
+                            .when(worktree_on, |el| el.child(footer_label(Lucide::GitBranch, "Isolated branch".into(), &ui)))
                             .when_some(branch, |el, b| el.child(footer_label(Lucide::GitBranch, b, &ui)))
                             .when(!has_thread && new_target, |el| {
                                 el.child(
@@ -931,7 +931,7 @@ impl Render for ComposerView {
                                         .dropdown_menu(move |menu, _, _| {
                                             let questions = app.clone(); let changes = app.clone();
                                             menu.item(PopupMenuItem::new("Ask a question — leave files unchanged").on_click(move |_, _, cx| questions.update(cx, |m, cx| m.set_new_intent(true, cx))))
-                                                .item(PopupMenuItem::new("Make changes — isolated workspace").on_click(move |_, _, cx| changes.update(cx, |m, cx| m.set_new_intent(false, cx))))
+                                                .item(PopupMenuItem::new("Make changes — isolated branch").on_click(move |_, _, cx| changes.update(cx, |m, cx| m.set_new_intent(false, cx))))
                                         })
                                 )
                             })
