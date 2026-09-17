@@ -228,7 +228,8 @@ impl TranscriptView {
                     .rounded(px(Layout::BUBBLE_RADIUS))
                     .px(px(16.))
                     .py(px(10.))
-                    .text_sm()
+                    .text_size(px(Layout::BODY_SIZE))
+                    .line_height(px(Layout::BODY_LINE))
                     .text_color(ui.text)
                     .whitespace_normal()
                     .child(text.to_string()),
@@ -253,7 +254,8 @@ impl TranscriptView {
             .flex_col()
             .gap_1()
             .py_1()
-            .text_sm()
+            .text_size(px(Layout::BODY_SIZE))
+            .line_height(px(Layout::BODY_LINE))
             .child(TextView::new(state).selectable(true))
             .when(streaming, |el| {
                 el.child(breathe(

@@ -162,7 +162,7 @@ impl SidebarView {
             .gap_0p5()
             .mx_2()
             .px_2()
-            .py_1p5()
+            .py_2()
             .rounded(px(8.))
             .cursor_pointer()
             .when(selected, move |s| s.bg(active))
@@ -216,14 +216,14 @@ impl SidebarView {
                     .child(
                         div()
                             .flex_1()
-                            .text_xs()
+                            .text_size(px(11.))
                             .text_color(ui.text_faint)
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
                             .child(project.to_string()),
                     )
-                    .child(corner),
+                    .child(div().text_size(px(11.)).child(corner)),
             )
             .child(
                 div()
@@ -240,7 +240,7 @@ impl SidebarView {
                     .child(
                         div()
                             .flex_1()
-                            .text_sm()
+                            .text_size(px(13.))
                             .text_color(ui.text)
                             .overflow_hidden()
                             .text_ellipsis()
@@ -254,7 +254,7 @@ impl SidebarView {
                         .flex()
                         .items_center()
                         .gap_1()
-                        .text_xs()
+                        .text_size(px(11.))
                         .text_color(ui.text_faint)
                         .child(div().size(px(11.)).child(Icon::from(Lucide::GitBranch)))
                         .child(b),
@@ -335,8 +335,6 @@ impl Render for SidebarView {
             .size_full()
             .flex()
             .flex_col()
-            .border_r_1()
-            .border_color(ui.border)
             .child(self.header(&ui, cx))
             .child(
                 div()

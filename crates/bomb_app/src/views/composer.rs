@@ -478,7 +478,7 @@ impl Render for ComposerView {
                                         div()
                                             .flex_1()
                                             .min_w_0()
-                                            .text_sm()
+                                            .text_size(px(14.))
                                             .child(Textarea::new(&self.input).appearance(false).bordered(false)),
                                     )
                                     .child(

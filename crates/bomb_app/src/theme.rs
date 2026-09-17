@@ -10,8 +10,29 @@ use gpui_kit::*;
 
 const THEME_JSON: &str = include_str!("../themes/bomb.json");
 
+/// Embedded Geist + Geist Mono (SIL OFL 1.1; see assets/fonts/licenses).
+const FONTS: &[&[u8]] = &[
+    include_bytes!("../assets/fonts/Geist.ttf"),
+    include_bytes!("../assets/fonts/Geist-Medium.ttf"),
+    include_bytes!("../assets/fonts/Geist-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/Geist-Bold.ttf"),
+    include_bytes!("../assets/fonts/Geist-Italic.ttf"),
+    include_bytes!("../assets/fonts/GeistMono.ttf"),
+    include_bytes!("../assets/fonts/GeistMono-Medium.ttf"),
+    include_bytes!("../assets/fonts/GeistMono-Bold.ttf"),
+];
+
+pub const FONT_SANS: &str = "Geist";
+pub const FONT_MONO: &str = "Geist Mono";
+
 /// Register both themes and match the current system appearance.
 pub fn install(cx: &mut App) {
+    if let Err(e) = cx
+        .text_system()
+        .add_fonts(FONTS.iter().map(|b| std::borrow::Cow::Borrowed(*b)).collect())
+    {
+        tracing::warn!(error = %e, "embedded fonts failed to register; falling back to system fonts");
+    }
     let registry = ThemeRegistry::global_mut(cx);
     if let Err(e) = registry.load_themes_from_str(THEME_JSON) {
         tracing::warn!(error = %e, "bomb theme failed to parse; using built-in themes");
@@ -26,10 +47,16 @@ pub fn apply_mode(dark: bool, cx: &mut App) {
     let cfg = ThemeRegistry::global(cx).themes().get(name).cloned();
     match cfg {
         Some(cfg) => {
-            let theme = Theme::global_mut(cx);
-            theme.mode = if dark { ThemeMode::Dark } else { ThemeMode::Light };
-            theme.apply_config(&cfg);
-            theme.mono_font_family = "Menlo".into();
+            {
+                let theme = Theme::global_mut(cx);
+                theme.mode = if dark { ThemeMode::Dark } else { ThemeMode::Light };
+                theme.apply_config(&cfg);
+                theme.font_family = FONT_SANS.into();
+                theme.mono_font_family = FONT_MONO.into();
+            }
+            // Base components (inputs, resize handles) read their own token
+            // set; project the component theme onto it or they keep defaults.
+            Theme::sync_base(cx);
         }
         None => Theme::change(
             if dark { ThemeMode::Dark } else { ThemeMode::Light },
@@ -66,7 +93,10 @@ impl Layout {
     pub const BUBBLE_RADIUS: f32 = 16.0;
     pub const PANEL_RADIUS: f32 = 10.0;
     pub const COMPOSER_RADIUS: f32 = 26.0;
-    pub const CONTENT_MAX: f32 = 880.0;
+    pub const CONTENT_MAX: f32 = 736.0;
+    /// Transcript body: 14px on a 22px line (Zeron MD_LINE_HEIGHT).
+    pub const BODY_SIZE: f32 = 14.0;
+    pub const BODY_LINE: f32 = 22.0;
     pub const COMPOSER_MAX: f32 = 768.0;
 }
 
