@@ -22,6 +22,8 @@ use crate::devserver::DevServerManager;
 use crate::explainer::ExplainerService;
 
 pub struct AppState {
+    pub workspace_turns: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    pub workspace_gate: Arc<tokio::sync::Mutex<()>>,
     pub paths: GrokPaths,
     pub config: Arc<RwLock<GrokConfig>>,
     pub event_bus: Arc<EventBus>,
@@ -45,6 +47,10 @@ impl AppState {
 
         let paths = GrokPaths::discover(std::env::current_dir().ok().as_deref())
             .context("path discovery")?;
+        Self::initialize_with_paths(paths).await
+    }
+
+    pub(crate) async fn initialize_with_paths(paths: GrokPaths) -> Result<Self> {
         let _ = paths.ensure_dirs();
 
         // Resolve the binary against the BASE (global-only) config and save
@@ -206,6 +212,8 @@ impl AppState {
         };
 
         Ok(Self {
+            workspace_turns: Arc::new(std::sync::Mutex::new(Default::default())),
+            workspace_gate: Arc::new(tokio::sync::Mutex::new(())),
             paths,
             config,
             event_bus,

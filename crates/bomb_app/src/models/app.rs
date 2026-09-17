@@ -72,6 +72,13 @@ pub const APPROVAL_CYCLE: [&str; 4] = ["plan", "ask", "auto", "yolo"];
 
 pub struct AppModel {
     pub projects: Vec<String>,
+    pub workspaces: Vec<grok_persistence::WorkspaceRecord>,
+    pub project_status: HashMap<String, bomb_core::services::workspaces::ProjectStatus>,
+    pub active_workspace: Option<String>,
+    pub source_thread: Option<String>,
+    pub review: Option<bomb_core::services::workspaces::WorkspaceReview>,
+    pub review_open: bool,
+    pub review_loading: bool,
     pub active_project: Option<String>,
     pub thread_order: Vec<Uuid>,
     pub threads: HashMap<Uuid, Entity<ThreadModel>>,
@@ -100,6 +107,13 @@ impl AppModel {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let mut this = Self {
             projects: Vec::new(),
+            workspaces: Vec::new(),
+            project_status: HashMap::new(),
+            active_workspace: None,
+            source_thread: None,
+            review: None,
+            review_open: false,
+            review_loading: false,
             active_project: None,
             thread_order: Vec::new(),
             threads: HashMap::new(),
@@ -119,8 +133,125 @@ impl AppModel {
             dev_poll: None,
         };
         this.refresh_all(cx);
+        this.refresh_project_status(false, cx);
         this.start_service_poll(cx);
         this
+    }
+
+    pub fn refresh_project_status(&mut self, fetch: bool, cx: &mut Context<Self>) {
+        let state = svc(cx); let this = cx.entity().downgrade();
+        spawn_service(cx, async move { services::workspaces::refresh_projects(&state, fetch).await }, move |res, cx| {
+            let _ = this.update(cx, |m, cx| { if let Ok(rows) = res { m.project_status = rows.into_iter().collect(); } cx.notify(); });
+        });
+    }
+
+    pub fn pull_project(&mut self, root: String, cx: &mut Context<Self>) {
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move { services::workspaces::pull_project(root).await }, move |res, cx| {
+            let _ = this.update(cx, |m, cx| { match res { Ok(note) => m.toast(ToastKind::Success, note), Err(e) => m.fail(e, cx) } m.refresh_project_status(false, cx); cx.notify(); });
+        });
+    }
+
+    pub fn refresh_workspaces(&mut self, cx: &mut Context<Self>) {
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move { services::workspaces::list_workspaces(&state).await }, move |res, cx| {
+            let _ = this.update(cx, |m, cx| {
+                match res {
+                    Ok(rows) => {
+                        m.workspaces = rows;
+                        if let Some(id) = m.selected {
+                            m.active_workspace = m.workspaces.iter().find(|w| w.threads.contains(&id.to_string())).map(|w| w.id.clone());
+                        }
+                        m.refresh_review(cx);
+                    }
+                    Err(e) => m.fail(e, cx),
+                }
+                cx.notify();
+            });
+        });
+    }
+
+    pub fn open_workspace(&mut self, id: String, cx: &mut Context<Self>) {
+        if let Some(w) = self.workspaces.iter().find(|w| w.id == id).cloned() {
+            self.active_project = Some(w.project_root);
+            self.select(w.threads.first().and_then(|t| Uuid::parse_str(t).ok()), cx);
+            self.active_workspace = Some(id);
+            self.prefs.temporary = w.inline;
+            self.prefs.worktree = !w.inline;
+            if w.inline { self.prefs.mode = "plan".into(); }
+            self.refresh_review(cx);
+            cx.notify();
+        }
+    }
+
+    pub fn workspace_from_inline(&mut self, cx: &mut Context<Self>) {
+        let source = self.selected.map(|id| id.to_string());
+        self.new_thread(cx);
+        self.source_thread = source;
+        self.prefs.mode = "ask".into();
+        self.toast(ToastKind::Info, "Your next message starts a workspace with this conversation as context.");
+        cx.notify();
+    }
+
+    pub fn new_workspace_thread(&mut self, cx: &mut Context<Self>) {
+        self.selected = None;
+        cx.notify();
+    }
+
+    pub fn inline_project(&mut self, root: String, cx: &mut Context<Self>) {
+        if let Some(w) = self.workspaces.iter().find(|w| w.project_root == root && w.inline) {
+            self.open_workspace(w.id.clone(), cx);
+        } else {
+            self.set_active_project(root, cx);
+            self.prefs.temporary = true;
+            self.prefs.mode = "plan".into();
+            cx.notify();
+        }
+    }
+
+    pub fn refresh_review(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.active_workspace.clone() else { self.review = None; return; };
+        if self.workspaces.iter().any(|w| w.id == id && w.archived_at.is_some()) { self.review = None; return; }
+        self.review_loading = true;
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        let selected = id.clone();
+        spawn_service(cx, async move { services::workspaces::review_workspace(&state, id).await }, move |res, cx| {
+            let _ = this.update(cx, |m, cx| {
+                if m.active_workspace.as_deref() != Some(&selected) { return; }
+                m.review_loading = false;
+                match res { Ok(r) => m.review = Some(r), Err(e) => { m.review = None; m.last_error = Some(e); } }
+                cx.notify();
+            });
+        });
+    }
+
+    pub fn run_workspace_action(&mut self, id: String, action: String, value: String, cx: &mut Context<Self>) {
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move {
+            if action == "archive" { services::workspaces::archive_workspace(&state, id).await.map(|_| "Workspace archived; branch and conversations kept".into()) }
+            else if action == "rename" { services::workspaces::rename_workspace(&state, id, value).await.map(|_| "Workspace renamed".into()) }
+            else { services::workspaces::workspace_action(&state, id, action, value).await }
+        }, move |res, cx| {
+            let _ = this.update(cx, |m, cx| {
+                match res { Ok(note) => m.toast(ToastKind::Success, note), Err(e) => m.fail(e, cx) }
+                m.refresh_threads(cx);
+                cx.notify();
+            });
+        });
+    }
+
+    pub fn fetch_project(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.active_project.clone() else { return; };
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move { services::workspaces::fetch_project(root).await }, move |res, cx| {
+            let _ = this.update(cx, |m, cx| {
+                match res { Ok(()) => m.toast(ToastKind::Success, "Project fetched"), Err(e) => m.fail(e, cx) }
+                m.refresh_review(cx); m.refresh_project_status(false, cx); cx.notify();
+            });
+        });
     }
 
     // ── refresh ─────────────────────────────────────────────────────────
@@ -153,6 +284,7 @@ impl AppModel {
     }
 
     pub fn refresh_threads(&mut self, cx: &mut Context<Self>) {
+        self.refresh_workspaces(cx);
         let state = svc(cx);
         let this = cx.entity().downgrade();
         spawn_service(
@@ -264,7 +396,9 @@ impl AppModel {
                         m.refresh_services(cx);
                         if usage {
                             m.refresh_usage(cx);
+                            m.refresh_review(cx);
                         }
+                        if tick.is_multiple_of(15) { m.refresh_project_status(true, cx); }
                     })
                     .is_err()
                 {
@@ -425,6 +559,9 @@ impl AppModel {
             return;
         }
         self.selected = id;
+        self.review = None;
+        self.active_workspace = id.and_then(|id| self.workspaces.iter().find(|w| w.threads.contains(&id.to_string())).map(|w| w.id.clone()));
+        self.refresh_review(cx);
         if let Some(id) = id {
             if let Some(t) = self.threads.get(&id) {
                 let meta = t.read(cx).meta.clone();
@@ -454,6 +591,10 @@ impl AppModel {
 
     /// Deselect: the composer starts a fresh thread in the active project.
     pub fn new_thread(&mut self, cx: &mut Context<Self>) {
+        self.source_thread = None;
+        self.active_workspace = None;
+        self.prefs.temporary = false;
+        self.prefs.worktree = true;
         self.selected = None;
         // Fresh thread → backend default model, never a stale id.
         self.prefs.model = None;
@@ -554,6 +695,9 @@ impl AppModel {
 
     /// Send to the selected thread, or start a new one in the active project.
     pub fn send_prompt(&mut self, text: String, images: Vec<ImageInput>, cx: &mut Context<Self>) {
+        if self.active_workspace.as_deref().is_some_and(|id| self.workspaces.iter().any(|w| w.id == id && w.archived_at.is_some())) {
+            self.fail("This workspace is archived. Start a new workspace to make changes.".into(), cx); return;
+        }
         let prefs = self.prefs.clone();
         let attachments: Vec<ImageAttachment> = images
             .iter()
@@ -626,6 +770,9 @@ impl AppModel {
                     model: model.clone(),
                     approval_mode,
                     isolate_worktree: prefs.worktree && !prefs.temporary,
+                    workspace_id: self.active_workspace.clone(),
+                    source_thread: self.source_thread.take(),
+                    prompt: Some(text.clone()),
                     project_root: Some(cwd.clone()),
                     mcp_server_names: prefs.mcp_servers.clone(),
                     effort: Some(prefs.effort.clone()),
@@ -763,6 +910,7 @@ impl AppModel {
     /// Plan handoff: switch to `backend`/`model`, drop to auto approvals, and
     /// ask the (possibly different) agent to implement the plan.
     pub fn code_plan_with(&mut self, backend: &str, model: Option<String>, cx: &mut Context<Self>) {
+        if self.active_workspace.as_deref().is_some_and(|id| self.workspaces.iter().any(|w| w.id == id && w.inline)) { self.workspace_from_inline(cx); }
         self.set_backend(backend, model, cx);
         self.set_mode("auto", cx);
         self.send_prompt("Implement the plan above. Work through it step by step and report when done.".into(), Vec::new(), cx);
@@ -784,6 +932,10 @@ impl AppModel {
     }
 
     pub fn set_mode(&mut self, mode: &str, cx: &mut Context<Self>) {
+        if mode != "plan" && (self.prefs.temporary || self.active_workspace.as_deref().is_some_and(|id| self.workspaces.iter().any(|w| w.id == id && w.inline))) {
+            self.toast(ToastKind::Info, "Inline is read-only. Choose Create workspace to edit.");
+            cx.notify(); return;
+        }
         self.prefs.mode = mode.to_string();
         if let Some(id) = self.selected {
             let state = svc(cx);
@@ -900,52 +1052,15 @@ impl AppModel {
     }
 
     pub fn land_thread(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        let state = svc(cx);
-        let this = cx.entity().downgrade();
-        spawn_service(
-            cx,
-            async move { services::land_thread(&state, id.to_string()).await },
-            move |res, cx| {
-                let _ = this.update(cx, |m, cx| {
-                    match res {
-                        Ok(r) if r.status == "landed" => m.toast(
-                            ToastKind::Success,
-                            format!("Landed {} into {} ({} files)", r.branch, r.target_branch, r.files.len()),
-                        ),
-                        Ok(r) => m.toast(
-                            ToastKind::Warning,
-                            format!("Conflicts with {}: run Sync so the agent can resolve them", r.target_branch),
-                        ),
-                        Err(e) => m.fail(e, cx),
-                    }
-                    m.refresh_threads(cx);
-                });
-            },
-        );
+        self.select(Some(id), cx);
+        self.review_open = true;
+        self.refresh_review(cx);
     }
 
     pub fn sync_thread(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        let state = svc(cx);
-        let this = cx.entity().downgrade();
-        spawn_service(
-            cx,
-            async move { services::sync_thread(&state, id.to_string()).await },
-            move |res, cx| {
-                let _ = this.update(cx, |m, cx| {
-                    match res {
-                        Ok(r) if r.status == "synced" || r.status == "landed" => {
-                            m.toast(ToastKind::Success, format!("Synced {} from {}", r.branch, r.target_branch))
-                        }
-                        Ok(r) => m.toast(
-                            ToastKind::Warning,
-                            format!("Sync hit conflicts in {} file(s); ask the agent to resolve them", r.files.len()),
-                        ),
-                        Err(e) => m.fail(e, cx),
-                    }
-                    m.refresh_threads(cx);
-                });
-            },
-        );
+        if let Some(w) = self.workspaces.iter().find(|w| w.threads.contains(&id.to_string())) {
+            self.run_workspace_action(w.id.clone(), "update".into(), String::new(), cx);
+        }
     }
 
     // ── projects ────────────────────────────────────────────────────────
@@ -987,8 +1102,15 @@ impl AppModel {
     }
 
     pub fn set_active_project(&mut self, root: String, cx: &mut Context<Self>) {
+        self.source_thread = None;
         self.active_project = Some(root);
+        self.refresh_project_status(false, cx);
+        self.active_workspace = None;
+        self.review = None;
+        self.review_open = false;
         self.selected = None;
+        self.prefs.temporary = false;
+        self.prefs.worktree = true;
         cx.notify();
     }
 

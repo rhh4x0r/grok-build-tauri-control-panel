@@ -267,6 +267,7 @@ impl SessionRegistry {
             acp_session_id: None,
             cwd: cwd.to_string(),
             worktree: opts.worktree.clone(),
+            read_only: opts.read_only,
             project_root: opts.project_root.clone(),
             model: model.clone(),
             backend,
@@ -347,6 +348,7 @@ impl SessionRegistry {
 
                     let mut client_cfg = AcpClientConfig::new(&resolved.program, cwd_path);
                     client_cfg.args = resolved.args.clone();
+                    client_cfg.read_only = opts.read_only;
                     // `grok agent --reasoning-effort <e> stdio`: the flag belongs
                     // to `agent`, so it goes before the `stdio` subcommand.
                     if backend == Backend::Grok {

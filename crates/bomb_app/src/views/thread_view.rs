@@ -5,7 +5,8 @@ use std::time::Instant;
 
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::Icon;
+use gpui_kit::component::{Icon, Sizable};
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
@@ -177,6 +178,8 @@ impl ThreadView {
         let hover = ui.hover;
         div()
             .size_full()
+            .min_w_0()
+            .overflow_hidden()
             .flex()
             .flex_col()
             .items_center()
@@ -191,7 +194,7 @@ impl ThreadView {
                     .items_center()
                     .gap_2()
                     .child(div().size(px(22.)).text_color(ui.text_muted).child(Icon::from(Lucide::Bomb)))
-                    .child(div().text_size(px(22.)).font_weight(FontWeight::MEDIUM).text_color(ui.text).child("How can I help?"))
+                    .child(div().text_size(px(22.)).font_weight(FontWeight::MEDIUM).text_color(ui.text).child(self.model.read(cx).active_workspace.as_deref().and_then(|id| self.model.read(cx).workspaces.iter().find(|w| w.id == id)).map(|w| format!("New conversation in {}", w.name)).unwrap_or_else(|| "How can I help?".into())))
                     .child(self.project_row(project, ui, cx)),
             ))
             .child(
@@ -284,7 +287,7 @@ impl ThreadView {
                         })
                     })
                     .child(div().size(px(12.)).child(Icon::from(if temporary { Lucide::SquareCheck } else { Lucide::Square })))
-                    .child("temporary chat (no worktree)"),
+                    .child("Inline · read-only"),
             )
     }
 
@@ -328,7 +331,7 @@ impl ThreadView {
             .flex()
             .items_center()
             .gap_2()
-            .h(px(Layout::HEADER))
+            .flex_wrap().min_h(px(Layout::HEADER)).py_1()
             .px_4()
             .child(
                 div()
@@ -343,6 +346,12 @@ impl ThreadView {
                     .child(if live { brain.unwrap_or_else(|| "live".into()) } else { "saved".into() }),
             )
             .child(div().flex_1())
+            .child(chip("new-workspace-thread", "+ Conversation".into(), ui).on_click({
+                let app = app.clone(); move |_, _, cx| app.update(cx, |m, cx| m.new_workspace_thread(cx))
+            }))
+            .when(!has_worktree, |el| el.child(chip("inline-convert", "Read-only · Create workspace to edit".into(), ui).on_click({
+                let app = app.clone(); move |_, _, cx| app.update(cx, |m, cx| m.workspace_from_inline(cx))
+            })))
             .when(has_worktree, |el| {
                 let app_land = app.clone();
                 let app_sync = app.clone();
@@ -354,14 +363,15 @@ impl ThreadView {
                         .text_xs()
                         .text_color(ui.text_faint)
                         .child(div().size(px(11.)).child(Icon::from(Lucide::GitBranch)))
-                        .child(branch.clone().unwrap_or_default()),
+                        .max_w(px(280.)).overflow_hidden().text_ellipsis().whitespace_nowrap()
+                        .child(self.model.read(cx).review.as_ref().map(|r| format!("{} · ↑{} ↓{} · {} files", r.branch, r.ahead, r.behind, r.files.len())).unwrap_or_else(|| branch.clone().unwrap_or_default())),
                 )
-                .child(chip("sync", "Sync".into(), ui).on_click(move |_, _, cx| {
+                .child(Button::new("workspace-update").ghost().small().label("Update").on_click(move |_, _, cx| {
                     if let Some(id) = id {
                         app_sync.update(cx, |m, cx| m.sync_thread(id, cx));
                     }
                 }))
-                .child(chip("land", "Land".into(), ui).on_click(move |_, _, cx| {
+                .child(Button::new("workspace-review").ghost().small().label("Review / Ship").on_click(move |_, _, cx| {
                     if let Some(id) = id {
                         app_land.update(cx, |m, cx| m.land_thread(id, cx));
                     }
@@ -393,9 +403,13 @@ impl Render for ThreadView {
         let Some(thread) = thread else {
             return div()
                 .size_full()
+                .min_w_0()
+                .overflow_hidden()
                 .flex()
                 .flex_col()
-                .child(div().flex_1().min_h_0().child(self.welcome(&ui, cx)))
+                .child(div().flex_1().min_h_0().child(if self.model.read(cx).active_project.is_some() && self.model.read(cx).active_workspace.is_none() && !self.model.read(cx).prefs.temporary {
+                    crate::views::workspaces::project_page(self.model.clone(), &ui, cx)
+                } else { self.welcome(&ui, cx).into_any_element() }))
                 .child(composer)
                 .into_any_element();
         };
@@ -419,6 +433,8 @@ impl Render for ThreadView {
 
         div()
             .size_full()
+            .min_w_0()
+            .overflow_hidden()
             .flex()
             .flex_col()
             .child(self.header(&thread, &ui, cx))

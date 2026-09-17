@@ -757,7 +757,7 @@ impl Render for ComposerView {
                                             })
                                         })
                                         .child(div().size(px(11.)).child(Icon::from(Lucide::GitBranch)))
-                                        .child(if worktree_on { "isolated worktree" } else { "shared checkout" }),
+                                        .child(if worktree_on { "new workspace" } else { "Inline · read-only" }),
                                 )
                             })
                             .child(div().flex_1())

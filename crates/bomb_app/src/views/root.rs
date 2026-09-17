@@ -23,6 +23,7 @@ pub struct RootView {
     sidebar: Entity<SidebarView>,
     thread: Entity<ThreadView>,
     preview: Entity<PreviewPanel>,
+    review: Entity<crate::views::workspaces::ReviewPanel>,
     focus: FocusHandle,
     sidebar_open: bool,
     preview_open: bool,
@@ -34,7 +35,9 @@ impl RootView {
         let sidebar = cx.new(|cx| SidebarView::new(model.clone(), window, cx));
         let thread = cx.new(|cx| ThreadView::new(model.clone(), window, cx));
         let preview = cx.new(|cx| PreviewPanel::new(model.clone(), cx));
+        let review = cx.new(|cx| crate::views::workspaces::ReviewPanel::new(model.clone(), cx));
         Self {
+            review,
             model,
             sidebar,
             thread,
@@ -157,6 +160,10 @@ impl Render for RootView {
             .on_action(cx.listener(move |_, _: &NewMockSession, _, cx| {
                 model.update(cx, |m, cx| m.new_mock_session(cx));
             }))
+            .on_action(cx.listener(|this, _: &crate::actions::NewWorkspaceConversation, window, cx| {
+                this.model.update(cx, |m, cx| m.new_workspace_thread(cx));
+                this.thread.update(cx, |t, cx| t.focus_composer(window, cx));
+            }))
             .on_action(cx.listener(move |this, _: &NewThread, window, cx| {
                 m2.update(cx, |m, cx| m.new_thread(cx));
                 this.thread.update(cx, |t, cx| t.focus_composer(window, cx));
@@ -183,6 +190,9 @@ impl Render for RootView {
                 this.thread.update(cx, |t, cx| t.toggle_search(window, cx));
             }))
             .on_action(cx.listener(|this, _: &ToggleDevPreview, _, cx| {
+                let from_review = this.model.read(cx).review_open;
+                this.model.update(cx, |m, cx| { m.review_open = false; cx.notify(); });
+                if from_review { this.preview_open = false; }
                 let running = this.model.read(cx).dev_server.as_ref().map(|s| s.running).unwrap_or(false);
                 if !this.preview_open {
                     this.preview_open = true;
@@ -221,7 +231,7 @@ impl Render for RootView {
                     window.open_alert_dialog(cx, move |dlg, _, _| {
                         let m = m.clone();
                         dlg.title("Delete this thread?")
-                            .description("Its transcript and worktree are removed. This cannot be undone.")
+                            .description("Its transcript is removed. The workspace and files are kept. This cannot be undone.")
                             .on_ok(move |_, _, cx| {
                                 m.update(cx, |a, cx| a.remove_thread(id, cx));
                                 true
@@ -246,7 +256,10 @@ impl Render for RootView {
                         )
                     })
                     .child(resizable_panel().child(self.thread.clone()))
-                    .when(self.preview_open, |el| {
+                    .when(self.model.read(cx).review_open, |el| {
+                        el.child(resizable_panel().size(px(480.)).size_range(px(320.)..px(1000.)).child(self.review.clone()))
+                    })
+                    .when(self.preview_open && !self.model.read(cx).review_open, |el| {
                         el.child(
                             resizable_panel()
                                 .size(px(520.))

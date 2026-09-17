@@ -19,6 +19,8 @@ pub struct SessionMetadata {
     pub acp_session_id: Option<String>,
     pub cwd: String,
     pub worktree: Option<String>,
+    #[serde(default)]
+    pub read_only: bool,
     /// Original project folder when cwd is a thread worktree.
     #[serde(default)]
     pub project_root: Option<String>,

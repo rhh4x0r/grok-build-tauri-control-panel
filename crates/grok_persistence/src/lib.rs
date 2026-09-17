@@ -3,6 +3,9 @@
 //! Survives app quit, reboot, and updates under:
 //! `~/.grok/control-panel/sessions/control_panel.db`
 
+pub mod workspaces;
+pub use workspaces::WorkspaceRecord;
+
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -159,6 +162,15 @@ impl Persistence {
                 ON transcripts(session_id, seq);
             CREATE INDEX IF NOT EXISTS idx_sessions_updated
                 ON sessions(updated_at DESC);
+            CREATE TABLE IF NOT EXISTS workspaces (
+                id TEXT PRIMARY KEY,
+                path TEXT NOT NULL UNIQUE,
+                data TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS session_workspaces (
+                session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+                workspace_id TEXT NOT NULL REFERENCES workspaces(id)
+            );
             CREATE TABLE IF NOT EXISTS kv (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL

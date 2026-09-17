@@ -261,3 +261,25 @@ cargo clippy --workspace --all-targets -- -D warnings → PASS
 - Removed the obsolete native `codex acp` reasoning-flag branch.
 - Validation: all 14 grok_config tests passed, including adapter discovery and override regression coverage; workspace check and strict all-target Clippy passed.
 - Cached codex-acp 1.12.0 successfully completed ACP initialize using an isolated temporary CODEX_HOME. Normal-home handshake was blocked by the task filesystem sandbox; no authenticated model turn was sent.
+
+## Projects and workspaces flow — 2026-09-17
+
+Approved defaults: automatic checkpoint commits, merge-based Update, and read-only Inline conversations with an explicit transition into an isolated workspace.
+
+### Implementation
+- Added durable workspace records and session membership, with idempotent migration of existing conversations. Conversation deletion keeps shared workspace files and history.
+- Added project sections, collapsible workspace conversation groups, project overview, workspace naming, and Cmd-Shift-N for a new conversation in the same workspace.
+- New workspaces use a `bomb/<prompt-slug>-<id>` branch based on the repository's default branch (remote tracking ref when available). Failed isolation no longer falls back to editing the project checkout.
+- Added automatic checkpoints after confirmed successful ACP turns, serialized workspace turns/Git operations, and explicit checkpoint failure reporting. Cancelled responses are invalidated; transport timeouts no longer report an active editing stream as idle.
+- Inline sessions deny writes, terminal creation, and permission escalation at the ACP host, use planning mode, and omit MCP attachments. Moving to a workspace carries conversation context forward.
+- Added Update, Changes/Preview navigation, branch/ahead/behind summaries, checkpoint restore, file revert, review comments, unpublished checkpoint squash with backup history, editable PR bodies, push/local merge, and archive that keeps branches and transcripts.
+- Added project remote status, manual fetch/pull, periodic fetch, and PR/check status through `gh`. Pull and local merge require a clean default-branch checkout; push/PR requires saved changes.
+- Kept the standalone Terminal tab as the plan's explicitly later item.
+
+### Audit and validation
+- Added persistence coverage for shared conversations, restart, archive, and deletion; Git default-branch and conflict-stage protection tests; read-only write denial even under an elevated approval stance; and workspace turn exclusion tests.
+- End-to-end local lifecycle test uses a mock agent and temporary repository: create workspace → checkpoint → reject overlapping work → share a second conversation → delete first conversation without deleting files → enforce Inline read-only → review → archive while retaining branch.
+- Lifecycle testing found and fixed macOS `/var` vs `/private/var` worktree path normalization during archive.
+- Visually checked the native development app: migrated project/workspace sidebar and project overview. Corrected non-Git folder labels and header wrapping.
+- Real remote push/PR creation was not exercised; no user repository was pushed or merged during verification.
+- Final gates: `cargo test --workspace` passed (122 tests, 2 existing opt-in tests ignored); `cargo check --workspace`, strict all-target Clippy, and development app build passed. Final UI-only layout edits were rechecked with check/Clippy/build.

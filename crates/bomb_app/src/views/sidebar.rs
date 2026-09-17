@@ -23,6 +23,8 @@ pub struct SidebarView {
     search: Entity<InputState>,
     /// Keyboard cursor through the filtered list.
     active_ix: usize,
+    collapsed: std::collections::HashSet<String>,
+    expanded: std::collections::HashSet<String>,
 }
 
 /// Recency bucket for thread search results.
@@ -41,7 +43,7 @@ fn recency_group(iso: &str) -> &'static str {
 impl SidebarView {
     pub fn new(model: Entity<AppModel>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe(&model, |_, _, cx| cx.notify()).detach();
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search threads"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search projects and conversations"));
         cx.subscribe(&search, |this, _, ev: &gpui_kit::component::input::InputEvent, cx| {
             match ev {
                 gpui_kit::component::input::InputEvent::Change => {
@@ -55,7 +57,7 @@ impl SidebarView {
             }
         })
         .detach();
-        Self { model, search, active_ix: 0 }
+        Self { model, search, active_ix: 0, collapsed: Default::default(), expanded: Default::default() }
     }
 
     fn query(&self, cx: &App) -> String {
@@ -73,7 +75,8 @@ impl SidebarView {
             .filter(|(_, t)| {
                 let t = t.read(cx);
                 let hay = format!(
-                    "{} {} {} {}",
+                    "{} {} {} {} {}",
+                    m.workspaces.iter().find(|w| w.threads.contains(&t.meta.id)).map(|w| format!("{} {}", w.name, w.branch)).unwrap_or_default(),
                     t.title(),
                     project_name(t.meta.project_root.as_deref().unwrap_or(&t.meta.cwd)),
                     t.meta.model,
@@ -163,19 +166,65 @@ impl SidebarView {
     }
 
     fn group(&self, g: &ProjectGroup, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
-        let selected = self.model.read(cx).selected;
-        let rows: Vec<(Uuid, Entity<ThreadModel>)> = {
-            let m = self.model.read(cx);
-            g.threads
-                .iter()
-                .filter_map(|id| m.threads.get(id).cloned().map(|t| (*id, t)))
-                .collect()
-        };
-        let name = g.name.clone();
-        div().flex().flex_col().children(
-            rows.into_iter()
-                .map(|(id, t)| self.thread_row(id, &t, &name, selected == Some(id), ui, cx)),
-        )
+        let collapsed = self.collapsed.contains(&g.root);
+        let root = g.root.clone(); let root2 = root.clone();
+        let app = self.model.clone(); let add = app.clone(); let add_root = root.clone();
+        let rows: Vec<_> = self.model.read(cx).workspaces.iter().filter(|w| w.project_root == root).cloned().collect();
+        let mut group = div().flex().flex_col().gap_1().child(
+            div().flex().items_center().px_3().py_2().gap_2()
+                .child(Button::new(SharedString::from(format!("collapse-{root}"))).ghost().xsmall().label(if collapsed { "▸" } else { "▾" }).on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.collapsed.remove(&root2) { this.collapsed.insert(root2.clone()); } cx.notify();
+                })))
+                .child(div().id(SharedString::from(format!("project-{root}"))).flex_1().text_sm().cursor_pointer().child(g.name.clone()).on_click(move |_, _, cx| app.update(cx, |m, cx| m.set_active_project(root.clone(), cx))))
+                .child(Button::new(SharedString::from(format!("new-{}", g.root))).ghost().xsmall().label("+").on_click(move |_, _, cx| add.update(cx, |m, cx| { m.set_active_project(add_root.clone(), cx); m.new_thread(cx); })))
+        );
+        if let Some(status) = self.model.read(cx).project_status.get(&g.root) {
+            group = group.child(div().px_4().text_xs().text_color(ui.text_faint).child(if status.error.is_some() { "Folder · read-only questions".into() } else { format!("{} · ↑{} ↓{}{}", status.branch, status.ahead, status.behind, if status.dirty { " · uncommitted" } else { "" }) }));
+        }
+        if collapsed { return group; }
+        for archived in [false, true] {
+            let archived_key = format!("archived:{}", g.root);
+            let archive_open = self.expanded.contains(&archived_key);
+            if archived && rows.iter().any(|w| w.archived_at.is_some()) {
+                group = group.child(Button::new(SharedString::from(archived_key.clone())).ghost().small().label(if archive_open { "▾ Archived" } else { "▸ Archived" }).on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.expanded.remove(&archived_key) { this.expanded.insert(archived_key.clone()); } cx.notify();
+                })));
+            }
+            if archived && !archive_open { continue; }
+            for w in rows.iter().filter(|w| !w.inline && w.archived_at.is_some() == archived) {
+                let app = self.model.clone(); let wid = w.id.clone();
+                let active = self.model.read(cx).active_workspace.as_deref() == Some(&w.id);
+                let title = w.name.clone(); let menu_model = self.model.clone(); let menu_id = wid.clone();
+                let count = w.threads.len(); let expanded = self.expanded.contains(&wid);
+                let status = w.threads.iter().filter_map(|t| Uuid::parse_str(t).ok()).filter_map(|t| self.model.read(cx).threads.get(&t)).map(|t| t.read(cx).meta.status.clone()).find(|s| matches!(s.as_str(), "running" | "waiting_approval" | "failed")).unwrap_or_else(|| "idle".into());
+                let dot = match status.as_str() { "running" => ui.accent, "waiting_approval" => ui.warning, "failed" => ui.danger, _ => ui.text_faint };
+                group = group.child(div().id(SharedString::from(format!("workspace-{wid}"))).mx_2().px_3().py_2().rounded(px(8.)).cursor_pointer().when(active, |el| el.bg(ui.active)).hover(|s| s.bg(ui.hover))
+                    .on_click(move |_, _, cx| app.update(cx, |m, cx| m.open_workspace(wid.clone(), cx)))
+                    .context_menu(move |menu, _, _| {
+                        let app = menu_model.clone(); let wid = menu_id.clone(); let name = title.clone();
+                        menu.item(PopupMenuItem::new("Rename workspace…").on_click(move |_, window, cx| crate::views::workspaces::text_action(app.clone(), wid.clone(), "rename", "Workspace name", name.clone(), window, cx)))
+                    })
+                    .child(div().flex().gap_2().items_center().child(div().size(px(6.)).rounded_full().bg(dot)).child(div().text_sm().child(w.name.clone())))
+                    .child(div().text_xs().text_color(ui.text_faint).child(w.branch.clone())));
+                if count > 1 {
+                    let wid = w.id.clone();
+                    group = group.child(Button::new(SharedString::from(format!("threads-{wid}"))).ghost().xsmall().label(format!("{} {count} conversations", if expanded { "▾" } else { "▸" })).on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.expanded.remove(&wid) { this.expanded.insert(wid.clone()); } cx.notify();
+                    })));
+                    if expanded {
+                        for id in &w.threads {
+                            if let Ok(id) = Uuid::parse_str(id) {
+                                if let Some(t) = self.model.read(cx).threads.get(&id).cloned() {
+                                    group = group.child(self.thread_row(id, &t, "", self.model.read(cx).selected == Some(id), ui, cx));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let app = self.model.clone(); let root = g.root.clone();
+        group.child(Button::new(SharedString::from(format!("inline-{root}"))).ghost().small().label("Inline · read-only").on_click(move |_, _, cx| app.update(cx, |m, cx| m.inline_project(root.clone(), cx))))
     }
 
     fn thread_row(
@@ -250,11 +299,11 @@ impl SidebarView {
                 }));
                 if has_worktree {
                     let m = menu_model.clone();
-                    menu = menu.item(PopupMenuItem::new("Sync from project branch").on_click(move |_, _, cx| {
+                    menu = menu.item(PopupMenuItem::new("Update from main").on_click(move |_, _, cx| {
                         m.update(cx, |a, cx| a.sync_thread(id, cx));
                     }));
                     let m = menu_model.clone();
-                    menu = menu.item(PopupMenuItem::new("Land into project branch").on_click(move |_, _, cx| {
+                    menu = menu.item(PopupMenuItem::new("Review / Ship…").on_click(move |_, _, cx| {
                         m.update(cx, |a, cx| a.land_thread(id, cx));
                     }));
                 }
@@ -272,7 +321,7 @@ impl SidebarView {
                     window.open_alert_dialog(cx, move |dlg, _, _| {
                         let m = m.clone();
                         dlg.title("Delete this thread?")
-                            .description("Its transcript and worktree are removed. This cannot be undone.")
+                            .description("Its transcript is removed. The workspace and files are kept. This cannot be undone.")
                             .on_ok(move |_, _, cx| {
                                 m.update(cx, |a, cx| a.remove_thread(id, cx));
                                 true
@@ -513,6 +562,7 @@ impl Render for SidebarView {
                 }
             }))
             .child(self.header(&ui, cx))
+            .child(Button::new("open-project-sidebar").ghost().small().label("+ Open project…").on_click({ let app = self.model.clone(); move |_, _, cx| app.update(cx, |m, cx| m.open_project(cx)) }))
             .child(div().px_3().pb_2().child(Input::new(&self.search).cleanable(true).appearance(true)))
             .child(
                 div()

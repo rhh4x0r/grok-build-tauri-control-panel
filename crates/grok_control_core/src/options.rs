@@ -44,6 +44,9 @@ pub struct SpawnOptions {
     pub trust_repo: bool,
     /// Give this thread its own git worktree when the project is a repo.
     pub isolate_worktree: bool,
+    pub workspace_id: Option<String>,
+    pub read_only: bool,
+    pub source_thread: Option<String>,
     /// The real project folder (thread cwd may be a worktree derived from it).
     pub project_root: Option<String>,
     /// Reasoning effort (low | medium | high) for backends that take one;
@@ -74,6 +77,9 @@ impl Default for SpawnOptions {
             permission_deny: Vec::new(),
             trust_repo: false,
             isolate_worktree: true,
+            workspace_id: None,
+            read_only: false,
+            source_thread: None,
             project_root: None,
             effort: None,
         }

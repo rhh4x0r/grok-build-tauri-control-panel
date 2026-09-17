@@ -1,5 +1,7 @@
 //! Service layer: every former Tauri command as a plain async fn over `&AppState`.
 
+pub mod workspaces;
+
 use std::path::PathBuf;
 
 use chrono::Utc;
@@ -444,57 +446,65 @@ pub async fn start_session(
         opts.mcp_server_names = resolution.attached_names;
         mcp_skipped = resolution.skipped;
     }
-    // Thread-per-worktree isolation: give this thread its own checkout so
-    // parallel threads on the same project can't overwrite each other.
+    let _gate = state.workspace_gate.lock().await;
     let id = Uuid::new_v4();
-    let mut isolation_note: Option<String> = None;
     let requested_cwd = cwd.clone();
     let mut spawn_cwd = cwd.clone();
-    if opts.isolate_worktree && opts.mode == grok_control_core::AgentMode::Acp {
-        if grok_worktree::is_git_repo(std::path::Path::new(&cwd)).await {
-            let short = &id.to_string()[..8];
-            match state
-                .worktrees
-                .create(
-                    std::path::Path::new(&cwd),
-                    CreateWorktreeRequest {
-                        name: format!("t-{short}"),
-                        base_ref: None,
-                        prefer_grok_cli: false,
-                    },
-                )
-                .await
-            {
-                Ok(wt) => {
-                    spawn_cwd = wt.path.display().to_string();
-                    opts.worktree = Some(wt.name.clone());
-                    opts.project_root = Some(requested_cwd.clone());
-                    isolation_note = Some(format!(
-                        "🌱 isolated worktree · branch {} · {}",
-                        wt.branch.as_deref().unwrap_or("?"),
-                        wt.path.display()
-                    ));
-                }
-                Err(e) => {
-                    isolation_note = Some(format!(
-                        "⚠ worktree isolation unavailable ({e}) — thread shares the project folder"
-                    ));
-                }
-            }
-        } else {
-            isolation_note =
-                Some("not a git repo — thread works directly in the folder".into());
+    let mut isolation_note = None;
+    let mut workspace_record = None;
+    if let Some(wid) = opts.workspace_id.clone() {
+        let w = workspaces::workspace(state, &wid)?;
+        if w.archived_at.is_some() { return Err("This workspace is archived".into()); }
+        workspaces::ensure_idle(state, &w)?;
+        spawn_cwd = w.path.clone();
+        opts.project_root = Some(w.project_root.clone());
+        opts.isolate_worktree = false;
+        opts.worktree = if w.inline { None } else { Some(w.name.clone()) };
+        opts.read_only = w.inline;
+        workspace_record = Some(w);
+    } else if opts.mode == grok_control_core::AgentMode::Acp {
+        let root = std::path::Path::new(&cwd);
+        if !root.is_absolute() || !root.is_dir() { return Err("Choose an existing absolute project folder".into()); }
+        let inline = !opts.isolate_worktree;
+        if !inline && !grok_worktree::is_git_repo(root).await {
+            return Err("Create a Git repository before starting a workspace, or choose Inline to ask read-only questions".into());
         }
+        let base = workspaces::workspace_base(root).await.unwrap_or_else(|_| "HEAD".into());
+        let name = opts.prompt.as_deref().map(prompt_slug).filter(|s| !s.is_empty()).unwrap_or_else(|| "New workspace".into());
+        let branch;
+        if !inline {
+            let slug: String = name.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).take(35).collect();
+            let wt = state.worktrees.create(root, CreateWorktreeRequest {
+                name: format!("{}-{}", slug.trim_matches('-'), &id.to_string()[..8]), base_ref: Some(base.clone()), prefer_grok_cli: false,
+            }).await.map_err(|e| format!("Could not create workspace: {e}. The project folder was not changed."))?;
+            spawn_cwd = wt.path.display().to_string();
+            branch = wt.branch.unwrap_or_default();
+            opts.worktree = Some(wt.name);
+            isolation_note = Some(format!("Workspace created · {branch} · automatic checkpoints on"));
+        } else {
+            branch = state.worktrees.current_branch(root).await.unwrap_or_default();
+            opts.read_only = true;
+        }
+        opts.project_root = Some(cwd.clone());
+        let existing = state.persistence.list_workspaces().map_err(err)?.into_iter().find(|w| w.path == spawn_cwd);
+        workspace_record = Some(existing.unwrap_or(grok_persistence::WorkspaceRecord {
+            id: Uuid::new_v4().to_string(), project_root: cwd.clone(), name: if inline { "Inline (read-only)".into() } else { name },
+            path: spawn_cwd.clone(), branch, base_ref: base, created_at: Utc::now().to_rfc3339(), archived_at: None, inline, threads: vec![],
+        }));
     }
+    if opts.read_only { enforce_inline(&mut opts); }
+    if opts.mode == grok_control_core::AgentMode::Acp { opts.prompt = None; }
 
     // Durable memory rides along: global notes + this project's notes are
     // injected with the thread's first prompt.
     let memory_context = build_memory_context(state, &requested_cwd).await;
+    let source_id = opts.source_thread.as_deref().and_then(|id| Uuid::parse_str(id).ok());
     let connect_opts = grok_control_core::ConnectOpts {
         resume_acp_session_id: None,
-        transcript_context: None,
+        transcript_context: source_id.and_then(|source| build_transcript_context(state, source)),
         memory_context,
     };
+    if let Some(w) = &workspace_record { state.persistence.save_workspace(w).map_err(err)?; }
     state
         .registry
         .spawn_agent_preallocated(id, &spawn_cwd, opts, connect_opts)
@@ -522,6 +532,15 @@ pub async fn start_session(
     }
     let _ = state.persistence.set_kv("last_cwd", &cwd);
     persist_session(state, id).await;
+    if let Some(source) = source_id {
+        for entry in state.persistence.transcript_entries(source).map_err(err)? {
+            let _ = state.persistence.append_message(id, &entry.role, entry.body, Utc::now());
+        }
+    }
+    if let Some(w) = workspace_record {
+        state.persistence.save_workspace(&w).map_err(err)?;
+        state.persistence.attach_workspace(id, &w.id).map_err(err)?;
+    }
     Ok(SessionIdResponse {
         id: id.to_string(),
     })
@@ -624,6 +643,12 @@ pub async fn send_prompt(
     images: Option<Vec<ImageInput>>,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
+    let _gate = state.workspace_gate.lock().await;
+    let workspace = state.persistence.workspace_for_session(id).map_err(err)?;
+    if let Some(w) = &workspace {
+        if w.archived_at.is_some() { return Err("This workspace is archived".into()); }
+        workspaces::ensure_idle(state, w)?;
+    }
     let images = images.unwrap_or_default();
 
     let want_backend = backend.as_deref().and_then(grok_config::Backend::from_key);
@@ -642,7 +667,8 @@ pub async fn send_prompt(
         let model_changed = want_model
             .as_deref()
             .is_some_and(|m| !m.eq_ignore_ascii_case(&cur.model) && cur.model != "mock");
-        if backend_changed || (model_changed && cur.mode == grok_control_core::AgentMode::Acp) {
+        let needs_read_only = workspace.as_ref().is_some_and(|w| w.inline) && !cur.read_only;
+        if needs_read_only || backend_changed || (model_changed && cur.mode == grok_control_core::AgentMode::Acp) {
             let label = format!(
                 "🔀 switching to {} · {} — prior chat carries over as context",
                 want_backend.unwrap_or(cur.backend).key(),
@@ -738,11 +764,47 @@ pub async fn send_prompt(
             data: i.data.clone(),
         })
         .collect();
+    let mut completion = state.event_bus.subscribe();
+    let turn_guard = workspace.as_ref().map(|w| workspaces::WorkspaceTurn::new(state.workspace_turns.clone(), &w.id)).transpose()?;
     state
         .registry
         .send_prompt_with_images(id, &prompt, &acp_images)
         .await
         .map_err(err)?;
+    if let Some(w) = workspace.filter(|w| !w.inline) {
+        let manager = state.worktrees.clone();
+        let db = state.persistence.clone();
+        let bus = state.event_bus.clone();
+        let gate = state.workspace_gate.clone();
+        let summary = prompt_slug(&prompt);
+        tokio::spawn(async move {
+            let _turn_guard = turn_guard;
+            let mut completed = false;
+            loop {
+                match completion.recv().await {
+                    Ok(ControlEvent::Raw { session_id: Some(sid), payload }) if sid == id && payload.get("turn_complete").and_then(|v| v.as_bool()) == Some(true) => { completed = true; }
+                    Ok(ControlEvent::SessionStatusChanged { session_id, status, .. }) if session_id == id && matches!(status, grok_events::SessionStatus::Idle | grok_events::SessionStatus::Failed | grok_events::SessionStatus::Cancelled) => {
+                        let _guard = gate.lock().await;
+                        if completed && status == grok_events::SessionStatus::Idle {
+                            let message = format!("{}\n\nBomb-Thread: {id}", summary);
+                            match manager.commit_all(std::path::Path::new(&w.path), &message).await {
+                                Ok(true) => {
+                                    let note = format!("Checkpoint saved: {summary}");
+                                    let _ = db.append_message(id, "system", &note, Utc::now());
+                                    bus.emit(ControlEvent::Raw { session_id: Some(id), payload: serde_json::json!({"channel":"thread", "kind":"checkpoint", "line":note}) });
+                                }
+                                Ok(false) => {},
+                                Err(e) => bus.emit_error(Some(id), format!("Checkpoint failed; your files are still saved: {e}")),
+                            }
+                        }
+                        break;
+                    }
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
+                    Err(_) => break,
+                }
+            }
+        });
+    }
     // User message — durable immediately (agent side streams via event bus).
     // Note in the transcript that images rode along, so a reloaded thread does
     // not read as if only text was sent.
@@ -882,6 +944,9 @@ async fn resume_saved_session(
         memory_context: build_memory_context(state, &memory_root).await,
     };
 
+    if state.persistence.workspace_for_session(id).map_err(err)?.is_some_and(|w| w.inline) {
+        enforce_inline(&mut opts);
+    }
     let brain = state
         .registry
         .resume_session(id, &rec.cwd, opts, Some(rec.created_at), connect_opts)
@@ -1016,7 +1081,7 @@ pub async fn remove_session(
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
     // Capture worktree context before the records disappear.
-    let wt_ctx = if remove_worktree.unwrap_or(false) {
+    let wt_ctx = if remove_worktree.unwrap_or(false) && state.persistence.workspace_for_session(id).map_err(err)?.is_none() {
         thread_worktree_context(state, id).await.ok()
     } else {
         None
@@ -1045,6 +1110,9 @@ pub async fn set_plan_mode(
     enabled: bool,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
+    if !enabled && state.persistence.workspace_for_session(id).map_err(err)?.is_some_and(|w| w.inline) {
+        return Err("Inline is read-only. Create a workspace to make changes.".into());
+    }
     state
         .registry
         .set_plan_mode(id, enabled)
@@ -1115,6 +1183,9 @@ pub async fn set_approval_mode(
     mode: String,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
+    if mode != "plan" && state.persistence.workspace_for_session(id).map_err(err)?.is_some_and(|w| w.inline) {
+        return Err("Inline is read-only. Create a workspace to make changes.".into());
+    }
     let mode = match mode.to_lowercase().as_str() {
         "plan" => grok_control_core::ApprovalMode::Plan,
         "auto" => grok_control_core::ApprovalMode::Auto,
@@ -1163,6 +1234,10 @@ pub async fn set_always_approve(
     enabled: bool,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
+    if enabled && state.persistence.workspace_for_session(id).map_err(err)?.is_some_and(|w| w.inline) {
+        return Err("Inline is read-only. Create a workspace to make changes.".into());
+    }
+
     state
         .registry
         .set_always_approve(id, enabled)
@@ -2362,4 +2437,16 @@ pub async fn reveal_project(
 ) -> Result<(), String> {
     let path = resolve_preview_cwd(state, cwd, session_id)?;
     crate::devserver::DevServerManager::reveal_project(&path).await
+}
+
+fn enforce_inline(opts: &mut SpawnOptions) {
+    opts.read_only = true;
+    opts.approval_mode = Some(grok_control_core::ApprovalMode::Plan);
+    opts.plan_mode = true;
+    opts.always_approve = false;
+    opts.sandbox_profile = Some("read-only".into());
+    opts.mcp_servers.clear();
+    opts.mcp_server_names.clear();
+    opts.include_auto_mcp = false;
+    opts.permission_deny.push("*".into());
 }

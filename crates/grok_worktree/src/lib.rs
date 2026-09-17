@@ -32,7 +32,7 @@ pub enum WorktreeError {
 pub type Result<T> = std::result::Result<T, WorktreeError>;
 
 /// Provider-neutral branch prefix for thread worktrees.
-pub const THREAD_BRANCH_PREFIX: &str = "thread/";
+pub const THREAD_BRANCH_PREFIX: &str = "bomb/";
 
 /// Outcome of a merge attempt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,19 +122,20 @@ impl WorktreeManager {
         let branch = format!("{THREAD_BRANCH_PREFIX}{}", req.name);
         let base = req.base_ref.as_deref().unwrap_or("HEAD");
 
-        // Create branch from base if needed, then worktree
-        let _ = run_git(repo, &["branch", &branch, base]).await;
         run_git(
             repo,
             &[
                 "worktree",
                 "add",
-                path.to_str().unwrap_or_default(),
+                "-b",
                 &branch,
+                path.to_str().unwrap_or_default(),
+                base,
             ],
         )
         .await?;
 
+        let path = std::fs::canonicalize(&path)?;
         let head = run_git(&path, &["rev-parse", "HEAD"])
             .await
             .ok()
@@ -176,9 +177,11 @@ impl WorktreeManager {
         }
 
         let list = self.list_git(repo).await?;
+        let canonical = std::fs::canonicalize(path_or_name).ok();
         let target = list
             .iter()
-            .find(|w| w.name == path_or_name || w.path.to_string_lossy() == path_or_name)
+            .find(|w| w.name == path_or_name || w.path.to_string_lossy() == path_or_name
+                || canonical.as_ref().is_some_and(|p| std::fs::canonicalize(&w.path).ok().as_ref() == Some(p)))
             .ok_or_else(|| WorktreeError::NotFound(path_or_name.to_string()))?;
 
         let mut args = vec!["worktree", "remove"];
@@ -200,6 +203,9 @@ impl WorktreeManager {
     /// Stage and commit everything in `path`. Returns false when there was
     /// nothing to commit.
     pub async fn commit_all(&self, path: &Path, message: &str) -> Result<bool> {
+        if !run_git(path, &["diff", "--name-only", "--diff-filter=U"]).await?.trim().is_empty() {
+            return Err(WorktreeError::Git("Resolve and stage merge conflicts before saving a checkpoint".into()));
+        }
         run_git(path, &["add", "-A"]).await?;
         if self.is_clean(path).await? {
             return Ok(false);
@@ -292,15 +298,17 @@ pub async fn is_git_repo(path: &Path) -> bool {
     )
 }
 
-async fn run_git(cwd: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
+pub async fn run_git(cwd: &Path, args: &[&str]) -> Result<String> {
+    let output = tokio::time::timeout(std::time::Duration::from_secs(60), Command::new("git")
         .args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
-        .await?;
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .kill_on_drop(true)
+        .output())
+        .await.map_err(|_| WorktreeError::Git("Git operation timed out".into()))??;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         return Err(WorktreeError::Git(stderr));
@@ -494,6 +502,9 @@ locked
             other => panic!("expected sync conflicts, got {other:?}"),
         }
         assert!(!mgr.is_clean(&wt.path).await.unwrap());
+        assert!(mgr.commit_all(&wt.path, "must not stage conflict markers").await.is_err());
+        let conflicts = run_git(&wt.path, &["diff", "--name-only", "--diff-filter=U"]).await.unwrap();
+        assert_eq!(conflicts.trim(), "a.txt");
     }
 
     #[tokio::test]

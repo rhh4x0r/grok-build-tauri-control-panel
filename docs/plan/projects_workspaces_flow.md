@@ -1,6 +1,6 @@
 # Projects, workspaces and git: a deliberate flow
 
-**Status:** proposal for review (2026-09-17). Nothing here is implemented yet.
+**Status:** approved for implementation (2026-09-17). See IMPLEMENTATION_LOG.md for delivery and validation.
 
 ## 1. What's wrong today
 
@@ -129,8 +129,10 @@ Safety:
 4. **Remote** (medium): fetch loop, PR chips, Push/PR via `gh`, merged-detection and archive.
 5. **Terminal tab** (later).
 
-Open questions for you:
+Approved defaults:
 
-- Should checkpoint commits be on by default? (Recommended yes; they make Review and Revert possible.)
-- Merge or rebase for **Update** by default? (Recommended merge; agents handle merge conflicts more reliably than rebase sequences.)
-- Do you want the Inline (main) workspace to allow edits at all?
+- Automatic checkpoint commits are on for isolated workspaces. Failed checkpoints are surfaced; files remain saved.
+- **Update** merges the fetched default branch. Rebase is not the default.
+- **Inline** is read-only. Creating a workspace carries the conversation context forward; edits never silently fall back to the main checkout.
+- Multiple conversations may share a workspace; agent turns and Git actions are serialized to protect checkpoints.
+- The Terminal tab remains the later rollout item listed above.

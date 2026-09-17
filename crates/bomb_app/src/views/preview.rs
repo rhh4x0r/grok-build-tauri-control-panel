@@ -3,6 +3,8 @@
 
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::Icon;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::Sizable;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -94,6 +96,9 @@ impl Render for PreviewPanel {
             .flex_col()
             .border_l_1()
             .border_color(ui.border)
+            .child(Button::new("preview-changes-tab").ghost().small().label("Changes").on_click({
+                let app = app.clone(); move |_, _, cx| app.update(cx, |m, cx| { m.review_open = true; m.refresh_review(cx); cx.notify(); })
+            }))
             .child(
                 div()
                     .flex()

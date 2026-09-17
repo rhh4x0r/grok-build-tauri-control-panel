@@ -162,6 +162,7 @@ pub struct AcpClientConfig {
     pub skip_auth_when_unadvertised: bool,
     /// Short label for logs/errors ("grok", "claude", "codex").
     pub backend_label: String,
+    pub read_only: bool,
 }
 
 impl AcpClientConfig {
@@ -186,6 +187,7 @@ impl AcpClientConfig {
             ],
             skip_auth_when_unadvertised: false,
             backend_label: "grok".into(),
+            read_only: false,
         }
     }
 }
@@ -199,6 +201,7 @@ struct PendingPermission {
 }
 
 pub struct AcpClient {
+    turn_generation: Arc<std::sync::atomic::AtomicU64>,
     config: AcpClientConfig,
     child: Mutex<Option<Child>>,
     transport: RwLock<Option<Arc<NdjsonTransport>>>,
@@ -355,6 +358,7 @@ impl AcpClient {
         let default_cwd = config.cwd.clone();
         let client = Arc::new(Self {
             config,
+            turn_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             child: Mutex::new(Some(child)),
             transport: RwLock::new(Some(transport)),
             session_id: RwLock::new(None),
@@ -425,6 +429,7 @@ impl AcpClient {
         let config = AcpClientConfig::new("/bin/true", "/tmp");
         Arc::new(Self {
             config,
+            turn_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             child: Mutex::new(None),
             transport: RwLock::new(None),
             session_id: RwLock::new(Some(session_id.to_string())),
@@ -490,7 +495,7 @@ impl AcpClient {
             ClientCapabilities {
                 fs: FsCapabilities {
                     read_text_file: true,
-                    write_text_file: true,
+                    write_text_file: !self.config.read_only,
                 },
                 terminal: true,
             },
@@ -1154,6 +1159,7 @@ impl AcpClient {
                         bus.emit(say(word));
                         sleep(Duration::from_millis(25)).await;
                     }
+                    bus.emit(ControlEvent::Raw { session_id: Some(sid), payload: json!({"turn_complete":true}) });
                     bus.emit_status(sid, SessionStatus::Idle).await;
                 });
             }
@@ -1227,9 +1233,13 @@ impl AcpClient {
         let bus = self.event_bus.clone();
         let control_id = self.control_session_id;
         let prompt_timeout = self.config.prompt_timeout;
+        let generation = self.turn_generation.clone();
+        let turn = generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
 
         tokio::spawn(async move {
-            match tokio::time::timeout(prompt_timeout, rx).await {
+            let response = tokio::time::timeout(prompt_timeout, rx).await;
+            if generation.load(std::sync::atomic::Ordering::SeqCst) != turn { return; }
+            match response {
                 Ok(Ok(resp)) => match NdjsonTransport::unwrap_response(resp) {
                     Ok(result) => {
                         info!("session/prompt completed");
@@ -1245,6 +1255,7 @@ impl AcpClient {
                                     "channel": "term",
                                     "stream": "acp",
                                     "line": format!("← session/prompt complete · stopReason={stop}"),
+                                    "turn_complete": stop != "cancelled",
                                 }),
                             });
                             bus.emit_status(control_id, SessionStatus::Idle).await;
@@ -1285,8 +1296,9 @@ impl AcpClient {
                                 ),
                             }),
                         });
-                        // Don't leave the thread pinned on "running" forever.
-                        bus.emit_status(control_id, SessionStatus::Idle).await;
+                        // The stream may still be editing files. Keep the turn
+                        // active until completion or explicit cancellation; an
+                        // idle signal here could checkpoint a partial edit.
                     }
                 }
             }
@@ -1310,6 +1322,7 @@ impl AcpClient {
     }
 
     pub async fn cancel(&self) -> Result<()> {
+        self.turn_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // Cancelled turns must resolve pending permission requests (ACP spec).
         self.drain_pending_permissions().await;
         // Mock / offline clients have no transport — treat cancel as local status update.
@@ -1574,6 +1587,15 @@ impl AcpClient {
         let transport = self.transport().await?;
         let method = req.method.as_str();
         info!(%method, "ACP agent→client request");
+        if self.config.read_only {
+            if matches!(method, "session/request_permission" | "session/requestPermission") {
+                return transport.send_response(req.id, json!({"outcome": {"outcome": "cancelled"}})).await;
+            }
+            if matches!(method, "fs/write_text_file" | "fs/writeTextFile" | "terminal/create") {
+                return transport.send_error_response(req.id, -32000, "Inline is read-only. Create a workspace to make changes.").await;
+            }
+        }
+
 
         match method {
             "fs/read_text_file" | "fs/readTextFile" => {
@@ -1988,6 +2010,7 @@ impl AcpClient {
     }
 
     async fn fs_write_text(&self, params: &Option<Value>) -> Result<()> {
+        if self.config.read_only { return Err(AcpError::Protocol("Inline is read-only. Create a workspace to make changes.".into())); }
         let p = params.as_ref().ok_or_else(|| AcpError::Protocol("missing params".into()))?;
         let path = p
             .get("path")
@@ -2872,6 +2895,20 @@ impl AcpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn inline_cannot_write_even_if_approval_mode_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("main.txt");
+        std::fs::write(&file, "original").unwrap();
+        let mut client = AcpClient::mock_for_tests("inline", None);
+        let c = Arc::get_mut(&mut client).unwrap();
+        c.config.cwd = dir.path().to_path_buf();
+        c.config.read_only = true;
+        c.always_approve.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(client.fs_write_text(&Some(json!({"path":file,"content":"changed"}))).await.is_err());
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "original");
+    }
 
     #[tokio::test]
     async fn mock_client_has_session() {
