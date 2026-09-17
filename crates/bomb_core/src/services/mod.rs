@@ -1,6 +1,7 @@
 //! Service layer: every former Tauri command as a plain async fn over `&AppState`.
 
 pub mod workspaces;
+pub mod project_overview;
 
 use std::path::PathBuf;
 
@@ -1202,12 +1203,21 @@ pub async fn set_approval_mode(
         "ask" | "default" => grok_control_core::ApprovalMode::Ask,
         other => return Err(format!("unknown approval mode: {other}")),
     };
-    state
-        .registry
-        .set_approval_mode(id, mode)
-        .await
-        .map_err(err)?;
-    persist_session(state, id).await;
+    if state.registry.is_live(id) {
+        state.registry.set_approval_mode(id, mode).await.map_err(err)?;
+        persist_session(state, id).await;
+    } else {
+        let mut record = state.persistence.get_session(id).map_err(err)?;
+        let mut snapshot: serde_json::Value = serde_json::from_str(&record.metadata_json).map_err(err)?;
+        let metadata = snapshot.get_mut("metadata").and_then(serde_json::Value::as_object_mut)
+            .ok_or("Saved thread metadata is missing")?;
+        metadata.insert("approvalMode".into(), serde_json::to_value(mode).map_err(err)?);
+        metadata.insert("planMode".into(), (mode == grok_control_core::ApprovalMode::Plan).into());
+        metadata.insert("alwaysApprove".into(), (mode == grok_control_core::ApprovalMode::Yolo).into());
+        record.metadata_json = serde_json::to_string(&snapshot).map_err(err)?;
+        record.updated_at = Utc::now();
+        state.persistence.upsert_session(&record).map_err(err)?;
+    }
     Ok(())
 }
 

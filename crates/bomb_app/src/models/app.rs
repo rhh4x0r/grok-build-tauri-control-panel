@@ -76,6 +76,9 @@ pub struct AppModel {
     pub projects: Vec<String>,
     pub workspaces: Vec<grok_persistence::WorkspaceRecord>,
     pub project_status: HashMap<String, bomb_core::services::workspaces::ProjectStatus>,
+    pub project_overviews: HashMap<String, Result<bomb_core::services::project_overview::ProjectOverview, String>>,
+    pub overview_loading: HashSet<String>,
+    pub overview_branch: Option<String>,
     pub active_workspace: Option<String>,
     pub source_thread: Option<String>,
     pub review: Option<bomb_core::services::workspaces::WorkspaceReview>,
@@ -114,6 +117,9 @@ impl AppModel {
             projects: Vec::new(),
             workspaces: Vec::new(),
             project_status: HashMap::new(),
+            project_overviews: HashMap::new(),
+            overview_loading: HashSet::new(),
+            overview_branch: None,
             active_workspace: None,
             source_thread: None,
             review: None,
@@ -144,6 +150,21 @@ impl AppModel {
         this
     }
 
+    pub fn refresh_project_overview(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.active_project.clone() else { return; };
+        if !self.overview_loading.insert(root.clone()) { return; }
+        let key = root.clone();
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move { services::project_overview::load(&root).await }, move |result, cx| {
+            let _ = this.update(cx, |m, cx| {
+                m.overview_loading.remove(&key);
+                m.project_overviews.insert(key, result);
+                cx.notify();
+            });
+        });
+        cx.notify();
+    }
+
     pub fn refresh_project_status(&mut self, fetch: bool, cx: &mut Context<Self>) {
         let state = svc(cx); let this = cx.entity().downgrade();
         spawn_service(cx, async move { services::workspaces::refresh_projects(&state, fetch).await }, move |res, cx| {
@@ -154,7 +175,7 @@ impl AppModel {
     pub fn pull_project(&mut self, root: String, cx: &mut Context<Self>) {
         let this = cx.entity().downgrade();
         spawn_service(cx, async move { services::workspaces::pull_project(root).await }, move |res, cx| {
-            let _ = this.update(cx, |m, cx| { match res { Ok(note) => m.toast(ToastKind::Success, note), Err(e) => m.fail(e, cx) } m.refresh_project_status(false, cx); cx.notify(); });
+            let _ = this.update(cx, |m, cx| { match res { Ok(note) => m.toast(ToastKind::Success, note), Err(e) => m.fail(e, cx) } m.refresh_project_status(false, cx); m.refresh_project_overview(cx); cx.notify(); });
         });
     }
 
@@ -263,7 +284,7 @@ impl AppModel {
         spawn_service(cx, async move { services::workspaces::fetch_project(root).await }, move |res, cx| {
             let _ = this.update(cx, |m, cx| {
                 match res { Ok(()) => m.toast(ToastKind::Success, "Project fetched"), Err(e) => m.fail(e, cx) }
-                m.refresh_review(cx); m.refresh_project_status(false, cx); cx.notify();
+                m.refresh_review(cx); m.refresh_project_status(false, cx); m.refresh_project_overview(cx); cx.notify();
             });
         });
     }
@@ -963,15 +984,31 @@ impl AppModel {
             self.toast(ToastKind::Info, "This conversation is for questions. Choose Make changes to continue in a workspace.");
             cx.notify(); return;
         }
+        let previous = self.prefs.mode.clone();
         self.prefs.mode = mode.to_string();
         if let Some(id) = self.selected {
+            if let Some(t) = self.threads.get(&id) {
+                t.update(cx, |t, cx| { t.meta.approval_mode = Some(mode.to_string()); cx.notify(); });
+            }
             let state = svc(cx);
-            let mode = mode.to_string();
-            spawn_service(
-                cx,
-                async move { services::set_approval_mode(&state, id.to_string(), mode).await },
-                |_, _| {},
-            );
+            let requested = mode.to_string();
+            let mode = requested.clone();
+            let this = cx.entity().downgrade();
+            spawn_service(cx, async move { services::set_approval_mode(&state, id.to_string(), mode).await }, move |result, cx| {
+                let _ = this.update(cx, |m, cx| {
+                    if let Err(error) = result {
+                        if m.selected == Some(id) && m.prefs.mode == requested { m.prefs.mode = previous.clone(); }
+                        if let Some(t) = m.threads.get(&id) {
+                            t.update(cx, |t, cx| {
+                                if t.meta.approval_mode.as_deref() == Some(&requested) { t.meta.approval_mode = Some(previous); }
+                                cx.notify();
+                            });
+                        }
+                        m.fail(error, cx);
+                    }
+                    cx.notify();
+                });
+            });
         }
         cx.notify();
     }
@@ -1176,6 +1213,8 @@ impl AppModel {
     pub fn set_active_project(&mut self, root: String, cx: &mut Context<Self>) {
         self.source_thread = None;
         self.active_project = Some(root);
+        self.overview_branch = None;
+        self.refresh_project_overview(cx);
         self.refresh_project_status(false, cx);
         self.active_workspace = None;
         self.review = None;

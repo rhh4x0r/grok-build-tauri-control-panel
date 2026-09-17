@@ -669,19 +669,22 @@ impl ComposerView {
                     .child(Icon::from(Lucide::ChevronDown).size(px(12.))),
             )
             .dropdown_menu(move |mut menu, _, _| {
-                menu = menu.check_side(Side::Right)
+                menu = menu.min_w(px(320.)).max_w(px(340.)).check_side(Side::Right)
                     .item(PopupMenuItem::label("Approval mode"));
                 for m in APPROVAL_CYCLE {
                     let app = app.clone();
                     let (label, icon, description) = mode_presentation(m);
                     menu = menu.item(PopupMenuItem::element(move |_, cx| {
                         let ui = Ui::of(cx);
-                        div().flex().flex_col().gap(px(3.)).py(px(5.)).w(px(270.))
-                            .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM)
-                                .text_color(if m == "yolo" { ui.warning } else { ui.text }).child(label))
-                            .child(div().text_size(px(11.)).text_color(ui.text_muted)
-                                .whitespace_normal().child(description))
-                    }).icon(icon).checked(m == mode).on_click(move |_, _, cx| {
+                        div().flex().items_start().gap(px(10.)).py(px(6.)).w(px(260.))
+                            .child(div().mt(px(2.)).size(px(16.)).text_color(if m == "yolo" { ui.warning } else { ui.text_muted })
+                                .child(Icon::from(icon).size(px(16.))))
+                            .child(div().flex_1().min_w_0().flex().flex_col().gap(px(3.))
+                                .child(div().text_size(px(12.)).line_height(px(16.)).font_weight(FontWeight::MEDIUM)
+                                    .text_color(if m == "yolo" { ui.warning } else { ui.text }).child(label))
+                                .child(div().text_size(px(11.)).line_height(px(15.)).text_color(ui.text_muted)
+                                    .whitespace_normal().child(description)))
+                    }).checked(m == mode).on_click(move |_, _, cx| {
                         app.update(cx, |a, cx| a.set_mode(m, cx));
                     }));
                 }
@@ -776,22 +779,20 @@ impl Render for ComposerView {
 
         div()
             .id("composer")
+            .key_context("BombComposer")
             .w_full()
             .flex()
             .flex_col()
             .items_center()
             .px_6()
             .pb_4()
-            .on_action(cx.listener(|_, _: &CycleApprovalMode, _, cx| {
-                cx.notify();
+            .on_action(cx.listener(|this, _: &CycleApprovalMode, _, cx| {
+                this.model.update(cx, |m, cx| m.cycle_mode(cx));
+                cx.stop_propagation();
             }))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
                 let k = &ev.keystroke;
                 if k.modifiers.platform && k.key == "v" && this.paste_from_clipboard(cx) {
-                    cx.stop_propagation();
-                }
-                if k.modifiers.shift && k.key == "tab" {
-                    this.model.update(cx, |m, cx| m.cycle_mode(cx));
                     cx.stop_propagation();
                 }
             }))

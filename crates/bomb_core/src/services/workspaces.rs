@@ -723,6 +723,17 @@ mod tests {
         let second = super::super::start_session(&state, root.display().to_string(), overlapping).await.unwrap();
         super::super::wait_until_idle(&state, &second.id, std::time::Duration::from_secs(5)).await.unwrap();
         assert_eq!(workspace(&state, &w.id).unwrap().threads.len(), 2);
+        let second_id = Uuid::parse_str(&second.id).unwrap();
+        super::super::set_approval_mode(&state, second.id.clone(), "ask".into()).await.unwrap();
+        assert_eq!(state.registry.get_snapshot(second_id).unwrap().metadata.approval_mode, grok_control_core::ApprovalMode::Ask);
+        state.registry.remove_session(second_id).await.unwrap();
+        super::super::set_approval_mode(&state, second.id.clone(), "auto".into()).await.unwrap();
+        let saved = state.persistence.get_session(second_id).unwrap();
+        let metadata: serde_json::Value = serde_json::from_str(&saved.metadata_json).unwrap();
+        assert_eq!(metadata["metadata"]["approvalMode"], "auto");
+        assert_eq!(metadata["metadata"]["planMode"], false);
+        assert_eq!(metadata["metadata"]["alwaysApprove"], false);
+
         super::super::remove_session(&state, first.id, Some(true)).await.unwrap();
         assert!(Path::new(&w.path).exists());
         let inline = super::super::start_session(&state, root.display().to_string(), SpawnOptions { isolate_worktree: false, ..options }).await.unwrap();

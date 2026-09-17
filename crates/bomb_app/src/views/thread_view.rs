@@ -388,6 +388,12 @@ impl Render for ThreadView {
         let composer = self.composer.clone();
 
         let Some(thread) = thread else {
+            let needs_overview = self.model.read(cx).active_project.as_ref().is_some_and(|root| {
+                let m = self.model.read(cx);
+                !m.project_overviews.contains_key(root) && !m.overview_loading.contains(root)
+            });
+            if needs_overview { self.model.update(cx, |m, cx| m.refresh_project_overview(cx)); }
+
             return div()
                 .size_full()
                 .min_w_0()

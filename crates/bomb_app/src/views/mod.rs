@@ -13,3 +13,5 @@ pub mod thread_view;
 pub mod transcript;
 
 pub mod workspaces;
+
+pub mod project;
