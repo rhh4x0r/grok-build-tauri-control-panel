@@ -319,3 +319,10 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 - Renamed Conversation to New chat and Review / Ship to Changes, with a nonzero file count and branch details in a tooltip. Moved Update into the overflow menu with an explicit default-branch merge label.
 - Renamed the preview control to Dev sidebar with a right-panel icon. Opening it now only toggles the panel; Start server / Stop server lives inside the panel, and its empty-state instructions match.
 - Validation: workspace check, strict all-target Clippy, development build, and diff whitespace checks passed. Live visual verification remains unavailable following the earlier Computer Use access denial.
+
+## 2026-09-17 — Composer context icon and approval-mode picker
+- Replaced the folder glyph beside the conversation context with a chat glyph.
+- Added distinct mode icons, readable Plan / Ask first / Auto / Full access labels, a dropdown indicator, and an amber Full access treatment. The menu separates titles from descriptions, marks the current selection, and explains the keyboard shortcut and permission-rule precedence.
+- Preserved the existing backend mode identifiers and approval behavior. Auto's description now refers to the agent's policy rather than promising all automatically approved operations are safe.
+- Reviewed project overview data and proposed a branch/workspace map, selected-branch details, and repository-wide PR cards; left the project screen unchanged pending design direction.
+- Validation: workspace check, strict all-target Clippy, development build, and diff whitespace checks passed. Live visual verification remains unavailable after the earlier Computer Use access denial.

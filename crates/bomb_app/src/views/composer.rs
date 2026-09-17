@@ -14,7 +14,7 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::progress::ProgressCircle;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{Icon, Sizable};
+use gpui_kit::component::{Icon, Side, Sizable};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -646,38 +646,59 @@ impl ComposerView {
     fn mode_picker(&self, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
         let mode = self.model.read(cx).prefs.mode.clone();
         let app = self.model.clone();
+        let (label, icon, description) = mode_presentation(&mode);
         Button::new("mode-picker")
             .ghost()
             .compact()
+            .tooltip(format!("{description} · Shift+Tab to cycle modes"))
+            .accessibility_label(format!("Approval mode: {label}"))
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .h(px(32.))
+                    .h(px(28.))
                     .gap(px(6.))
-                    .px(px(2.))
+                    .px(px(6.))
+                    .rounded(px(6.))
+                    .bg(Ui::alpha(if mode == "yolo" { ui.warning } else { ui.text }, 0.06))
                     .text_size(px(12.))
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(Ui::alpha(ui.text_muted, 0.7))
-                    .child(div().size(px(14.)).child(Icon::from(Lucide::ShieldCheck)))
-                    .child(mode),
+                    .text_color(if mode == "yolo" { ui.warning } else { ui.text_muted })
+                    .child(Icon::from(icon).size(px(14.)))
+                    .child(label)
+                    .child(Icon::from(Lucide::ChevronDown).size(px(12.))),
             )
             .dropdown_menu(move |mut menu, _, _| {
+                menu = menu.check_side(Side::Right)
+                    .item(PopupMenuItem::label("Approval mode"));
                 for m in APPROVAL_CYCLE {
                     let app = app.clone();
-                    let desc = match m {
-                        "plan" => "plan · investigate and propose, no execution",
-                        "ask" => "ask · confirm every tool call",
-                        "auto" => "auto · approve safe reads, edits and commands",
-                        _ => "yolo · approve everything (deny rules still apply)",
-                    };
-                    menu = menu.item(PopupMenuItem::new(desc).on_click(move |_, _, cx| {
+                    let (label, icon, description) = mode_presentation(m);
+                    menu = menu.item(PopupMenuItem::element(move |_, cx| {
+                        let ui = Ui::of(cx);
+                        div().flex().flex_col().gap(px(3.)).py(px(5.)).w(px(270.))
+                            .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM)
+                                .text_color(if m == "yolo" { ui.warning } else { ui.text }).child(label))
+                            .child(div().text_size(px(11.)).text_color(ui.text_muted)
+                                .whitespace_normal().child(description))
+                    }).icon(icon).checked(m == mode).on_click(move |_, _, cx| {
                         app.update(cx, |a, cx| a.set_mode(m, cx));
                     }));
                 }
-                menu
+                menu.separator().item(PopupMenuItem::label("Permission rules still apply · Shift+Tab to cycle"))
             })
             .into_any_element()
+    }
+
+}
+
+/// UI names are separate from the backend's stable approval-mode identifiers.
+fn mode_presentation(mode: &str) -> (&'static str, Lucide, &'static str) {
+    match mode {
+        "plan" => ("Plan", Lucide::BookOpen, "Investigate and propose changes before execution."),
+        "auto" => ("Auto", Lucide::Zap, "Use the agent’s automatic approval policy."),
+        "yolo" => ("Full access", Lucide::ShieldAlert, "Approve tools automatically. Deny rules still apply."),
+        _ => ("Ask first", Lucide::ShieldCheck, "Request approval before running tools."),
     }
 }
 
@@ -852,7 +873,7 @@ impl Render for ComposerView {
                             .h(px(24.))
                             .gap(px(Layout::SPACE_XS))
                             .px(px(10.))
-                            .child(footer_label(Lucide::Folder, location_label, &ui))
+                            .child(footer_label(Lucide::MessageCircle, location_label, &ui))
                             .when_some(branch, |el, b| el.child(footer_label(Lucide::GitBranch, b, &ui)))
                             .when(!has_thread && new_target, |el| {
                                 el.child(
