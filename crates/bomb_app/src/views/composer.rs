@@ -1652,7 +1652,7 @@ fn slash_matches(text: &str, catalog: &serde_json::Value) -> Vec<SlashCommand> {
     let Some(query) = slash_query(text).map(str::to_lowercase) else {
         return Vec::new();
     };
-    catalog
+    let mut matches: Vec<_> = catalog
         .get("commands")
         .and_then(|v| v.as_array())
         .into_iter()
@@ -1663,25 +1663,56 @@ fn slash_matches(text: &str, catalog: &serde_json::Value) -> Vec<SlashCommand> {
                 return None;
             }
             let description = v.get("description").and_then(|v| v.as_str()).unwrap_or("");
-            if !name.to_lowercase().contains(&query) && !description.to_lowercase().contains(&query)
-            {
+            let normalized = name.to_lowercase();
+            let rank = if query.is_empty() || normalized == query {
+                0
+            } else if normalized.starts_with(&query) {
+                1
+            } else if normalized.rsplit(':').next().is_some_and(|part| part.starts_with(&query)) {
+                2
+            } else if normalized.split(['-', '_', ':']).any(|part| part.starts_with(&query)) {
+                3
+            } else if normalized.contains(&query) {
+                4
+            } else if description.to_lowercase().split(|c: char| !c.is_alphanumeric()).any(|word| word.starts_with(&query)) {
+                5
+            } else {
                 return None;
-            }
-            Some(SlashCommand {
+            };
+            Some((rank, SlashCommand {
                 name: name.into(),
                 description: description.into(),
-                hint: v
-                    .pointer("/input/hint")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
-            })
+                hint: v.pointer("/input/hint").and_then(|v| v.as_str()).map(str::to_string),
+            }))
         })
-        .collect()
+        .collect();
+    // Descriptions are a fallback for discovery, never noise beside name matches.
+    if matches.iter().any(|(rank, _)| *rank < 5) {
+        matches.retain(|(rank, _)| *rank < 5);
+    }
+    matches.sort_by_key(|(rank, _)| *rank);
+    matches.into_iter().map(|(_, command)| command).collect()
 }
 
 #[cfg(test)]
 mod slash_tests {
     use super::slash_matches;
+    #[test]
+    fn prioritizes_command_names_and_uses_descriptions_only_as_fallback() {
+        let catalog = serde_json::json!({"commands":[
+            {"name":"claude-api","description":"Extra guidance for API use"},
+            {"name":"run-extract","description":"Run extraction"},
+            {"name":"bundled:extract","description":"Read documents"},
+            {"name":"extract-pages","description":"Read PDF pages"},
+            {"name":"extra","description":"Additional tools"}
+        ]});
+        let names = |query| slash_matches(query, &catalog).into_iter().map(|c| c.name).collect::<Vec<_>>();
+        assert_eq!(names("/EXTRA"), ["extra", "extract-pages", "bundled:extract", "run-extract"]);
+        assert_eq!(names("/guidance"), ["claude-api"]);
+        assert!(names("/dance").is_empty());
+        assert_eq!(names("/")[0], "claude-api");
+    }
+
     #[test]
     fn filters_only_provider_commands_at_start_of_draft() {
         let catalog = serde_json::json!({"commands":[{"name":"compact","description":"Summarize context","input":{"hint":"Optional focus"}}, {"name":"review","description":"Review changes"}]});
