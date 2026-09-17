@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::actions::NewThread;
 use crate::models::app::{project_name, AppModel, ProjectGroup};
 use crate::models::thread::ThreadModel;
-use crate::theme::Ui;
+use crate::theme::{Layout, Ui};
 
 pub struct SidebarView {
     model: Entity<AppModel>,
@@ -102,6 +102,8 @@ impl SidebarView {
         }
     }
 
+    /// Zeron's spaces filter: folder mark + project name + caret (29px,
+    /// 13px medium), and a square 29px button on the right (here: new thread).
     fn header(&self, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
         let hover = ui.hover;
         let projects = self.model.read(cx).projects.clone();
@@ -116,22 +118,34 @@ impl SidebarView {
         div()
             .flex()
             .items_center()
-            .gap_2()
-            .h(px(40.))
-            .px_3()
-            .child(
-                div()
-                    .size(px(14.))
-                    .text_color(ui.text_muted)
-                    .child(Icon::from(Lucide::Folder)),
-            )
+            .gap(px(Layout::SPACE_XS))
+            .px(px(Layout::SPACE_SM))
+            .pt(px(Layout::SPACE_SM))
+            .pb(px(Layout::SPACE_XS))
             .child(
                 Button::new("project-menu")
                     .ghost()
-                    .small()
                     .compact()
-                    .label(project)
-                    .dropdown_caret(true)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(Layout::SPACE_SM))
+                            .h(px(29.))
+                            .child(div().size(px(16.)).text_color(ui.text_muted).child(Icon::from(Lucide::Folder)))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(ui.text)
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .child(project),
+                            )
+                            .child(div().size(px(14.)).text_color(Ui::alpha(ui.text_muted, 0.6)).child(Icon::from(Lucide::ChevronDown))),
+                    )
                     .dropdown_menu(move |mut menu, _, _| {
                         for p in &projects {
                             let m = model.clone();
@@ -147,84 +161,244 @@ impl SidebarView {
                         }))
                     }),
             )
+            .child(div().flex_1())
             .child(
                 div()
                     .id("new-thread")
-                    .size(px(24.))
+                    .size(px(29.))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(6.))
+                    .rounded(px(8.))
                     .text_color(ui.text_muted)
                     .cursor_pointer()
                     .hover(move |s| s.bg(hover))
                     .on_click(cx.listener(|_, _, window, cx| {
                         window.dispatch_action(Box::new(NewThread), cx);
                     }))
-                    .child(div().size(px(14.)).child(Icon::from(Lucide::Plus))),
+                    .child(div().size(px(16.)).child(Icon::from(Lucide::Plus))),
             )
     }
 
+    /// A project section: disclosure header (folder mark, name, hairline,
+    /// `+`, chevron) at 28px, then its workspace and conversation rows 2px
+    /// apart. Git state shows as one 11px subline only when it says something.
     fn group(&self, g: &ProjectGroup, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
         let collapsed = self.collapsed.contains(&g.root);
-        let root = g.root.clone(); let root2 = root.clone();
-        let app = self.model.clone(); let add = app.clone(); let add_root = root.clone();
+        let root = g.root.clone();
+        let root2 = root.clone();
+        let app = self.model.clone();
+        let add = app.clone();
+        let add_root = root.clone();
+        let hover = ui.hover;
         let rows: Vec<_> = self.model.read(cx).workspaces.iter().filter(|w| w.project_root == root).cloned().collect();
-        let mut group = div().flex().flex_col().gap_1().child(
-            div().flex().items_center().px_3().py_2().gap_2()
-                .child(Button::new(SharedString::from(format!("collapse-{root}"))).ghost().xsmall().label(if collapsed { "▸" } else { "▾" }).on_click(cx.listener(move |this, _, _, cx| {
-                    if !this.collapsed.remove(&root2) { this.collapsed.insert(root2.clone()); } cx.notify();
-                })))
-                .child(div().id(SharedString::from(format!("project-{root}"))).flex_1().text_sm().cursor_pointer().child(g.name.clone()).on_click(move |_, _, cx| app.update(cx, |m, cx| m.set_active_project(root.clone(), cx))))
-                .child(Button::new(SharedString::from(format!("new-{}", g.root))).ghost().xsmall().label("+").on_click(move |_, _, cx| add.update(cx, |m, cx| { m.set_active_project(add_root.clone(), cx); m.new_thread(cx); })))
+        let mut group = div().flex().flex_col().gap(px(Layout::SIDEBAR_LIST_GAP));
+        group = group.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(Layout::SPACE_SM))
+                .h(px(28.))
+                .px(px(Layout::SPACE_SM))
+                .child(div().size(px(14.)).flex_shrink_0().text_color(Ui::alpha(ui.text_muted, 0.7)).child(Icon::from(Lucide::Folder)))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("project-{root}")))
+                        .min_w_0()
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(Ui::alpha(ui.text_muted, 0.7))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .cursor_pointer()
+                        .child(g.name.clone())
+                        .on_click(move |_, _, cx| app.update(cx, |m, cx| m.set_active_project(root.clone(), cx))),
+                )
+                .child(div().flex_1().h(px(1.)).bg(Ui::alpha(ui.border, 0.6)))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("new-{}", g.root)))
+                        .size(px(20.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(6.))
+                        .text_color(ui.text_muted)
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(hover))
+                        .on_click(move |_, _, cx| add.update(cx, |m, cx| { m.set_active_project(add_root.clone(), cx); m.new_thread(cx); }))
+                        .child(div().size(px(12.)).child(Icon::from(Lucide::Plus))),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("collapse-{}", g.root)))
+                        .size(px(20.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(6.))
+                        .text_color(Ui::alpha(ui.text_muted, 0.6))
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(hover))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !this.collapsed.remove(&root2) { this.collapsed.insert(root2.clone()); }
+                            cx.notify();
+                        }))
+                        .child(div().size(px(12.)).child(Icon::from(if collapsed { Lucide::ChevronRight } else { Lucide::ChevronDown }))),
+                ),
         );
         if let Some(status) = self.model.read(cx).project_status.get(&g.root) {
-            group = group.child(div().px_4().text_xs().text_color(ui.text_faint).child(if status.error.is_some() { "Folder".into() } else { format!("{} · ↑{} ↓{}{}", status.branch, status.ahead, status.behind, if status.dirty { " · uncommitted" } else { "" }) }));
+            if status.error.is_none() {
+                let mut parts: Vec<String> = vec![status.branch.clone()];
+                if status.behind > 0 { parts.push(format!("{} behind", status.behind)); }
+                if status.ahead > 0 { parts.push(format!("{} ahead", status.ahead)); }
+                if status.dirty { parts.push("uncommitted".into()); }
+                if parts.len() > 1 {
+                    group = group.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(Layout::SPACE_XS))
+                            .px(px(Layout::SPACE_SM))
+                            .h(px(14.))
+                            .text_size(px(11.))
+                            .line_height(px(14.))
+                            .text_color(ui.subline())
+                            .child(div().size(px(11.)).child(Icon::from(Lucide::GitBranch)))
+                            .child(parts.join(" · ")),
+                    );
+                }
+            }
         }
         if collapsed { return group; }
         for archived in [false, true] {
             let archived_key = format!("archived:{}", g.root);
             let archive_open = self.expanded.contains(&archived_key);
             if archived && rows.iter().any(|w| w.archived_at.is_some()) {
-                group = group.child(Button::new(SharedString::from(archived_key.clone())).ghost().small().label(if archive_open { "▾ Archived" } else { "▸ Archived" }).on_click(cx.listener(move |this, _, _, cx| {
-                    if !this.expanded.remove(&archived_key) { this.expanded.insert(archived_key.clone()); } cx.notify();
-                })));
+                group = group.child(
+                    div()
+                        .id(SharedString::from(archived_key.clone()))
+                        .flex()
+                        .items_center()
+                        .gap(px(Layout::SPACE_XS))
+                        .h(px(24.))
+                        .px(px(Layout::SPACE_SM))
+                        .text_size(px(11.))
+                        .text_color(ui.subline())
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !this.expanded.remove(&archived_key) { this.expanded.insert(archived_key.clone()); }
+                            cx.notify();
+                        }))
+                        .child(div().size(px(11.)).child(Icon::from(if archive_open { Lucide::ChevronDown } else { Lucide::ChevronRight })))
+                        .child("Archived"),
+                );
             }
             if archived && !archive_open { continue; }
             for w in rows.iter().filter(|w| !w.inline && w.archived_at.is_some() == archived) {
-                let app = self.model.clone(); let wid = w.id.clone();
+                let app = self.model.clone();
+                let wid = w.id.clone();
                 let active = self.model.read(cx).active_workspace.as_deref() == Some(&w.id);
-                let title = w.name.clone(); let menu_model = self.model.clone(); let menu_id = wid.clone();
-                let count = w.threads.len(); let expanded = self.expanded.contains(&wid);
-                let status = w.threads.iter().filter_map(|t| Uuid::parse_str(t).ok()).filter_map(|t| self.model.read(cx).threads.get(&t)).map(|t| t.read(cx).meta.status.clone()).find(|s| matches!(s.as_str(), "running" | "waiting_approval" | "failed")).unwrap_or_else(|| "idle".into());
+                let title = w.name.clone();
+                let menu_model = self.model.clone();
+                let menu_id = wid.clone();
+                let count = w.threads.len();
+                let expanded = self.expanded.contains(&wid);
+                let mut status = "idle".to_string();
                 let mut providers: Vec<String> = Vec::new();
                 let mut models: Vec<String> = Vec::new();
+                let mut latest = String::new();
                 for tid in &w.threads {
                     if let Some(t) = Uuid::parse_str(tid).ok().and_then(|id| self.model.read(cx).threads.get(&id)) {
-                        let meta = &t.read(cx).meta;
+                        let tm = t.read(cx);
+                        let meta = &tm.meta;
                         if !providers.contains(&meta.backend) { providers.push(meta.backend.clone()); }
                         if !models.contains(&meta.model) { models.push(meta.model.clone()); }
+                        if meta.updated_at > latest { latest = meta.updated_at.clone(); }
+                        let s = meta.status.as_str();
+                        if tm.thread.presence.turn_active() || s == "running" { status = "running".into(); }
+                        else if status == "idle" && (s.contains("wait") || s.contains("approv")) { status = "waiting".into(); }
+                        else if status == "idle" && s == "failed" { status = "failed".into(); }
                     }
                 }
                 let model_label = models.join(" · ");
-                let dot = match status.as_str() { "running" => ui.accent, "waiting_approval" => ui.warning, "failed" => ui.danger, _ => ui.text_faint };
-                group = group.child(div().id(SharedString::from(format!("workspace-{wid}"))).mx_2().px_3().py_2().rounded(px(8.)).cursor_pointer().when(active, |el| el.bg(ui.active)).hover(|s| s.bg(ui.hover))
-                    .on_click(move |_, _, cx| app.update(cx, |m, cx| m.open_workspace(wid.clone(), cx)))
-                    .tooltip(move |window, cx| Tooltip::new(model_label.clone()).build(window, cx))
-                    .context_menu(move |menu, _, _| {
-                        let app = menu_model.clone(); let wid = menu_id.clone(); let name = title.clone();
-                        menu.item(PopupMenuItem::new("Rename workspace…").on_click(move |_, window, cx| crate::views::workspaces::text_action(app.clone(), wid.clone(), "rename", "Workspace name", name.clone(), window, cx)))
-                    })
-                    .child(div().flex().gap_2().items_center()
-                        .children(providers.iter().map(|provider| crate::views::brand::brand_mark(provider, 14., true, ui)))
-                        .child(div().flex_1().min_w_0().text_sm().overflow_hidden().text_ellipsis().whitespace_nowrap().child(w.name.clone()))
-                        .child(div().size(px(6.)).rounded_full().bg(dot)))
-                    .child(div().text_xs().text_color(ui.text_faint).child(w.branch.clone())));
+                let corner = status_corner(&status, &latest, ui);
+                let selected_bg = ui.selected_bg();
+                group = group.child(
+                    div()
+                        .id(SharedString::from(format!("workspace-{wid}")))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .px(px(Layout::SPACE_SM))
+                        .py(px(6.))
+                        .rounded(px(8.))
+                        .cursor_pointer()
+                        .text_color(if active { ui.text } else { Ui::alpha(ui.text, 0.8) })
+                        .when(active, |el| el.bg(selected_bg))
+                        .when(!active, |el| el.hover(move |s| s.bg(hover).text_color(ui.text)))
+                        .on_click(move |_, _, cx| app.update(cx, |m, cx| m.open_workspace(wid.clone(), cx)))
+                        .tooltip(move |window, cx| Tooltip::new(model_label.clone()).build(window, cx))
+                        .context_menu(move |menu, _, _| {
+                            let app = menu_model.clone();
+                            let wid = menu_id.clone();
+                            let name = title.clone();
+                            menu.item(PopupMenuItem::new("Rename workspace…").on_click(move |_, window, cx| crate::views::workspaces::text_action(app.clone(), wid.clone(), "rename", "Workspace name", name.clone(), window, cx)))
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(Layout::SPACE_SM))
+                                .child(div().flex().items_center().gap_1().children(providers.iter().map(|provider| crate::views::brand::brand_mark(provider, 13., true, ui))))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_size(px(13.))
+                                        .line_height(px(17.))
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .child(w.name.clone()),
+                                )
+                                .child(corner),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(Layout::SPACE_XS))
+                                .h(px(14.))
+                                .text_size(px(11.))
+                                .line_height(px(14.))
+                                .text_color(ui.subline())
+                                .child(div().size(px(11.)).flex_shrink_0().child(Icon::from(Lucide::GitBranch)))
+                                .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(w.branch.clone())),
+                        ),
+                );
                 if count > 1 {
                     let wid = w.id.clone();
-                    group = group.child(Button::new(SharedString::from(format!("threads-{wid}"))).ghost().xsmall().label(format!("{} {count} conversations", if expanded { "▾" } else { "▸" })).on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.expanded.remove(&wid) { this.expanded.insert(wid.clone()); } cx.notify();
-                    })));
+                    group = group.child(
+                        div()
+                            .id(SharedString::from(format!("threads-{wid}")))
+                            .flex()
+                            .items_center()
+                            .gap(px(Layout::SPACE_XS))
+                            .h(px(22.))
+                            .pl(px(Layout::SPACE_SM + 21.))
+                            .pr(px(Layout::SPACE_SM))
+                            .text_size(px(11.))
+                            .text_color(ui.subline())
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !this.expanded.remove(&wid) { this.expanded.insert(wid.clone()); }
+                                cx.notify();
+                            }))
+                            .child(div().size(px(11.)).child(Icon::from(if expanded { Lucide::ChevronDown } else { Lucide::ChevronRight })))
+                            .child(format!("{count} conversations")),
+                    );
                     if expanded {
                         for id in &w.threads {
                             if let Ok(id) = Uuid::parse_str(id) {
@@ -249,6 +423,9 @@ impl SidebarView {
         group
     }
 
+    /// One conversation, Zeron's chat row: optional 11/14 caption line
+    /// (project, when the list is flat), 13/17 title with the model's mark,
+    /// time-ago or status in the corner, and an 11/14 branch line.
     fn thread_row(
         &self,
         id: Uuid,
@@ -262,38 +439,27 @@ impl SidebarView {
         let title = tm.title();
         let status = tm.meta.status.clone();
         let turn_active = tm.thread.presence.turn_active();
-        let waiting = status.contains("wait") || status.contains("approv");
-        let working = turn_active || status == "running";
+        let state = if status.contains("wait") || status.contains("approv") {
+            "waiting"
+        } else if turn_active || status == "running" {
+            "running"
+        } else if status == "failed" {
+            "failed"
+        } else {
+            "idle"
+        };
         let branch = tm
             .meta
             .worktree
             .as_deref()
             .and_then(|w| std::path::Path::new(w).file_name())
             .map(|s| s.to_string_lossy().to_string());
-        let ago = time_ago(&tm.meta.updated_at);
         let backend = tm.meta.backend.clone();
+        let updated = tm.meta.updated_at.clone();
         let model = self.model.clone();
-        let (hover, active) = (ui.hover, ui.active);
-
-        let corner: AnyElement = if waiting {
-            div()
-                .text_xs()
-                .text_color(ui.warning)
-                .child("Input")
-                .into_any_element()
-        } else if working {
-            div()
-                .text_xs()
-                .text_color(ui.accent)
-                .child("Working")
-                .into_any_element()
-        } else {
-            div()
-                .text_xs()
-                .text_color(ui.text_faint)
-                .child(ago)
-                .into_any_element()
-        };
+        let hover = ui.hover;
+        let selected_bg = ui.selected_bg();
+        let corner = status_corner(state, &updated, ui);
 
         let has_worktree = tm.meta.worktree.is_some();
         let menu_model = self.model.clone();
@@ -302,14 +468,14 @@ impl SidebarView {
             .id(SharedString::from(format!("thread-{id}")))
             .flex()
             .flex_col()
-            .gap_0p5()
-            .mx_2()
-            .px_2()
-            .py_2()
+            .gap(px(2.))
+            .px(px(Layout::SPACE_SM))
+            .py(px(6.))
             .rounded(px(8.))
             .cursor_pointer()
-            .when(selected, move |s| s.bg(active))
-            .hover(move |s| s.bg(hover))
+            .text_color(if selected { ui.text } else { Ui::alpha(ui.text, 0.8) })
+            .when(selected, move |s| s.bg(selected_bg))
+            .when(!selected, move |s| s.hover(move |s| s.bg(hover).text_color(ui.text)))
             .on_click(move |_, _, cx| {
                 model.update(cx, |m, cx| m.select(Some(id), cx));
             })
@@ -351,51 +517,59 @@ impl SidebarView {
                     });
                 }))
             })
-            .when(!project.is_empty(), |el| el.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(11.))
-                            .text_color(ui.text_faint)
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .child(project.to_string()),
-                    )
-                    .child(div().text_size(px(11.)).child(corner)),
-            ))
+            .when(!project.is_empty(), |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(Layout::SPACE_SM))
+                        .h(px(14.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(11.))
+                                .line_height(px(14.))
+                                .text_color(ui.subline())
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(project.to_string()),
+                        )
+                        .child(corner),
+                )
+            })
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_1p5()
-                    .child(crate::views::brand::brand_mark(&backend, 14., true, ui))
+                    .gap(px(Layout::SPACE_SM))
+                    .child(crate::views::brand::brand_mark(&backend, 13., true, ui))
                     .child(
                         div()
                             .flex_1()
+                            .min_w_0()
                             .text_size(px(13.))
-                            .text_color(ui.text)
+                            .line_height(px(17.))
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
                             .child(title),
                     )
-                    .when(project.is_empty(), |el| el.child(div().text_size(px(11.)).text_color(if waiting { ui.warning } else if working { ui.accent } else { ui.text_faint }).child(if waiting { "Input".into() } else if working { "Working".into() } else { time_ago(&tm.meta.updated_at) }))),
+                    .when(project.is_empty(), |el| el.child(status_corner(state, &updated, ui))),
             )
             .when_some(branch, |el, b| {
                 el.child(
                     div()
                         .flex()
                         .items_center()
-                        .gap_1()
+                        .gap(px(Layout::SPACE_XS))
+                        .h(px(14.))
                         .text_size(px(11.))
-                        .text_color(ui.text_faint)
-                        .child(div().size(px(11.)).child(Icon::from(Lucide::GitBranch)))
-                        .child(b),
+                        .line_height(px(14.))
+                        .text_color(ui.subline())
+                        .child(div().size(px(11.)).flex_shrink_0().child(Icon::from(Lucide::GitBranch)))
+                        .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(b)),
                 )
             })
     }
@@ -424,13 +598,14 @@ impl SidebarView {
             if group != last_group {
                 out.push(
                     div()
-                        .px_4()
-                        .pt_2()
-                        .pb_1()
-                        .text_xs()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(ui.text_faint)
-                        .child(group)
+                        .flex()
+                        .items_center()
+                        .gap(px(Layout::SPACE_SM))
+                        .h(px(28.))
+                        .px(px(Layout::SPACE_SM))
+                        .when(!last_group.is_empty(), |el| el.mt(px(Layout::SIDEBAR_SECTION_GAP - Layout::SIDEBAR_LIST_GAP)))
+                        .child(div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(Ui::alpha(ui.text_muted, 0.5)).child(group))
+                        .child(div().flex_1().h(px(1.)).bg(Ui::alpha(ui.border, 0.6)))
                         .into_any_element(),
                 );
                 last_group = group;
@@ -585,8 +760,7 @@ impl Render for SidebarView {
                 }
             }))
             .child(self.header(&ui, cx))
-            .child(Button::new("open-project-sidebar").ghost().small().label("+ Open project…").on_click({ let app = self.model.clone(); move |_, _, cx| app.update(cx, |m, cx| m.open_project(cx)) }))
-            .child(div().px_3().pb_2().child(Input::new(&self.search).cleanable(true).appearance(true)))
+            .child(div().px(px(Layout::SPACE_SM)).pb(px(Layout::SPACE_XS)).child(Input::new(&self.search).cleanable(true).appearance(true)))
             .child(
                 div()
                     .id("thread-list")
@@ -594,23 +768,24 @@ impl Render for SidebarView {
                     .overflow_y_scroll()
                     .flex()
                     .flex_col()
-                    .gap_1()
-                    .py_1()
+                    .px(px(Layout::SPACE_SM))
+                    .pt(px(Layout::SPACE_XS))
+                    .pb(px(Layout::SPACE_SM))
                     .map(|el| {
                         if query.is_empty() {
-                            el.children(groups.iter().map(|g| self.group(g, &ui, cx)))
+                            el.gap(px(Layout::SIDEBAR_SECTION_GAP)).children(groups.iter().map(|g| self.group(g, &ui, cx)))
                                 .when(groups.iter().all(|g| g.threads.is_empty()), |el| {
                                     el.child(
                                         div()
-                                            .px_4()
-                                            .py_3()
-                                            .text_xs()
+                                            .px(px(Layout::SPACE_SM))
+                                            .pb(px(Layout::SPACE_SM))
+                                            .text_size(px(12.))
                                             .text_color(ui.text_faint)
-                                            .child("No threads yet. Press + to start one."),
+                                            .child("No sessions yet"),
                                     )
                                 })
                         } else {
-                            el.children(self.search_results(&ui, cx))
+                            el.gap(px(Layout::SIDEBAR_LIST_GAP)).children(self.search_results(&ui, cx))
                         }
                     }),
             )
@@ -682,6 +857,36 @@ fn usage_bar(backend: &str, ix: usize, w: &bomb_core::usage::UsageWindow, ui: &U
         )
 }
 
+/// Row corner: time-ago for idle rows (10px medium, subline), otherwise a
+/// glyph + status word in the status color.
+fn status_corner(state: &str, updated_at: &str, ui: &Ui) -> AnyElement {
+    let (word, color): (&str, Hsla) = match state {
+        "waiting" => ("Input", ui.warning),
+        "running" => ("Working", ui.accent),
+        "failed" => ("Failed", ui.danger),
+        _ => {
+            return div()
+                .flex_shrink_0()
+                .h(px(14.))
+                .text_size(px(10.))
+                .line_height(px(14.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(ui.subline())
+                .child(time_ago(updated_at))
+                .into_any_element();
+        }
+    };
+    div()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(Layout::SPACE_XS))
+        .h(px(14.))
+        .child(div().size(px(6.)).rounded_full().bg(color))
+        .child(div().text_size(px(10.)).line_height(px(14.)).font_weight(FontWeight::MEDIUM).text_color(color).child(word))
+        .into_any_element()
+}
+
 /// "49m", "2d", "4w" from an RFC3339 timestamp.
 pub fn time_ago(iso: &str) -> String {
     let Ok(t) = iso.parse::<DateTime<Utc>>() else {
@@ -693,8 +898,9 @@ pub fn time_ago(iso: &str) -> String {
         s if s < 3600 => format!("{}m", s / 60),
         s if s < 86_400 => format!("{}h", s / 3600),
         s if s < 7 * 86_400 => format!("{}d", s / 86_400),
-        s if s < 30 * 86_400 => format!("{}w", s / (7 * 86_400)),
-        s => format!("{}mo", s / (30 * 86_400)),
+        s if s < 5 * 7 * 86_400 => format!("{}w", s / (7 * 86_400)),
+        s if s < 365 * 86_400 => format!("{}mo", s / (30 * 86_400)),
+        s => format!("{}y", s / (365 * 86_400)),
     }
 }
 

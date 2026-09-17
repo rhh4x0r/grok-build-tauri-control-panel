@@ -89,6 +89,28 @@ pub fn pretty_model(id: &str) -> String {
     }
 }
 
+/// One-line blurb per known model id (Zeron shows one beside each name).
+/// Unknown ids get none; the row then shows the raw id instead.
+pub fn model_blurb(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "grok-4.6" => "Latest Grok, best for agentic coding",
+        "grok-4.5" => "Previous generation, fast and capable",
+        "claude-fable-5" => "Most capable Claude, Mythos-class",
+        "claude-opus-4-8" => "Deep reasoning for hard problems",
+        "claude-sonnet-5" => "Balanced speed and intelligence",
+        "claude-haiku-4-5" => "Fastest and most affordable Claude",
+        "gpt-5.6-sol" => "Latest frontier agentic coding model",
+        "gpt-5.6-terra" => "Balanced agentic coding, default",
+        "gpt-5.6-luna" => "Fast and affordable agentic coding",
+        "gpt-5.5" => "Proven previous-generation model",
+        "gpt-5.4" => "Older generation, still capable",
+        "gpt-5.4-mini" => "Small and quick for simple tasks",
+        "gpt-5.3-codex-spark" => "Low-latency coding model",
+        "gpt-5-codex" => "Original Codex agent model",
+        _ => return None,
+    })
+}
+
 /// Reasoning levels a backend accepts, and whether we can actually apply
 /// them through its ACP adapter.
 pub fn effort_levels(backend: &str) -> (&'static [&'static str], bool) {
@@ -100,14 +122,23 @@ pub fn effort_levels(backend: &str) -> (&'static [&'static str], bool) {
     }
 }
 
-pub fn short_effort(e: &str) -> &'static str {
+/// Full word for the reasoning level, as the picker lists it.
+pub fn effort_label(e: &str) -> &'static str {
     match e {
-        "minimal" => "Min",
+        "minimal" => "Minimal",
         "low" => "Low",
-        "medium" => "Med",
+        "medium" => "Medium",
         "high" => "High",
-        "xhigh" => "XHigh",
+        "xhigh" => "X-High",
         "max" => "Max",
+        _ => "",
+    }
+}
+
+/// The level each CLI uses when none is set (marked "Default").
+pub fn default_effort(backend: &str) -> &'static str {
+    match backend {
+        "grok" | "codex" | "claude" => "medium",
         _ => "",
     }
 }

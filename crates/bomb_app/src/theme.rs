@@ -98,6 +98,11 @@ impl Layout {
     pub const BODY_SIZE: f32 = 14.0;
     pub const BODY_LINE: f32 = 22.0;
     pub const COMPOSER_MAX: f32 = 768.0;
+    pub const SPACE_XS: f32 = 4.0;
+    pub const SPACE_SM: f32 = 8.0;
+    /// Sidebar: rows 2px apart, sections 12px apart (Zeron).
+    pub const SIDEBAR_LIST_GAP: f32 = 2.0;
+    pub const SIDEBAR_SECTION_GAP: f32 = 12.0;
 }
 
 /// App tokens for the active appearance.
@@ -110,7 +115,6 @@ pub struct Ui {
     /// `surface` at 80% (Zeron's GLASS_ALPHA); light: opaque white.
     pub glass: Hsla,
     pub hover: Hsla,
-    pub active: Hsla,
     pub border: Hsla,
     pub text: Hsla,
     pub text_muted: Hsla,
@@ -137,7 +141,6 @@ impl Ui {
                 bg: grey(0x06),
                 glass: hsla(0.0, 0.0, 13.0 / 255.0, 0.80),
                 hover: hsla(0.0, 0.0, 0.92, 0.11),
-                active: hsla(0.0, 0.0, 0.92, 0.16),
                 border: hsla(0.0, 0.0, 1.0, 0.08),
                 text: neutral(0.922),
                 text_muted: neutral(0.708),
@@ -158,7 +161,6 @@ impl Ui {
                 bg: grey(0xff),
                 glass: grey(0xff),
                 hover: hsla(0.0, 0.0, 0.10, 0.06),
-                active: hsla(0.0, 0.0, 0.10, 0.10),
                 border: hsla(0.0, 0.0, 0.0, 0.10),
                 text: neutral(0.25),
                 text_muted: neutral(0.439),
@@ -173,6 +175,56 @@ impl Ui {
                 bubble: hsla(0.0, 0.0, 0.0, 0.06),
                 mono,
             }
+        }
+    }
+
+    /// Zeron's selection/hover wash: near-white on dark, near-black on light.
+    pub fn wash(&self, alpha: f32) -> Hsla {
+        if self.dark {
+            hsla(0.0, 0.0, 0.92, alpha)
+        } else {
+            hsla(0.0, 0.0, 0.10, alpha)
+        }
+    }
+
+    /// Selected row / card background (`glass_selected_bg`).
+    pub fn selected_bg(&self) -> Hsla {
+        if self.dark {
+            self.wash(0.11)
+        } else {
+            self.wash(0.06)
+        }
+    }
+
+    /// Hairline rule: white on dark, black (a touch stronger) on light.
+    pub fn hairline(&self, alpha: f32) -> Hsla {
+        if self.dark {
+            hsla(0.0, 0.0, 1.0, alpha)
+        } else {
+            hsla(0.0, 0.0, 0.0, (alpha * 1.35).min(0.5))
+        }
+    }
+
+    /// Sidebar sublines (project caption, branch): muted text at half alpha.
+    pub fn subline(&self) -> Hsla {
+        let mut c = self.text_muted;
+        c.a = 0.5;
+        c
+    }
+
+    /// `color` with its alpha scaled.
+    pub fn alpha(c: Hsla, a: f32) -> Hsla {
+        let mut c = c;
+        c.a = a;
+        c
+    }
+
+    /// Composer pill border (Zeron's frost variant, faint cool tint).
+    pub fn pill_border(&self) -> Hsla {
+        if self.dark {
+            hsla(210.0 / 360.0, 0.18, 0.78, 0.09)
+        } else {
+            hsla(210.0 / 360.0, 0.18, 0.32, 0.10)
         }
     }
 

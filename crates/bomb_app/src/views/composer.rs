@@ -87,19 +87,21 @@ impl ComposerView {
         let window_tokens = context_window(&m.prefs.backend, &m.effective_model());
         let frac = (used as f32 / window_tokens as f32).clamp(0.0, 1.0);
         let pct = (frac * 100.0).round() as u32;
-        let hot = frac >= 0.85;
-        let color = if hot { ui.danger } else { ui.text_muted };
+        let color = if frac >= 0.9 { ui.danger } else if frac >= 0.75 { ui.warning } else { ui.text_muted };
+        let hover = ui.ink(0.05);
         Some(
             div()
                 .id("context-ring")
+                .flex_shrink_0()
                 .flex()
                 .items_center()
-                .gap_1p5()
-                .px_1p5()
-                .h(px(26.))
+                .gap(px(5.))
+                .px(px(6.))
+                .h(px(24.))
                 .rounded(px(6.))
-                .text_xs()
+                .text_size(px(11.))
                 .text_color(color)
+                .hover(move |s| s.bg(hover))
                 .child(div().size(px(16.)).child(ProgressCircle::new("ctx-ring").value(pct as f32).color(color)))
                 .child(format!("{pct}%"))
                 .tooltip(move |window, cx| {
@@ -286,10 +288,10 @@ impl ComposerView {
         )
     }
 
-    /// Model + reasoning selector (assistant-ui style): an outline trigger
-    /// showing mark · readable model · effort · chevron; a popover with search,
-    /// provider filter chips, models grouped by provider (checkmark on the
-    /// current one), and a "Thinking" segmented control at the bottom.
+    /// Model + reasoning selector, Zeron's picker: a 32px trigger chip
+    /// (mark · readable model · effort), and a 304px popover with a provider
+    /// tab strip (underline on the viewed tab), a borderless search row,
+    /// name + blurb rows with ⌘1–⌘9 hints, and a Reasoning list.
     fn model_selector(&self, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
         let m = self.model.read(cx);
         let backend = m.prefs.backend.clone();
@@ -300,19 +302,46 @@ impl ComposerView {
         let search = self.model_search.clone();
         let trigger_label = if model.is_empty() { backend.clone() } else { crate::views::brand::pretty_model(&model) };
         let (_, effort_applies) = crate::views::brand::effort_levels(&backend);
-        let eff_short = if effort_applies { crate::views::brand::short_effort(&effort) } else { "" };
+        let eff_label = if effort_applies { crate::views::brand::effort_label(&effort) } else { "" };
+        let open = self.model_menu_open;
         let trigger = Button::new("model-selector")
-            .outline()
-            .small()
-            .dropdown_caret(true)
+            .ghost()
+            .compact()
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_1p5()
-                    .child(crate::views::brand::brand_mark(&backend, 14., true, ui))
-                    .child(div().text_size(px(13.)).text_color(ui.text).child(trigger_label))
-                    .when(!eff_short.is_empty(), |el| el.child(div().text_size(px(13.)).text_color(ui.text_faint).child(eff_short))),
+                    .h(px(32.))
+                    .max_w(px(248.))
+                    .min_w_0()
+                    .gap(px(6.))
+                    .px(px(2.))
+                    .child(crate::views::brand::brand_mark(&backend, 16., true, ui))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(if open { ui.text } else { Ui::alpha(ui.text, 0.9) })
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(trigger_label),
+                    )
+                    .when(!eff_label.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .min_w_0()
+                                .flex_shrink(1000.)
+                                .text_size(px(12.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(Ui::alpha(ui.text_muted, 0.7))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(eff_label),
+                        )
+                    }),
             );
         let popover = Popover::new("model-selector-popover")
             .anchor(Anchor::BottomLeft)
@@ -335,49 +364,92 @@ impl ComposerView {
                     (m.backends.clone(), m.prefs.backend.clone(), m.effective_model(), m.prefs.effort.clone())
                 };
                 let query = search.read(cx).value().to_lowercase();
-                let filter = this.read(cx).provider_filter.clone();
-                let hover = ui.hover;
-                let mut col = div().flex().flex_col().w(px(340.));
-                // search
-                col = col.child(div().px_2().pt_2().pb_1().child(Input::new(&search).cleanable(true)));
-                // provider chips
-                let mut chips = div().flex().flex_wrap().gap_1().px_2().pb_2();
-                for (id, label) in std::iter::once((None, "All".to_string()))
-                    .chain(backends.iter().map(|b| (Some(b.id.clone()), b.display_name.clone())))
-                {
-                    let on = filter == id;
-                    let this = this.clone();
-                    let key = id.clone();
-                    chips = chips.child(
-                        div()
-                            .id(SharedString::from(format!("prov-{}", id.clone().unwrap_or_else(|| "all".into()))))
-                            .h(px(22.))
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .rounded_full()
-                            .text_xs()
-                            .border_1()
-                            .border_color(if on { ui.text_muted } else { ui.border })
-                            .text_color(if on { ui.text } else { ui.text_muted })
-                            .cursor_pointer()
-                            .hover(move |s| s.bg(hover))
-                            .on_click(move |_, _, cx| {
-                                this.update(cx, |c, cx| {
-                                    c.provider_filter = key.clone();
-                                    cx.notify();
-                                })
+                // The viewed tab: an explicit pick, else the current backend.
+                let viewed: Option<String> = match &this.read(cx).provider_filter {
+                    Some(f) if f == "*" => None,
+                    Some(f) => Some(f.clone()),
+                    None => Some(cur_backend.clone()),
+                };
+                let hairline = ui.hairline(0.08);
+                let ink06 = ui.ink(0.06);
+                let ink05 = ui.ink(0.05);
+                let mut col = div().flex().flex_col().w(px(304.)).text_size(px(13.)).text_color(ui.text);
+
+                // ── tab strip ────────────────────────────────────────
+                let mut tabs = div()
+                    .flex()
+                    .items_center()
+                    .h(px(40.))
+                    .px(px(4.))
+                    .gap(px(2.))
+                    .border_b_1()
+                    .border_color(hairline);
+                let tab = |id: SharedString, on: bool, child: AnyElement, this: Entity<Self>, key: Option<String>| {
+                    div()
+                        .id(id)
+                        .relative()
+                        .size(px(32.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(8.))
+                        .cursor_pointer()
+                        .when(!on, move |el| el.hover(move |s| s.bg(ink06)))
+                        .on_click(move |_, _, cx| {
+                            this.update(cx, |c, cx| {
+                                c.provider_filter = Some(key.clone().unwrap_or_else(|| "*".into()));
+                                cx.notify();
                             })
-                            .when_some(id.clone(), |el, b| el.child(crate::views::brand::brand_mark(&b, 11., true, &ui)))
-                            .child(label),
+                        })
+                        .child(child)
+                        .when(on, |el| {
+                            el.child(div().absolute().bottom(px(-4.)).left(px(6.)).right(px(6.)).h(px(2.)).rounded(px(1.)).bg(ui.accent))
+                        })
+                };
+                let all_on = viewed.is_none();
+                tabs = tabs.child(tab(
+                    "tab-all".into(),
+                    all_on,
+                    div().size(px(15.)).text_color(if all_on { ui.text } else { ui.text_muted }).child(Icon::from(Lucide::Star)).into_any_element(),
+                    this.clone(),
+                    None,
+                ));
+                for b in &backends {
+                    let on = viewed.as_deref() == Some(&b.id);
+                    let mark = if on || b.id == "claude" {
+                        crate::views::brand::brand_mark(&b.id, 16., true, &ui)
+                    } else {
+                        crate::views::brand::brand_mark(&b.id, 16., false, &ui)
+                    };
+                    tabs = tabs.child(
+                        tab(SharedString::from(format!("tab-{}", b.id)), on, mark, this.clone(), Some(b.id.clone()))
+                            .when(!b.available, |el| el.opacity(0.35)),
                     );
                 }
-                col = col.child(chips);
+                col = col.child(tabs);
+
+                // ── search row ───────────────────────────────────────
+                col = col.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .h(px(40.))
+                        .px(px(10.))
+                        .gap(px(8.))
+                        .border_b_1()
+                        .border_color(hairline)
+                        .child(div().size(px(14.)).text_color(ui.text_muted).child(Icon::from(Lucide::Search)))
+                        .child(div().flex_1().min_w_0().child(Input::new(&search).appearance(false).bordered(false))),
+                );
+
+                // ── model rows ───────────────────────────────────────
+                let mut list = div().flex().flex_col().py(px(4.)).px(px(4.)).bg(ui.ink(0.02));
                 let mut any = false;
+                let mut ix = 0usize;
+                let selected_bg = ui.selected_bg();
                 for b in &backends {
-                    if let Some(f) = &filter {
-                        if f != &b.id {
+                    if let Some(v) = &viewed {
+                        if v != &b.id {
                             continue;
                         }
                     }
@@ -391,113 +463,147 @@ impl ComposerView {
                                 || b.display_name.to_lowercase().contains(&query)
                         })
                         .collect();
-                    if models.is_empty() {
-                        continue;
-                    }
-                    any = true;
-                    col = col.child(
-                        div()
-                            .px_3()
-                            .pt_1p5()
-                            .pb_0p5()
-                            .text_xs()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(ui.text_faint)
-                            .child(format!("{}{}", b.display_name, if b.available { "" } else { " · unavailable" })),
-                    );
                     for md in models {
+                        any = true;
                         let selected = b.id == cur_backend && md == cur_model;
                         let app = app.clone();
                         let this = this.clone();
                         let (bid, mdl) = (b.id.clone(), md.clone());
                         let available = b.available;
-                        col = col.child(
-                            div()
-                                .id(SharedString::from(format!("model-{}-{md}", b.id)))
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .h(px(30.))
-                                .mx_1()
-                                .px_2()
-                                .rounded(px(6.))
-                                .text_size(px(13.))
-                                .text_color(if available { ui.text } else { ui.text_faint })
-                                .when(available, |el| {
-                                    el.cursor_pointer().hover(move |s| s.bg(hover)).on_click(move |_, _, cx| {
-                                        app.update(cx, |a, cx| a.set_backend(&bid, Some(mdl.clone()), cx));
-                                        this.update(cx, |c, cx| {
-                                            c.model_menu_open = false;
-                                            cx.notify();
-                                        });
+                        let blurb = crate::views::brand::model_blurb(&md).map(str::to_string).unwrap_or_else(|| md.clone());
+                        let hint = if ix < 9 { Some(format!("⌘{}", ix + 1)) } else { None };
+                        ix += 1;
+                        list = list.child(
+                            div().pb(px(2.)).child(
+                                div()
+                                    .id(SharedString::from(format!("model-{}-{md}", b.id)))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(10.))
+                                    .px(px(8.))
+                                    .py(px(if viewed.is_some() { 5. } else { 6. }))
+                                    .rounded(px(8.))
+                                    .when(selected, |el| el.bg(selected_bg))
+                                    .when(!selected && available, |el| el.hover(move |s| s.bg(ink05)))
+                                    .when(!available, |el| el.opacity(0.4))
+                                    .when(available, |el| {
+                                        el.cursor_pointer().on_click(move |_, _, cx| {
+                                            app.update(cx, |a, cx| a.set_backend(&bid, Some(mdl.clone()), cx));
+                                            this.update(cx, |c, cx| {
+                                                c.model_menu_open = false;
+                                                cx.notify();
+                                            });
+                                        })
                                     })
-                                })
-                                .child(crate::views::brand::brand_mark(&b.id, 14., true, &ui))
-                                .child(div().flex_1().child(crate::views::brand::pretty_model(&md)))
-                                .child(div().text_xs().text_color(ui.text_faint).child(md.clone()))
-                                .when(selected, |el| {
-                                    el.child(div().size(px(14.)).text_color(ui.text).child(Icon::from(Lucide::Check)))
-                                }),
+                                    .when(viewed.is_none(), |el| el.child(crate::views::brand::brand_mark(&b.id, 13., true, &ui)))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .flex()
+                                            .items_baseline()
+                                            .gap(px(6.))
+                                            .child(
+                                                div()
+                                                    .flex_shrink_0()
+                                                    .text_size(px(12.5))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(ui.text)
+                                                    .child(crate::views::brand::pretty_model(&md)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .text_size(px(11.))
+                                                    .text_color(ui.text_muted)
+                                                    .overflow_hidden()
+                                                    .text_ellipsis()
+                                                    .whitespace_nowrap()
+                                                    .child(blurb),
+                                            ),
+                                    )
+                                    .when_some(hint, |el, h| {
+                                        el.child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .px(px(5.))
+                                                .py(px(1.))
+                                                .rounded(px(5.))
+                                                .bg(ink05)
+                                                .text_size(px(10.))
+                                                .font_family(ui.mono.clone())
+                                                .text_color(ui.text_muted)
+                                                .child(h),
+                                        )
+                                    })
+                                    .when(selected, |el| el.child(div().size(px(14.)).flex_shrink_0().text_color(ui.text).child(Icon::from(Lucide::Check)))),
+                            ),
                         );
                     }
                 }
                 if !any {
-                    col = col.child(div().px_3().py_3().text_sm().text_color(ui.text_faint).child(format!("No model matches \"{query}\"")));
+                    list = list.child(div().px(px(8.)).py(px(10.)).text_size(px(12.)).text_color(ui.text_faint).child(format!("No model matches \"{query}\"")));
                 }
-                // Thinking
+                col = col.child(list);
+
+                // ── reasoning ────────────────────────────────────────
                 let (levels, applies) = crate::views::brand::effort_levels(&cur_backend);
                 if !levels.is_empty() {
-                    let mut seg = div().flex().items_center().p_0p5().rounded(px(8.)).bg(ui.ink(0.06));
+                    let default_level = crate::views::brand::default_effort(&cur_backend);
+                    let mut tray = div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .px(px(4.))
+                        .py(px(4.))
+                        .border_t_1()
+                        .border_color(hairline)
+                        .child(
+                            div()
+                                .px(px(8.))
+                                .pt(px(6.))
+                                .pb(px(4.))
+                                .text_size(px(10.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(ui.text_muted)
+                                .child(tracked_upper("Reasoning")),
+                        );
                     for e in levels {
                         let app = app.clone();
                         let on = cur_effort == *e;
                         let e: &'static str = e;
-                        seg = seg.child(
+                        tray = tray.child(
                             div()
                                 .id(SharedString::from(format!("effort-{e}")))
-                                .flex_1()
-                                .h(px(26.))
                                 .flex()
                                 .items_center()
-                                .justify_center()
-                                .rounded(px(6.))
-                                .text_xs()
-                                .font_weight(if on { FontWeight::MEDIUM } else { FontWeight::NORMAL })
-                                .text_color(if !applies { ui.text_faint } else if on { ui.text } else { ui.text_muted })
-                                .when(on && applies, |el| el.bg(ui.ink(0.12)))
+                                .gap(px(10.))
+                                .h(px(30.))
+                                .px(px(8.))
+                                .rounded(px(8.))
+                                .text_size(px(13.))
+                                .text_color(if !applies { ui.text_faint } else if on { ui.text } else { Ui::alpha(ui.text, 0.9) })
+                                .when(on && applies, |el| el.bg(selected_bg))
+                                .when(!on && applies, |el| el.hover(move |s| s.bg(selected_bg)))
                                 .when(applies, |el| el.cursor_pointer().on_click(move |_, _, cx| app.update(cx, |a, cx| a.set_effort(e, cx))))
-                                .child(crate::views::brand::short_effort(e)),
+                                .child(div().flex_1().min_w_0().child(crate::views::brand::effort_label(e)))
+                                .when(e == default_level, |el| {
+                                    el.child(div().flex_shrink_0().text_size(px(10.)).font_weight(FontWeight::SEMIBOLD).text_color(ui.text_muted).child("Default"))
+                                })
+                                .when(on, |el| el.child(div().size(px(14.)).flex_shrink_0().text_color(ui.text).child(Icon::from(Lucide::Check)))),
                         );
                     }
-                    col = col
-                        .child(div().mx_2().mt_1().h(px(1.)).bg(ui.border))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .px_3()
-                                .py_2()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(ui.text).child("Thinking"))
-                                        .child(div().flex_1())
-                                        .child(div().text_xs().text_color(ui.text_faint).child(match cur_backend.as_str() {
-                                            "claude" => "applies now".to_string(),
-                                            _ => "applies to new threads".to_string(),
-                                        })),
-                                )
-                                .child(seg),
-                        );
+                    if cur_backend != "claude" {
+                        tray = tray.child(div().px(px(8.)).pt(px(2.)).pb(px(4.)).text_size(px(10.)).text_color(ui.text_faint).child("Applies to new conversations"));
+                    }
+                    col = col.child(tray);
                 }
                 col
             });
         popover.into_any_element()
     }
 
-    fn mcp_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn mcp_picker(&self, ui: &Ui, cx: &mut Context<Self>) -> Option<AnyElement> {
         let m = self.model.read(cx);
         if m.selected.is_some() || m.mcp_names.is_empty() {
             return None;
@@ -509,9 +615,18 @@ impl ComposerView {
         Some(
             Button::new("mcp-picker")
                 .ghost()
-                .small()
                 .compact()
-                .label(label)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .h(px(32.))
+                        .px(px(2.))
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(Ui::alpha(ui.text_muted, 0.7))
+                        .child(label),
+                )
                 .dropdown_menu(move |mut menu, _, _| {
                     menu = menu.label("Attach to the new thread (auto-attach servers are always included)");
                     for n in &names {
@@ -531,12 +646,22 @@ impl ComposerView {
     fn mode_picker(&self, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
         let mode = self.model.read(cx).prefs.mode.clone();
         let app = self.model.clone();
-        let _ = ui;
         Button::new("mode-picker")
             .ghost()
-            .small()
             .compact()
-            .label(mode)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .h(px(32.))
+                    .gap(px(6.))
+                    .px(px(2.))
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(Ui::alpha(ui.text_muted, 0.7))
+                    .child(div().size(px(14.)).child(Icon::from(Lucide::ShieldCheck)))
+                    .child(mode),
+            )
             .dropdown_menu(move |mut menu, _, _| {
                 for m in APPROVAL_CYCLE {
                     let app = app.clone();
@@ -595,7 +720,7 @@ impl Render for ComposerView {
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.85))
                 .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
-                .child(div().size(px(11.)).rounded(px(3.)).bg(ui.bg))
+                .child(div().size(px(11.)).rounded(px(3.)).bg(on_solid))
                 .into_any_element()
         } else {
             let enabled = has_text && !starting;
@@ -618,12 +743,13 @@ impl Render for ComposerView {
                 .into_any_element()
         };
 
-        let drag_border = if self.drag_over { ui.accent } else { ui.border };
+        let drag_border = if self.drag_over { ui.accent } else { ui.pill_border() };
         let tray = self.tray(&ui, cx);
         let model_picker = self.model_selector(&ui, cx);
         let mode_picker = self.mode_picker(&ui, cx);
-        let mcp_picker = self.mcp_picker(cx);
+        let mcp_picker = self.mcp_picker(&ui, cx);
         let context_ring = self.context_ring(&ui, cx);
+        let attach_hover = ui.ink(0.10);
         let hover = ui.hover;
         let _ = danger;
 
@@ -654,7 +780,6 @@ impl Render for ComposerView {
                     .max_w(px(Layout::COMPOSER_MAX))
                     .flex()
                     .flex_col()
-                    .gap_2()
                     .child(
                         div()
                             .id("composer-frame")
@@ -665,7 +790,7 @@ impl Render for ComposerView {
                             .border_1()
                             .border_color(drag_border)
                             .bg(ui.input_bg)
-                            .when(!ui.dark, |el| el.shadow_sm())
+                            .when(!ui.dark, |el| el.shadow_lg())
                             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                                 this.drag_over = false;
                                 for p in paths.paths() {
@@ -678,41 +803,44 @@ impl Render for ComposerView {
                                 div()
                                     .flex()
                                     .items_end()
-                                    .gap_2()
-                                    .pl_5()
-                                    .pr_3()
-                                    .py_3()
+                                    .gap(px(Layout::SPACE_SM))
+                                    .pl(px(16.))
+                                    .pr(px(8.))
+                                    .py(px(7.))
+                                    .min_h(px(47.))
                                     .child(
                                         div()
                                             .flex_1()
                                             .min_w_0()
+                                            .py(px(5.))
                                             .text_size(px(14.))
+                                            .line_height(px(22.75))
                                             .child(Textarea::new(&self.input).appearance(false).bordered(false)),
                                     )
                                     .child(
                                         div()
                                             .flex()
                                             .items_center()
-                                            .gap_0p5()
-                                            .pb_0p5()
+                                            .flex_shrink_0()
+                                            .gap(px(2.))
                                             .child(model_picker)
                                             .child(mode_picker)
                                             .children(mcp_picker)
-                                            .children(context_ring)
                                             .child(
                                                 div()
                                                     .id("attach")
-                                                    .size(px(26.))
+                                                    .size(px(28.))
                                                     .flex()
                                                     .items_center()
                                                     .justify_center()
-                                                    .rounded(px(6.))
+                                                    .rounded_full()
                                                     .text_color(ui.text_muted)
                                                     .cursor_pointer()
-                                                    .hover(move |s| s.bg(hover))
+                                                    .hover(move |s| s.bg(attach_hover))
                                                     .on_click(cx.listener(|this, _, _, cx| this.pick_files(cx)))
-                                                    .child(div().size(px(15.)).child(Icon::from(Lucide::Paperclip))),
+                                                    .child(div().size(px(16.)).child(Icon::from(Lucide::Paperclip))),
                                             )
+                                            .child(div().w(px(6.)))
                                             .child(send_button),
                                     ),
                             ),
@@ -721,28 +849,11 @@ impl Render for ComposerView {
                         div()
                             .flex()
                             .items_center()
-                            .gap_3()
-                            .px_2()
-                            .text_xs()
-                            .text_color(ui.text_faint)
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(div().size(px(11.)).child(Icon::from(Lucide::Folder)))
-                                    .child(location_label),
-                            )
-                            .when_some(branch, |el, b| {
-                                el.child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .child(div().size(px(11.)).child(Icon::from(Lucide::GitBranch)))
-                                        .child(b),
-                                )
-                            })
+                            .h(px(24.))
+                            .gap(px(Layout::SPACE_XS))
+                            .px(px(10.))
+                            .child(footer_label(Lucide::Folder, location_label, &ui))
+                            .when_some(branch, |el, b| el.child(footer_label(Lucide::GitBranch, b, &ui)))
                             .when(!has_thread && new_target, |el| {
                                 el.child(
                                     Button::new("conversation-intent")
@@ -757,7 +868,8 @@ impl Render for ComposerView {
                                 )
                             })
                             .child(div().flex_1())
-                            .when(starting, |el| el.child("starting agent…")),
+                            .when(starting, |el| el.child(div().text_size(px(11.)).text_color(ui.text_faint).child("starting agent…")))
+                            .children(context_ring),
                     ),
             )
     }
@@ -810,4 +922,37 @@ fn context_window(backend: &str, model: &str) -> u64 {
         "codex" => 200_000,
         _ => 200_000,
     }
+}
+
+/// Uppercase with hair-space tracking (gpui has no letter-spacing), as
+/// Zeron's menu headings do.
+fn tracked_upper(label: &str) -> String {
+    let mut out = String::new();
+    for (i, ch) in label.to_uppercase().chars().enumerate() {
+        if i > 0 {
+            out.push('\u{200A}');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Read-only footer label under the pill: 12px icon + 12px medium text at
+/// 60% muted (Zeron `footer_label`).
+fn footer_label(icon: Lucide, text: String, ui: &Ui) -> AnyElement {
+    let color = Ui::alpha(ui.text_muted, 0.6);
+    div()
+        .flex()
+        .items_center()
+        .h(px(20.))
+        .max_w(px(160.))
+        .min_w_0()
+        .gap(px(6.))
+        .px(px(8.))
+        .text_size(px(12.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(color)
+        .child(div().size(px(12.)).flex_shrink_0().child(Icon::from(icon)))
+        .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(text))
+        .into_any_element()
 }
