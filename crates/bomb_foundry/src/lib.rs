@@ -1,5 +1,6 @@
 //! Foundry's portable authoring model and deterministic, framework-free run reducer.
 pub mod contract;
+pub mod presentation;
 pub mod intake;
 pub use intake::*;
 pub mod graph;
@@ -222,6 +223,41 @@ mod acceptance_tests {
         assert_eq!(r.status, RunStatus::WaitingGate);
         r.approve_gate(&r.gate_token()).unwrap();
         assert_eq!(r.status, RunStatus::Completed);
+    }
+    #[test]
+    fn inline_revision_rejects_stale_decisions_and_reruns_review() {
+        let mut r = new_run();
+        r.document.graph = template("plan-build-review");
+        for _ in 0..3 {let a=r.prepare().unwrap().unwrap();r.finish(&a.id,Ok(pass())).unwrap();}
+        r.prepare().unwrap();
+        let token=r.gate_token();
+        assert!(r.request_changes("stale", "Fix screenshots").is_err());
+        assert!(r.request_changes(&token, "  ").is_err());
+        r.request_changes(&token,"Regenerate screenshots").unwrap();
+        assert_eq!(r.current().unwrap().title,"Build and verify");
+        assert!(r.accepted.contains_key("stage-0"));
+        assert!(!r.accepted.contains_key("stage-1"));
+        assert!(!r.accepted.contains_key("stage-2"));
+        assert!(r.document.graph.nodes[2].prompt.contains("Regenerate screenshots"));
+        assert!(r.approve_gate(&token).is_err());
+        for _ in 0..2 {let a=r.prepare().unwrap().unwrap();r.finish(&a.id,Ok(pass())).unwrap();}
+        r.prepare().unwrap();
+        assert_ne!(r.gate_token(),token);
+        r.approve_gate(&r.gate_token()).unwrap();
+        assert_eq!(r.status,RunStatus::Completed);
+        assert!(r.note.is_empty());
+        assert!(r.request_changes(&r.gate_token(),"too late").is_err());
+    }
+    #[test]
+    fn inline_revision_keeps_attempt_limits() {
+        let mut r = new_run();
+        r.document.graph = template("plan-build-review");
+        for _ in 0..3 {let a=r.prepare().unwrap().unwrap();r.finish(&a.id,Ok(pass())).unwrap();}
+        r.prepare().unwrap();
+        r.document.policy.max_attempts=3;
+        r.request_changes(&r.gate_token(),"Fix screenshots").unwrap();
+        assert!(r.prepare().unwrap().is_none());
+        assert_eq!(r.status,RunStatus::Paused);
     }
     #[test]
     fn pause_does_not_dispatch_and_stop_discards_completion() {

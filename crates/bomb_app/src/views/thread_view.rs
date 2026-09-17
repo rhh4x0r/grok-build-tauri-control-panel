@@ -25,6 +25,7 @@ pub struct ThreadView {
     model: Entity<AppModel>,
     transcript: Option<(String, Entity<TranscriptView>)>,
     composer: Entity<ComposerView>,
+    review_loop: Entity<super::review_loop::ReviewLoopView>,
     search_open: bool,
     terminals: std::collections::HashMap<String, Entity<super::terminal::TerminalPanel>>,
     terminals_open: std::collections::HashSet<String>,
@@ -39,6 +40,7 @@ impl ThreadView {
         })
         .detach();
         let composer = cx.new(|cx| ComposerView::new(model.clone(), window, cx));
+        let review_loop = cx.new(|cx|super::review_loop::ReviewLoopView::new(model.clone(),window,cx));
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find in conversation"));
         cx.subscribe(&search, |this, _, ev: &InputEvent, cx| match ev {
             InputEvent::Change => this.push_search(cx),
@@ -56,6 +58,7 @@ impl ThreadView {
             model,
             transcript: None,
             composer,
+            review_loop,
             search_open: false,
             terminals: std::collections::HashMap::new(),
             terminals_open: std::collections::HashSet::new(),
@@ -629,7 +632,14 @@ impl Render for ThreadView {
             )
         };
         let meter = presence.meter(now);
-        let show_status = presence.visible();
+        let loop_run = crate::runtime::services(cx).foundry.for_thread(&tid);
+        let has_loop = loop_run.is_some();
+        let normal_turn = loop_run.as_ref().is_some_and(|r| {
+            if !matches!(r.status,bomb_foundry::RunStatus::Completed|bomb_foundry::RunStatus::Stopped) {return false;}
+            let end=r.gates.last().and_then(|g|g["at"].as_str()).or_else(||r.attempts.last().and_then(|a|a.finished_at.as_deref())).unwrap_or(&r.created_at);
+            chrono::DateTime::parse_from_rfc3339(end).ok().is_some_and(|end|thread.read(cx).thread.entries.iter().any(|e|e.role==bomb_core::transcript::Role::You && e.at>end))
+        });
+        let show_status = presence.visible() && (!has_loop || normal_turn);
         let thread_for_toggle = thread.clone();
 
         div()
@@ -639,11 +649,6 @@ impl Render for ThreadView {
             .flex()
             .flex_col()
             .child(self.header(&thread, &ui, cx))
-            .when_some(crate::runtime::services(cx).foundry.for_thread(&tid), |el,run| {
-                el.child(div().flex().items_center().gap_2().px_4().py_2().border_b_1().border_color(ui.border)
-                    .child(div().flex_1().text_sm().child(format!("Foundry · {:?} · {} / {} · {}",run.status,(run.cursor+1).min(run.document.graph.nodes.len()),run.document.graph.nodes.len(),run.current().map(|n|n.title.as_str()).unwrap_or("Finished"))))
-                    .child(Button::new("open-foundry-run").ghost().small().label("Stages & controls").on_click(cx.listener(|v,_,window,cx| { v.model.update(cx, |m,_| m.foundry_show_runs = true); window.dispatch_action(Box::new(crate::actions::OpenFoundry),cx); }))))
-            })
             .when(self.search_open, |el| el.child(self.find_bar(&ui, cx)))
             .child(fade_in(
                 SharedString::from(format!("transcript-{tid}")),
@@ -685,6 +690,7 @@ impl Render for ThreadView {
                             .when(!show_status, |el| el.child(div().h(px(20.)))),
                     ),
             )
+            .child(self.review_loop.clone())
             .child(composer)
             .when(self.terminals_open.contains(&tid), |el| {
                 if let Some(panel) = self.terminals.get(&tid) {

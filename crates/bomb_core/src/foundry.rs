@@ -204,6 +204,13 @@ impl FoundryService {
         Self::drive(state, run.id.clone());
         Ok(run)
     }
+    pub fn request_changes(state: Arc<AppState>, id: String, token: String, feedback: String) -> Result<(), String> {
+        state.foundry.update(&id, |r| r.request_changes(&token, &feedback))?;
+        notify(&state, &id);
+        Self::drive(state, id);
+        Ok(())
+    }
+
     pub fn command(
         state: Arc<AppState>,
         id: String,
@@ -271,8 +278,9 @@ impl FoundryService {
                 });
             }
         } else if ["resume", "approve"].contains(&command) {
-            Self::drive(state, id);
+            Self::drive(state.clone(), id.clone());
         }
+        notify(&state, &id);
         Ok(())
     }
     fn drive(state: Arc<AppState>, id: String) {
@@ -297,6 +305,7 @@ impl FoundryService {
                     Ok(r) => r,
                     Err(_) => break,
                 };
+                notify(&state, &id);
                 let result = execute_stage(&state, &id, &run, &attempt).await;
                 let _ = state.foundry.update(&id, |r| r.finish(&attempt.id, result));
                 notify(&state, &id);

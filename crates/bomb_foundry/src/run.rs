@@ -188,6 +188,7 @@ impl Run {
         }
         let Some(n) = self.current().cloned() else {
             self.status = RunStatus::Completed;
+            self.note.clear();
             return Ok(None);
         };
         if n.kind == "gate" {
@@ -344,6 +345,31 @@ impl Run {
                 .unwrap_or("initial")
         )
     }
+    pub fn request_changes(&mut self, token: &str, feedback: &str) -> Result<(), String> {
+        if self.status != RunStatus::WaitingGate || token != self.gate_token() {
+            return Err("This review changed. Refresh before requesting changes.".into());
+        }
+        let feedback = feedback.trim();
+        if feedback.is_empty() || feedback.len() > 20_000 {
+            return Err("Describe the requested changes (up to 20,000 bytes).".into());
+        }
+        let ordered = self.document.graph.ordered();
+        let target = ordered.iter().take(self.cursor).rev().find(|n| n.role == "draft" || n.role == "revise")
+            .map(|n| n.id.clone()).ok_or("This workflow has no build stage to revise")?;
+        let cursor = ordered.iter().position(|n| n.id == target).unwrap();
+        let invalid: Vec<_> = ordered.iter().skip(cursor).map(|n| n.id.clone()).collect();
+        self.accepted.retain(|id, _| !invalid.contains(id));
+        for a in &mut self.attempts { if invalid.contains(&a.node_id) { a.invalidated = true; } }
+        self.gates.retain(|g| !invalid.iter().any(|id| g["nodeId"] == *id));
+        for node in self.document.graph.nodes.iter_mut().filter(|n| invalid.contains(&n.id) && n.kind != "gate") {
+            node.prompt.push_str(&format!("\n\nUser requested changes after review:\n{feedback}\nAddress or independently verify this feedback within your stage role. Existing permission boundaries still apply."));
+        }
+        self.cursor = cursor;
+        self.status = RunStatus::Ready;
+        self.note = "Changes requested; returning to build and review".into();
+        Ok(())
+    }
+
     pub fn approve_gate(&mut self, token: &str) -> Result<(), String> {
         if token != self.gate_token() {
             return Err("This gate changed. Review the current evidence before approving.".into());
@@ -358,6 +384,7 @@ impl Run {
         let receipt = crate::id();
         self.gates.push(serde_json::json!({"id":receipt,"nodeId":n,"revision":revision,"at":crate::now(),"attemptIds":self.accepted}));
         self.accepted.insert(n, receipt);
+        self.note.clear();
         self.cursor += 1;
         self.status = if self.cursor == self.document.graph.nodes.len() {
             RunStatus::Completed

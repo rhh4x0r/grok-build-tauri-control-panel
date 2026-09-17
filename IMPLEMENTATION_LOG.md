@@ -490,3 +490,11 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 - Prevented duplicate startup, kept drafts on failure, hydrated the new thread before selecting it, and only cleared an unchanged submitted draft. Image attachments receive an explicit unsupported-source message rather than being dropped.
 - All 15 Foundry tests, workspace check and strict all-target Clippy passed, including a new regression covering build/review revision and final human approval. Native visual verification remains pending.
 - Development build passed; updated and reopened the dev bundle.
+
+## 2026-09-17 — Thread-native review loop progress and decisions
+- Replaced the debug-style Foundry header with a composer-adjacent stage strip, provider/model and frozen completed durations, expandable findings/evidence/file links, and explicit running/waiting/paused/blocked/stopped/completed states. Added inline approve, change requests, pause/resume/stop, explicit retry-limit extension, Preview and View changes; advanced run editing remains available.
+- Completed stage replies collapse to readable summaries. Raw foundry-result envelopes are hidden during streaming (including split tags) and when replaying saved conversations; Technical details preserves raw output. Provider graphics and elapsed times identify stage replies.
+- Added token-validated feedback transitions back to build and independent review, invalidating downstream acceptance and retaining limits. Approval clears stale waiting notes; older completed runs suppress the stale note in both thread and advanced views. Generic turn status resumes for subsequent ordinary prompts rather than displaying stale loop timers.
+- Adapted assistant-ui Task card, Tool timeline and Approval card patterns to native GPUI: https://www.assistant-ui.com/elements/task-card, https://www.assistant-ui.com/elements/tool-timeline, https://www.assistant-ui.com/elements/approval-card.
+- All 18 Foundry tests pass. Core suite: 57 passed, two ignored, one usage-cache assertion failed under the full suite and passed in isolation; no usage-cache changes made. Native visual/interaction verification remains unverified after the prior Computer Use denial.
+- Final workspace check, strict all-target Clippy and development build passed; updated and reopened the dev bundle.

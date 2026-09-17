@@ -33,6 +33,8 @@ pub struct TranscriptView {
     search: Option<(String, usize)>,
     matches: Vec<usize>,
     scrolled_to: Option<usize>,
+    stage_expanded: std::collections::HashSet<u64>,
+    technical_expanded: std::collections::HashSet<u64>,
 }
 
 impl TranscriptView {
@@ -136,6 +138,8 @@ impl TranscriptView {
             search: None,
             matches: Vec::new(),
             scrolled_to: None,
+            stage_expanded: Default::default(),
+            technical_expanded: Default::default(),
         }
     }
 
@@ -229,7 +233,7 @@ impl TranscriptView {
                 }
                 match (&e.role, &e.body) {
                     (Role::Agent, Body::Text(s)) => {
-                        let state = t.markdown_state(e.id, s, cx);
+                        let state = t.markdown_state(e.id, bomb_foundry::presentation::stage_prose(s), cx);
                         let images = if e.streaming {
                             Vec::new()
                         } else {
@@ -365,7 +369,7 @@ impl TranscriptView {
         let cwd = std::path::PathBuf::from(&self.thread.read(cx).meta.cwd);
         let link_cwd = cwd.clone();
         let body_text: AnyElement = if streaming {
-            streaming_text(id, raw, ui)
+            streaming_text(id, bomb_foundry::presentation::stage_prose(raw), ui)
         } else {
             TextView::new(state)
                 .selectable(true)
@@ -445,7 +449,7 @@ impl TranscriptView {
             })
             .when(last && !streaming, |el| {
                 let hover = ui.hover;
-                let text_for_copy: SharedString = raw.to_string().into();
+                let text_for_copy: SharedString = bomb_foundry::presentation::stage_prose(raw).to_string().into();
                 let text_for_mem = text_for_copy.clone();
                 let action = |id: &'static str, label: &'static str| {
                     div()
@@ -479,6 +483,30 @@ impl TranscriptView {
                         ),
                 )
             });
+        if raw.contains("<foundry-result>") && !streaming {
+            let prose = bomb_foundry::presentation::stage_prose(raw);
+            let summary: String = prose.lines().find(|line| !line.trim().is_empty()).unwrap_or("Stage finished").trim_matches('*').chars().take(90).collect();
+            let stage_result = raw.split_once("<foundry-result>").and_then(|(_,tail)|tail.split_once("</foundry-result>")).and_then(|(json,_)|serde_json::from_str::<bomb_foundry::StageResult>(json).ok());
+            let run=svc(cx).foundry.for_thread(&self.thread.read(cx).meta.id);
+            let attempt=run.as_ref().and_then(|run|run.attempts.iter().find(|a|a.result.as_ref().zip(stage_result.as_ref()).is_some_and(|(a,b)|a.summary==b.summary)));
+            let meta=attempt.map(|a| {
+                let seconds=chrono::DateTime::parse_from_rfc3339(&a.started_at).ok().zip(a.finished_at.as_deref().and_then(|s|chrono::DateTime::parse_from_rfc3339(s).ok())).map(|(s,e)|(e-s).num_seconds().max(0)).unwrap_or(0);
+                div().flex().items_center().gap_2().text_xs().text_color(ui.text_muted)
+                    .child(super::brand::brand_mark(&a.backend,13.,true,ui))
+                    .child(format!("{} · {}m {}s{}",a.model,seconds/60,seconds%60,if a.invalidated {" · Superseded by revision"}else{""}))
+            });
+            let expanded=self.stage_expanded.contains(&id);
+            let technical=self.technical_expanded.contains(&id);
+            return div().my_2().p_3().rounded_lg().border_1().border_color(ui.border).bg(ui.glass).flex().flex_col().gap_2()
+                .child(Button::new(("stage-summary",id)).ghost().small().icon(if expanded {Lucide::ChevronDown}else{Lucide::ChevronRight}).label(summary)
+                    .on_click(cx.listener(move|v,_,_,cx|{if !v.stage_expanded.remove(&id){v.stage_expanded.insert(id);}cx.notify();})))
+                .when_some(meta,|el,meta|el.child(meta))
+                .when(expanded,|el|el.child(body))
+                .child(Button::new(("stage-technical",id)).ghost().small().label(if technical {"Hide technical details"}else{"Technical details"})
+                    .on_click(cx.listener(move|v,_,_,cx|{if !v.technical_expanded.remove(&id){v.technical_expanded.insert(id);}cx.notify();})))
+                .when(technical,|el|el.child(div().id(("stage-raw",id)).max_h(px(240.)).overflow_y_scroll().child(TextView::markdown(("stage-raw-text",id),format!("```text\n{raw}\n```")).selectable(true))))
+                .into_any_element();
+        }
         fade_in(("agent", id), body).into_any_element()
     }
 
@@ -1715,7 +1743,7 @@ fn open_path(path: &std::path::Path) {
 
 /// Links in replies: web links open in the browser; relative paths open the
 /// local file (Finder's -50 came from treating `images/1.jpg` as a URL).
-fn open_link(href: &str, cwd: &std::path::Path, cx: &mut App) {
+pub(super) fn open_link(href: &str, cwd: &std::path::Path, cx: &mut App) {
     if href.starts_with("http://") || href.starts_with("https://") || href.starts_with("mailto:") {
         cx.open_url(href);
     } else if let Some(p) = resolve_local(href, cwd, None) {

@@ -1036,7 +1036,7 @@ impl FoundryView {
                     r.attempts.len(),
                     r.cwd
                 )))
-                .child(r.note.clone());
+                .child(if r.status == bomb_foundry::RunStatus::Completed { "Completed".into() } else { r.note.clone() });
             let mut actions = div().flex().flex_wrap().gap_1();
             for (label, command, enabled) in [
                 (

@@ -12,7 +12,7 @@ The sidebar **Foundry** screen remains available for advanced contract, graph an
 
 **Run with review loop**, beside Enhance Prompt, uses the current draft as the request and starts Plan → Build and verify → Independent review → Approve result. Review findings return to Build and verify within the existing retry limits. The selected provider/model and approval mode are preserved; Plan mode remains read-only. Planning and independent review sessions are read-only regardless of the selected mode.
 
-The action uses the current thread, creates an isolated thread for a selected project, or creates a temporary chat when no project is selected. Open **Stages & controls** in the thread to inspect, pause, stop, or approve the run. Startup errors preserve the draft. Image attachments are not passed to loop stages; the UI asks you to send them in a normal chat or include file paths instead. Explicit Foundry sources and approval notes are included.
+The action uses the current thread, creates an isolated thread for a selected project, or creates a temporary chat when no project is selected. Use the loop panel above the composer to inspect stages, pause, stop, resume, approve, or request changes. **Advanced details** opens the full run inspector. Startup errors preserve the draft. Image attachments are not passed to loop stages; the UI asks you to send them in a normal chat or include file paths instead. Explicit Foundry sources and approval notes are included.
 
 ## Author a contract
 
@@ -34,7 +34,7 @@ Run uses the current thread's folder, or creates a thread in an isolated branch 
 
 Stages must return the documented structured result with evidence for every exit criterion. These are agent-reported findings, not proof that a test passed; the run inspector separately shows observed tool events. Invalid results block the run. A revision result follows its configured return edge and invalidates downstream accepted work. Defaults are two returns per edge and three attempts per node across the run.
 
-Human gates pause for explicit approval of the displayed criteria. Pause lets an active stage finish but prevents the next from starting. Stop cancels the active session. Resume/retry is explicit, including after restart. Extending limits requires a separate user action. The thread's **Stages & controls** button opens Runs.
+Human gates pause for explicit approval of the displayed criteria. Pause lets an active stage finish but prevents the next from starting. Stop cancels the active session. Resume/retry is explicit, including after restart. Extending limits requires a separate user action. The thread's **Advanced details** button opens Runs.
 
 ## Files and compatibility
 
@@ -49,3 +49,11 @@ Submitting a new thread checks the destination before clearing the composer. If 
 ## Sources for enhancement
 
 Under Add context, choose **Attach files**, **From memory**, or **Add source** for a manual reference. The memory picker searches saved Bomb Code notes across scopes; only entries you select are included. UTF-8 text files up to 18 KB are included as bounded snapshots. Larger files and binary formats are labeled as path references with their contents explicitly not included. Source rows show whether content was included, retain authority-role controls, and can be removed before generation. Generation is disabled while selected files are being added.
+
+## Review loops in the conversation
+
+The thread keeps a stage strip above the composer with explicit Working, Awaiting your approval, Paused, Needs attention, Stopped, and Completed states. Select a stage for its provider/model, duration, findings, evidence and file links. Completed stage replies collapse into readable cards; `<foundry-result>` envelopes are hidden during streaming and on restored conversations, and remain available under Technical details.
+
+At a human gate, **Approve result** accepts the displayed run revision. **Request changes** sends your feedback back to the most recent build/revision stage and the subsequent independent review, invalidating downstream acceptance. The same attempt limits apply; exhausted limits require explicit extension. Stale approvals are rejected. The completed card records approval, keeps review limitations visible, and offers Preview and View changes. Approval does not commit, merge, or deploy.
+
+Visual patterns adapt assistant-ui's Task card, Tool timeline and Approval card into native GPUI controls; no embedded React runtime is required.
