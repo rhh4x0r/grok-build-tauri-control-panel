@@ -54,6 +54,7 @@ pub fn open_settings_window(cx: &mut App) {
             appears_transparent: false,
             traffic_light_position: None,
         }),
+        window_background: crate::theme::window_background(cx),
         ..Default::default()
     };
     match cx.open_window(options, |window, cx| {
@@ -76,7 +77,7 @@ impl Render for SettingsWindow {
         let ui = Ui::of(cx);
         div()
             .size_full()
-            .bg(ui.bg)
+            .bg(ui.glass)
             .text_color(ui.text)
             .child(
                 Settings::new("bomb-settings")

@@ -74,10 +74,11 @@ impl Layout {
 #[derive(Clone)]
 pub struct Ui {
     pub dark: bool,
-    /// Main content panel.
+    /// Main content panel (opaque fallback).
     pub bg: Hsla,
-    /// Shell / sidebar plane.
-    pub surface: Hsla,
+    /// The one tint the whole window paints over the blurred desktop. Dark:
+    /// `surface` at 80% (Zeron's GLASS_ALPHA); light: opaque white.
+    pub glass: Hsla,
     pub hover: Hsla,
     pub active: Hsla,
     pub border: Hsla,
@@ -104,7 +105,7 @@ impl Ui {
             Self {
                 dark,
                 bg: grey(0x06),
-                surface: grey(0x0d),
+                glass: hsla(0.0, 0.0, 13.0 / 255.0, 0.80),
                 hover: hsla(0.0, 0.0, 0.92, 0.11),
                 active: hsla(0.0, 0.0, 0.92, 0.16),
                 border: hsla(0.0, 0.0, 1.0, 0.08),
@@ -125,7 +126,7 @@ impl Ui {
             Self {
                 dark,
                 bg: grey(0xff),
-                surface: neutral(0.968),
+                glass: grey(0xff),
                 hover: hsla(0.0, 0.0, 0.10, 0.06),
                 active: hsla(0.0, 0.0, 0.10, 0.10),
                 border: hsla(0.0, 0.0, 0.0, 0.10),
@@ -164,6 +165,16 @@ impl Ui {
             ("codex", false) => c(0x3f8a78),
             _ => self.text_muted,
         }
+    }
+}
+
+/// How the platform composites behind our paint: blurred desktop in dark
+/// (frosted glass), opaque in light.
+pub fn window_background(cx: &App) -> WindowBackgroundAppearance {
+    if cx.window_appearance().is_dark() {
+        WindowBackgroundAppearance::Blurred
+    } else {
+        WindowBackgroundAppearance::Opaque
     }
 }
 

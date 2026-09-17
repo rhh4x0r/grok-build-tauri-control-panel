@@ -209,7 +209,6 @@ impl Render for ThreadView {
                 .size_full()
                 .flex()
                 .flex_col()
-                .bg(ui.bg)
                 .child(div().flex_1().min_h_0().child(self.welcome(&ui, cx)))
                 .child(composer)
                 .into_any_element();
@@ -236,7 +235,6 @@ impl Render for ThreadView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(ui.bg)
             .child(self.header(&thread, &ui, cx))
             .child(fade_in(
                 SharedString::from(format!("transcript-{tid}")),

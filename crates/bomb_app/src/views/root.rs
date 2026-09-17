@@ -207,7 +207,7 @@ impl Render for RootView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(ui.bg)
+            .bg(ui.glass)
             .text_color(ui.text)
             .child(self.title_bar(&ui, cx))
             .child(
@@ -230,6 +230,7 @@ pub fn open_main_window(model: Entity<AppModel>, cx: &mut App) {
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_min_size: Some(size(px(960.), px(640.))),
+        window_background: crate::theme::window_background(cx),
         ..TitleBar::window_options()
     };
     cx.spawn(async move |cx| {

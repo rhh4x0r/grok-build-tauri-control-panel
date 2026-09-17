@@ -335,7 +335,6 @@ impl Render for SidebarView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(ui.surface)
             .border_r_1()
             .border_color(ui.border)
             .child(self.header(&ui, cx))
