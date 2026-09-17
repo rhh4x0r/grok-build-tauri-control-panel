@@ -585,6 +585,33 @@ pub async fn agent_supports_images(state: &AppState, id: String) -> Result<bool,
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Block until a freshly spawned session has finished connecting (Idle) or
+/// died (Failed). `send_prompt` refuses a session that is still Starting, so
+/// the new-thread flow calls this between `start_session` and the first send.
+pub async fn wait_until_idle(state: &AppState, id: &str, timeout: std::time::Duration) -> Result<(), String> {
+    use grok_events::SessionStatus;
+    let id = Uuid::parse_str(id).map_err(err)?;
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let status = state.registry.get_snapshot(id).map_err(err)?.metadata.status;
+        match status {
+            SessionStatus::Starting => {}
+            SessionStatus::Failed => return Err("the agent failed to start — check Services".into()),
+            _ => return Ok(()),
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("the agent is taking too long to start".into());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    }
+}
+
+/// Account usage limits for every backend that exposes them.
+pub async fn account_usage() -> Vec<crate::usage::AccountUsage> {
+    crate::usage::all().await
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn send_prompt(
     state: &AppState,
     id: String,

@@ -77,6 +77,8 @@ pub struct AppModel {
     pub threads: HashMap<Uuid, Entity<ThreadModel>>,
     pub selected: Option<Uuid>,
     pub auth: Vec<BackendAuth>,
+    /// Account usage limits (5h / weekly) per backend, refreshed slowly.
+    pub usage: Vec<bomb_core::usage::AccountUsage>,
     pub backends: Vec<BackendInfo>,
     pub prefs: ComposerPrefs,
     pub dev_server: Option<DevServerStatus>,
@@ -103,6 +105,7 @@ impl AppModel {
             threads: HashMap::new(),
             selected: None,
             auth: Vec::new(),
+            usage: Vec::new(),
             backends: Vec::new(),
             prefs: ComposerPrefs::default(),
             dev_server: None,
@@ -126,6 +129,7 @@ impl AppModel {
         self.refresh_threads(cx);
         self.refresh_projects(cx);
         self.refresh_services(cx);
+        self.refresh_usage(cx);
         self.refresh_backends(cx);
         self.refresh_dev_server(cx);
         self.refresh_mcp_names(cx);
@@ -248,13 +252,43 @@ impl AppModel {
     /// Services change rarely; a slow poll keeps the footer honest after a
     /// sign-in that happened in a terminal.
     fn start_service_poll(&mut self, cx: &mut Context<Self>) {
-        cx.spawn(async move |weak, cx| loop {
-            cx.background_executor().timer(Duration::from_secs(20)).await;
-            if weak.update(cx, |m, cx| m.refresh_services(cx)).is_err() {
-                break;
+        cx.spawn(async move |weak, cx| {
+            let mut tick: u32 = 0;
+            loop {
+                cx.background_executor().timer(Duration::from_secs(20)).await;
+                tick += 1;
+                // Usage limits move slowly and hit vendor APIs: every 2 minutes.
+                let usage = tick.is_multiple_of(6);
+                if weak
+                    .update(cx, |m, cx| {
+                        m.refresh_services(cx);
+                        if usage {
+                            m.refresh_usage(cx);
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
             }
         })
         .detach();
+    }
+
+    pub fn refresh_usage(&mut self, cx: &mut Context<Self>) {
+        let this = cx.entity().downgrade();
+        spawn_service(cx, services::account_usage(), move |list, cx| {
+            let _ = this.update(cx, |m, cx| {
+                if m.usage != list {
+                    m.usage = list;
+                    cx.notify();
+                }
+            });
+        });
+    }
+
+    pub fn usage_for(&self, backend: &str) -> Option<&bomb_core::usage::AccountUsage> {
+        self.usage.iter().find(|u| u.backend == backend && !u.windows.is_empty())
     }
 
     fn ensure_dev_poll(&mut self, cx: &mut Context<Self>) {
@@ -574,9 +608,12 @@ impl AppModel {
                     "yolo" => Some(ApprovalMode::Yolo),
                     _ => None,
                 };
+                // Spawn with the model the composer shows, never the stale
+                // config default ("grok-4").
+                let model = Some(self.effective_model()).filter(|m| !m.trim().is_empty());
                 let opts = SpawnOptions {
                     backend,
-                    model: prefs.model.clone(),
+                    model: model.clone(),
                     approval_mode,
                     isolate_worktree: prefs.worktree && !prefs.temporary,
                     project_root: Some(cwd.clone()),
@@ -589,7 +626,8 @@ impl AppModel {
                 let state2 = state.clone();
                 let text2 = text.clone();
                 let images2 = images.clone();
-                let prefs2 = prefs.clone();
+                let mut prefs2 = prefs.clone();
+                prefs2.model = model;
                 spawn_service(
                     cx,
                     async move { services::start_session(&state, cwd, opts).await },
@@ -639,6 +677,14 @@ impl AppModel {
                                     spawn_service(
                                         cx,
                                         async move {
+                                            // The ACP handshake is still in flight right
+                                            // after start_session; sending now is refused.
+                                            services::wait_until_idle(
+                                                &state2,
+                                                &sid,
+                                                std::time::Duration::from_secs(90),
+                                            )
+                                            .await?;
                                             services::send_prompt(
                                                 &state2,
                                                 sid,

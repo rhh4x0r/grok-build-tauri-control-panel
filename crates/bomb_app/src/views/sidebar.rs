@@ -6,6 +6,7 @@ use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, Sizable, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -368,6 +369,28 @@ impl SidebarView {
         out
     }
 
+    /// Service row plus, when the account exposes them, its usage bars.
+    fn service_block(&self, a: &BackendAuth, ui: &Ui, cx: &Context<Self>) -> impl IntoElement {
+        let usage = if a.logged_in { self.model.read(cx).usage_for(&a.backend).cloned() } else { None };
+        div()
+            .flex()
+            .flex_col()
+            .child(self.service_row(a, ui))
+            .when_some(usage, |el, u| {
+                el.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .mx_2()
+                        .px_2()
+                        .pl(px(30.))
+                        .pb_1()
+                        .children(u.windows.iter().enumerate().map(|(ix, w)| usage_bar(&a.backend, ix, w, ui))),
+                )
+            })
+    }
+
     fn service_row(&self, a: &BackendAuth, ui: &Ui) -> impl IntoElement {
         let model = self.model.clone();
         let backend = a.backend.clone();
@@ -532,9 +555,58 @@ impl Render for SidebarView {
                             .text_color(ui.text_faint)
                             .child("Services"),
                     )
-                    .children(auth.iter().map(|a| self.service_row(a, &ui))),
+                    .children(auth.iter().map(|a| self.service_block(a, &ui, cx))),
             )
     }
+}
+
+/// One usage window: label, thin track, percentage. Track turns amber past
+/// 75% and red past 90%.
+fn usage_bar(backend: &str, ix: usize, w: &bomb_core::usage::UsageWindow, ui: &Ui) -> impl IntoElement {
+    let pct = w.used_pct.clamp(0.0, 100.0);
+    let fill = if pct >= 90.0 {
+        ui.danger
+    } else if pct >= 75.0 {
+        ui.warning
+    } else {
+        ui.text_muted
+    };
+    let resets = w.resets_at.map(|t| {
+        let secs = (t - Utc::now()).num_seconds().max(0);
+        if secs < 3600 {
+            format!("resets in {}m", (secs / 60).max(1))
+        } else if secs < 86_400 {
+            format!("resets in {}h", secs / 3600)
+        } else {
+            format!("resets in {}d", secs / 86_400)
+        }
+    });
+    let mut track = ui.border;
+    track.a *= 0.9;
+    div()
+        .id(SharedString::from(format!("usage-{backend}-{ix}")))
+        .flex()
+        .items_center()
+        .gap_2()
+        .when_some(resets, |el, r| el.tooltip(move |window, cx| Tooltip::new(r.clone()).build(window, cx)))
+        .child(div().w(px(40.)).text_xs().text_color(ui.text_faint).child(w.label.clone()))
+        .child(
+            div()
+                .flex_1()
+                .h(px(4.))
+                .rounded_full()
+                .bg(track)
+                .overflow_hidden()
+                .child(div().h_full().rounded_full().w(relative(pct / 100.0)).bg(fill)),
+        )
+        .child(
+            div()
+                .w(px(32.))
+                .text_xs()
+                .text_right()
+                .text_color(ui.text_faint)
+                .child(format!("{}%", pct.round() as i64)),
+        )
 }
 
 /// "49m", "2d", "4w" from an RFC3339 timestamp.

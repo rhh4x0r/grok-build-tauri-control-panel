@@ -2325,7 +2325,7 @@ impl AcpClient {
                     },
                 );
                 emit_images(
-                    &bus,
+                    bus,
                     sid,
                     update.get("toolCallId").or_else(|| update.get("id")).and_then(|v| v.as_str()),
                     extract_image_blocks(update.get("content")),
