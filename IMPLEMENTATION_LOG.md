@@ -308,3 +308,8 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 - Made the dark component background opaque so confirmation dialogs no longer show underlying content through their surface. The app's artwork and glass tint remain independently rendered.
 - Updated the smoke workflow to open Settings through its normal action instead of creating another window.
 - Validation: workspace check, strict all-target Clippy, development build, and diff whitespace checks passed. Live visual verification remains unavailable following the Computer Use access denial; the smoke workflow was updated but not executed.
+
+## 2026-09-17 — Sidebar brand and Home navigation
+- Moved the Bomb Code wordmark from the title bar to a clickable row above the sidebar's selected project folder.
+- Clicking the wordmark returns to the welcome screen, deselecting the active project/conversation and closing review/preview panels without removing saved content.
+- Validation: workspace check, strict all-target Clippy, development build, and diff whitespace checks passed. Live UI verification remains unavailable after the earlier Computer Use access denial.

@@ -123,23 +123,6 @@ impl RootView {
                         .min_w_0()
                         .child(
                             div()
-                                .flex()
-                                .items_center()
-                                .gap_1p5()
-                                .flex_shrink_0()
-                                .child(div().text_size(px(14.)).child("💣"))
-                                .child(
-                                    div()
-                                        .font_family(ui.mono.clone())
-                                        .text_size(px(13.))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(ui.text)
-                                        .child("Bomb Code"),
-                                ),
-                        )
-                        .child(div().w(px(1.)).h(px(14.)).bg(ui.hairline(0.14)).mx_1())
-                        .child(
-                            div()
                                 .text_sm()
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(ui.text_muted)
@@ -185,6 +168,13 @@ impl Render for RootView {
                 this.settings_open = false;
                 this.model.update(cx, |m, cx| m.new_workspace_thread(cx));
                 this.thread.update(cx, |t, cx| t.focus_composer(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &crate::actions::OpenHome, window, cx| {
+                this.settings_open = false;
+                this.preview_open = false;
+                this.model.update(cx, |m, cx| m.open_home(cx));
+                this.thread.update(cx, |t, cx| t.focus_composer(window, cx));
+                cx.notify();
             }))
             .on_action(cx.listener(move |this, _: &NewThread, window, cx| {
                 this.settings_open = false;

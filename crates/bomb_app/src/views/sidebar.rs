@@ -809,6 +809,37 @@ impl Render for SidebarView {
                     _ => {}
                 }
             }))
+            .child(
+                div()
+                    .px(px(Layout::SPACE_SM))
+                    .pt(px(Layout::SPACE_SM))
+                    .pb(px(Layout::SPACE_XS))
+                    .child(
+                        div()
+                            .id("bomb-home")
+                            .flex()
+                            .items_center()
+                            .gap(px(Layout::SPACE_SM))
+                            .px(px(Layout::SPACE_SM))
+                            .h(px(36.))
+                            .rounded(px(8.))
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(ui.hover))
+                            .tooltip(|window, cx| Tooltip::new("Home").build(window, cx))
+                            .child(div().text_size(px(16.)).child("💣"))
+                            .child(
+                                div()
+                                    .font_family(ui.mono.clone())
+                                    .text_size(px(14.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(ui.text)
+                                    .child("Bomb Code"),
+                            )
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(crate::actions::OpenHome), cx);
+                            }),
+                    ),
+            )
             .child(self.header(&ui, cx))
             .child(div().px(px(Layout::SPACE_SM)).pb(px(Layout::SPACE_XS)).child(Input::new(&self.search).cleanable(true).appearance(true)))
             .child(

@@ -620,6 +620,14 @@ impl AppModel {
         cx.notify();
     }
 
+    /// Return to the welcome screen without removing projects or conversations.
+    pub fn open_home(&mut self, cx: &mut Context<Self>) {
+        self.new_thread(cx);
+        self.active_project = None;
+        self.review = None;
+        self.review_open = false;
+    }
+
     fn hydrate(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let Some(entity) = self.threads.get(&id).cloned() else {
             return;

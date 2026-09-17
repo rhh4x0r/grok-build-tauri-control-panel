@@ -7,6 +7,7 @@ gpui_kit::actions!(
     [
         Quit,
         OpenSettings,
+        OpenHome,
         NewThread,
         NewWorkspaceConversation,
         NewMockSession,
