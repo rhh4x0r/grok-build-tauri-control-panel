@@ -478,6 +478,11 @@ impl SessionRegistry {
         Ok(id)
     }
 
+    /// Status events may arrive before connect_and_fill installs the ACP handle.
+    pub fn is_ready(&self, id: Uuid) -> bool {
+        self.sessions.get(&id).is_some_and(|entry| entry.metadata.mode != AgentMode::Acp || entry.acp_client.is_some())
+    }
+
     pub fn is_live(&self, id: Uuid) -> bool {
         self.sessions.contains_key(&id)
     }
@@ -625,31 +630,23 @@ impl SessionRegistry {
     }
 
     pub async fn set_approval_mode(&self, id: Uuid, mode: ApprovalMode) -> Result<()> {
-        let client = {
-            let mut entry = self
-                .sessions
-                .get_mut(&id)
-                .ok_or(CoreError::SessionNotFound(id))?;
-            entry.metadata.approval_mode = mode;
-            entry.metadata.plan_mode = mode == ApprovalMode::Plan;
-            entry.metadata.always_approve = mode == ApprovalMode::Yolo;
-            entry.touch();
-            entry.acp_client.clone()
-        };
+        let client = self.sessions.get(&id).ok_or(CoreError::SessionNotFound(id))?.acp_client.clone();
         if let Some(client) = client {
-            // Client-side gating is authoritative; the agent-side mode is
-            // best-effort (most adapters don't advertise an auto mode).
-            client.set_approval_mode(mode).await;
             let wanted = match mode {
                 ApprovalMode::Plan => "plan",
                 ApprovalMode::Auto => "auto",
                 ApprovalMode::Yolo => "always_approve",
                 ApprovalMode::Ask => "default",
             };
-            if let Err(e) = client.set_mode(wanted).await {
-                tracing::warn!(error = %e, ?mode, "agent-side mode not applied (client gate still enforces it)");
-            }
+            // Do not claim a mode changed when the provider rejected it.
+            client.set_mode(wanted).await?;
+            client.set_approval_mode(mode).await;
         }
+        let mut entry = self.sessions.get_mut(&id).ok_or(CoreError::SessionNotFound(id))?;
+        entry.metadata.approval_mode = mode;
+        entry.metadata.plan_mode = mode == ApprovalMode::Plan;
+        entry.metadata.always_approve = mode == ApprovalMode::Yolo;
+        entry.touch();
         Ok(())
     }
 
@@ -712,6 +709,14 @@ impl SessionRegistry {
         Ok(())
     }
 
+    /// Retire an idle provider during a model switch without cancelling the new UI turn.
+    pub async fn retire_session(&self, id: Uuid) -> Result<()> {
+        if let Some((_, handle)) = self.sessions.remove(&id) {
+            if let Some(client) = handle.acp_client { client.shutdown().await?; }
+        }
+        Ok(())
+    }
+
     pub async fn remove_session(&self, id: Uuid) -> Result<()> {
         let _ = self.cancel_session(id).await;
         // cancel() only sends session/cancel — the grok child (and any MCP
@@ -755,6 +760,23 @@ mod tests {
         let cfg = Arc::new(tokio::sync::RwLock::new(GrokConfig::default()));
         let cli = Arc::new(GrokCli::new(PathBuf::from("/bin/true")));
         SessionRegistry::new(bus, cfg, cli)
+    }
+
+    #[tokio::test]
+    async fn readiness_requires_installed_client_and_retirement_does_not_cancel() {
+        let reg = test_registry();
+        let id = reg.spawn_mock("/tmp").await.unwrap();
+        assert!(reg.is_ready(id));
+        let client = reg.sessions.get_mut(&id).unwrap().acp_client.take();
+        reg.sessions.get_mut(&id).unwrap().metadata.status = SessionStatus::Idle;
+        assert!(!reg.is_ready(id));
+        reg.sessions.get_mut(&id).unwrap().acp_client = client;
+        let mut events = reg.event_bus.subscribe();
+        reg.retire_session(id).await.unwrap();
+        assert!(!reg.is_live(id));
+        while let Ok(event) = events.try_recv() {
+            assert!(!matches!(event, grok_events::ControlEvent::SessionCancelled { .. } | grok_events::ControlEvent::SessionStatusChanged { status: SessionStatus::Cancelled, .. }));
+        }
     }
 
     #[tokio::test]

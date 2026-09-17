@@ -239,6 +239,7 @@ pub struct AcpClient {
     resume_session_supported: RwLock<bool>,
     /// Mode ids the agent advertised in the session/new//load result.
     available_modes: RwLock<Vec<String>>,
+    auto_mode_override: RwLock<Option<String>>,
     /// Session config options the agent advertised (id → selectable values),
     /// e.g. the Claude adapter's `effort`.
     config_options: RwLock<HashMap<String, Vec<String>>>,
@@ -400,6 +401,7 @@ impl AcpClient {
             load_session_supported: RwLock::new(false),
             resume_session_supported: RwLock::new(false),
             available_modes: RwLock::new(Vec::new()),
+            auto_mode_override: RwLock::new(None),
             config_options: RwLock::new(HashMap::new()),
             config_current: RwLock::new(HashMap::new()),
             model_catalog: RwLock::new(crate::ModelCatalog::default()),
@@ -477,6 +479,7 @@ impl AcpClient {
             load_session_supported: RwLock::new(false),
             resume_session_supported: RwLock::new(false),
             available_modes: RwLock::new(Vec::new()),
+            auto_mode_override: RwLock::new(None),
             config_options: RwLock::new(HashMap::new()),
             config_current: RwLock::new(HashMap::new()),
             model_catalog: RwLock::new(crate::ModelCatalog::default()),
@@ -908,8 +911,32 @@ impl AcpClient {
             info!(?available, ?current, "ACP agent session modes");
             *self.available_modes.write().await = available;
         }
+        if let Some(options) = modes.and_then(|m| m.get("availableModes")).and_then(Value::as_array) {
+            let options: Vec<Value> = options.iter().map(|m| json!({"value":m.get("id").or_else(||m.get("modeId")), "name":m.get("name"), "description":m.get("description")})).collect();
+            self.emit_mode_options(json!(options), current.as_deref());
+        }
         if current.is_some() {
             *self.current_mode.write().await = current;
+        }
+    }
+
+    async fn record_effective_mode(&self, mode: &str) {
+        if *self.approval_mode.read().await == ApprovalMode::Auto
+            && matches!(mode.to_ascii_lowercase().as_str(), "acceptedits" | "accept_edits") {
+            *self.auto_mode_override.write().await = Some(mode.into());
+            if let Some(bus) = &self.event_bus {
+                bus.emit(ControlEvent::Raw { session_id: Some(self.control_session_id), payload: json!({
+                    "channel":"provider_modes", "backend":self.config.backend_label, "auto_value":mode
+                }) });
+            }
+        }
+    }
+
+    fn emit_mode_options(&self, options: Value, current: Option<&str>) {
+        if let Some(bus) = &self.event_bus {
+            bus.emit(ControlEvent::Raw { session_id: Some(self.control_session_id),
+                payload: json!({"channel":"provider_modes", "backend":self.config.backend_label,
+                    "options":options, "current":current}) });
         }
     }
 
@@ -938,6 +965,12 @@ impl AcpClient {
                         .collect()
                 })
                 .unwrap_or_default();
+            if id == "mode" || opt.get("category").and_then(Value::as_str) == Some("mode") {
+                *self.available_modes.write().await = values.clone();
+                let active = opt.get("currentValue").and_then(Value::as_str);
+                if let Some(active) = active { *self.current_mode.write().await = Some(active.into()); self.record_effective_mode(active).await; }
+                self.emit_mode_options(opt.get("options").cloned().unwrap_or(json!([])), active);
+            }
             map.insert(id.to_string(), values);
         }
         {
@@ -993,6 +1026,9 @@ impl AcpClient {
         let advertised = self.available_modes.read().await.clone();
         if advertised.is_empty() {
             return Some(wanted.to_string());
+        }
+        if wanted == "auto" {
+            if let Some(value) = self.auto_mode_override.read().await.as_ref().filter(|v| advertised.contains(v)) { return Some(value.clone()); }
         }
         if let Some(exact) = advertised.iter().find(|m| m.eq_ignore_ascii_case(wanted)) {
             return Some(exact.clone());
@@ -1409,9 +1445,10 @@ impl AcpClient {
             // in OUR terminal host — kill them so Stop actually stops work.
             self.terminals.kill_all().await;
         }
-        if let Some(bus) = &self.event_bus {
-            bus.emit_status(self.control_session_id, SessionStatus::Cancelled)
-                .await;
+        if !self.shutting_down.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Some(bus) = &self.event_bus {
+                bus.emit_status(self.control_session_id, SessionStatus::Cancelled).await;
+            }
         }
         Ok(())
     }
@@ -1430,6 +1467,8 @@ impl AcpClient {
             mode == ApprovalMode::Yolo,
             std::sync::atomic::Ordering::Relaxed,
         );
+        let current = self.current_mode.read().await.clone();
+        if let Some(current) = current { self.record_effective_mode(&current).await; }
     }
 
     pub async fn approval_mode(&self) -> ApprovalMode {
@@ -1473,6 +1512,10 @@ impl AcpClient {
                     .unwrap_or_default()
             ))
         })?;
+        // Notifications during this RPC may report a model-specific fallback.
+        // Seed the request now so those authoritative updates win.
+        let previous_mode = self.current_mode.read().await.clone();
+        *self.current_mode.write().await = Some(mode_id.clone());
         // ACP spec: session/set_mode takes { sessionId, modeId }.
         let params = json!({
             "sessionId": sid,
@@ -1488,8 +1531,17 @@ impl AcpClient {
                 self.request_timeout("session/setMode", Some(params)).await
             }
             Err(e) => Err(e),
-        }?;
-        let _ = result;
+        };
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                let mut current = self.current_mode.write().await;
+                if current.as_deref() == Some(&mode_id) { *current = previous_mode; }
+                return Err(error);
+            }
+        };
+        self.capture_modes(&result).await;
+        self.capture_config_options(&result).await;
         // Plan requested but the agent only has a restrictive mode (codex/grok
         // ACP adapters advertise read-only/agent/agent-full-access, no plan):
         // emulate by also injecting planning instructions into each prompt.
@@ -1497,7 +1549,10 @@ impl AcpClient {
             mode == "plan" && !is_plan_like(&mode_id),
             std::sync::atomic::Ordering::Relaxed,
         );
-        *self.current_mode.write().await = Some(mode_id);
+        let applied_mode = self.current_mode.read().await.clone().unwrap_or(mode_id);
+        if let Some(bus) = &self.event_bus {
+            bus.emit(ControlEvent::Raw { session_id: Some(self.control_session_id), payload: json!({"channel":"provider_modes", "backend":self.config.backend_label, "current":applied_mode}) });
+        }
         Ok(())
     }
 
@@ -2445,6 +2500,7 @@ impl AcpClient {
             | "message"
             | "agentmessagechunk"
             | "agentmessage" => {
+                emit_images(bus, sid, None, extract_image_blocks(update.get("content")));
                 if let Some(text) = extract_agent_text(update) {
                     if !text.is_empty() {
                         bus.emit(ControlEvent::AgentMessage {
@@ -2527,6 +2583,8 @@ impl AcpClient {
                     .and_then(|v| v.as_str())
                 {
                     *self.current_mode.write().await = Some(mode.to_string());
+                    self.record_effective_mode(mode).await;
+                    bus.emit(ControlEvent::Raw { session_id: Some(sid), payload: json!({"channel":"provider_modes", "backend":self.config.backend_label, "current":mode}) });
                     Self::emit_term(bus, sid, format!("mode → {mode}"));
                 }
             }
@@ -3296,6 +3354,35 @@ mod tests {
         assert!(c.respond_approval("7", Some("bogus")).await.is_err());
         // Still answerable with a valid option after the bad attempt.
         c.respond_approval("7", Some("allow")).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn provider_auto_fallback_survives_switching_to_manual() {
+        let client = AcpClient::mock_for_tests("mode-session", None);
+        client.set_approval_mode(ApprovalMode::Auto).await;
+        client.capture_config_options(&json!({"configOptions":[{"id":"mode","currentValue":"acceptEdits","options":[
+            {"value":"default"},{"value":"auto"},{"value":"acceptEdits"}
+        ]}]})).await;
+        client.set_approval_mode(ApprovalMode::Ask).await;
+        *client.current_mode.write().await = Some("default".into());
+        assert_eq!(client.resolve_mode_id("auto").await.as_deref(), Some("acceptEdits"));
+    }
+
+    #[tokio::test]
+    async fn agent_image_blocks_reach_the_transcript() {
+        let bus = grok_events::shared_bus();
+        let client = AcpClient::mock_for_tests("image-session", Some(bus.clone()));
+        let mut events = bus.subscribe();
+        client.map_session_update(&bus, Uuid::new_v4(), &json!({"update":{
+            "sessionUpdate":"agent_message_chunk", "content":{"type":"image","mimeType":"image/png","data":"aGVsbG8="}
+        }})).await;
+        let mut found = false;
+        while let Ok(event) = events.try_recv() {
+            if let ControlEvent::Raw { payload, .. } = event {
+                if payload["channel"] == "image" { assert_eq!(payload["data"], "aGVsbG8="); found = true; }
+            }
+        }
+        assert!(found);
     }
 
     #[test]

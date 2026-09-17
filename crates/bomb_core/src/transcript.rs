@@ -547,7 +547,7 @@ impl Thread {
                 name: te.tool.clone(),
                 status: status.clone(),
                 args: clip_chars(&te.args_summary, 2000),
-                result: te.result_summary.as_deref().map(|r| clip_chars(r, 800)),
+                result: te.result_summary.as_deref().map(tool_result_summary),
             };
             // One row per tool call: later events update it in place.
             match self.find_tool(&te.id) {
@@ -1059,6 +1059,18 @@ fn str_at(v: &Value, key: &str) -> Option<String> {
 
 fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
+}
+
+// Keep artifact coordinates intact even when the tool's prose is very long.
+fn tool_result_summary(raw: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<Value>(raw) {
+        if v.get("path").and_then(Value::as_str).is_some()
+            && v.get("filename").and_then(Value::as_str).is_some()
+            && v.get("session_folder").and_then(Value::as_str).is_some() {
+            return serde_json::json!({"path":v["path"], "filename":v["filename"], "session_folder":v["session_folder"]}).to_string();
+        }
+    }
+    clip_chars(raw, 800)
 }
 
 fn clip(text: &str, n: usize) -> String {

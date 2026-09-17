@@ -659,7 +659,10 @@ impl ComposerView {
     fn mode_picker(&self, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
         let mode = self.model.read(cx).prefs.mode.clone();
         let app = self.model.clone();
-        let (label, icon, description) = mode_presentation(&mode);
+        let options = self.model.read(cx).provider_mode_options(cx);
+        let (label, icon, description) = provider_mode_presentation(&mode, &options).unwrap_or_else(|| {
+            let (label, icon, desc) = mode_presentation(&mode); (label.into(), icon, desc.into())
+        });
         Button::new("mode-picker")
             .ghost()
             .compact()
@@ -687,7 +690,7 @@ impl ComposerView {
                 for m in APPROVAL_CYCLE {
                     if m == "yolo" { menu = menu.separator().item(PopupMenuItem::label("Advanced · explicit opt-in")); }
                     let app = app.clone();
-                    let (label, icon, description) = mode_presentation(m);
+                    let Some((label, icon, description)) = provider_mode_presentation(m, &options) else { continue; };
                     menu = menu.item(PopupMenuItem::element(move |_, cx| {
                         let ui = Ui::of(cx);
                         div().flex().items_start().gap(px(10.)).py(px(6.)).w(px(260.))
@@ -695,18 +698,45 @@ impl ComposerView {
                                 .child(Icon::from(icon).size(px(16.))))
                             .child(div().flex_1().min_w_0().flex().flex_col().gap(px(3.))
                                 .child(div().text_size(px(12.)).line_height(px(16.)).font_weight(FontWeight::MEDIUM)
-                                    .text_color(if m == "yolo" { ui.warning } else { ui.text }).child(label))
+                                    .text_color(if m == "yolo" { ui.warning } else { ui.text }).child(label.clone()))
                                 .child(div().text_size(px(11.)).line_height(px(15.)).text_color(ui.text_muted)
-                                    .whitespace_normal().child(description)))
+                                    .whitespace_normal().child(description.clone())))
                     }).checked(m == mode).on_click(move |_, window, cx| {
                         super::approval_mode::request(app.clone(), m, window, cx);
                     }));
                 }
-                menu.separator().item(PopupMenuItem::label("Shift+Tab: Plan → Ask first → Auto"))
+                menu.separator().item(PopupMenuItem::label("Shift+Tab cycles available modes"))
             })
             .into_any_element()
     }
 
+}
+
+/// Keep host approval enforcement while showing the connected provider's actual mode names.
+pub(crate) fn provider_mode_presentation(mode: &str, catalog: &serde_json::Value) -> Option<(String, Lucide, String)> {
+    let (label, icon, description) = mode_presentation(mode);
+    let Some(options) = catalog.get("options").and_then(|v|v.as_array()) else {
+        return Some((label.into(), icon, format!("{description} Provider mode is resolved on connection.")));
+    };
+    let candidates: &[&str] = match mode {
+        "plan" => &["plan", "planning", "read-only", "readonly"],
+        "auto" => &["auto", "acceptEdits", "accept_edits", "agent"],
+        "yolo" => &["always_approve", "alwaysallow", "always_allow", "bypassPermissions", "yolo", "dontAsk", "agent-full-access"],
+        _ => &["default", "normal", "ask", "code", "agent"],
+    };
+    let find = |id: &str| options.iter().find(|o|o.get("value").and_then(|v|v.as_str()).is_some_and(|v|v.eq_ignore_ascii_case(id)));
+    let current = if mode == "auto" { catalog.get("auto_value").or_else(|| catalog.get("current")) } else { catalog.get("current") }.and_then(|v|v.as_str());
+    let option = current.filter(|id| candidates.iter().any(|c|c.eq_ignore_ascii_case(id))).and_then(find)
+        .or_else(||candidates.iter().find_map(|id|find(id)))?;
+    let native = option.get("name").and_then(|v|v.as_str()).unwrap_or(label);
+    let desc = option.get("description").and_then(|v|v.as_str()).unwrap_or(description);
+    // Full access remains an explicit opt-in regardless of native terminology.
+    let value = option.get("value").and_then(|v|v.as_str()).unwrap_or_default();
+    let display = if mode == "yolo" { "Full access" }
+        else if mode == "ask" && value == "agent" { "Ask first" }
+        else if mode == "plan" { "Plan" }
+        else { native };
+    Some((display.into(), icon, format!("{desc} {description}")))
 }
 
 /// UI names are separate from the backend's stable approval-mode identifiers.
@@ -993,4 +1023,18 @@ fn footer_label(icon: Lucide, text: String, ui: &Ui) -> AnyElement {
         .child(div().size(px(12.)).flex_shrink_0().child(Icon::from(icon)))
         .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(text))
         .into_any_element()
+}
+
+#[cfg(test)]
+mod provider_mode_tests {
+    use super::provider_mode_presentation;
+    #[test]
+    fn shows_provider_fallback_and_omits_unavailable_modes() {
+        let options = serde_json::json!({"current":"default","auto_value":"acceptEdits","options":[
+            {"value":"default","name":"Manual"}, {"value":"acceptEdits","name":"Accept edits"}, {"value":"plan","name":"Plan"}
+        ]});
+        assert_eq!(provider_mode_presentation("auto", &options).unwrap().0, "Accept edits");
+        assert_eq!(provider_mode_presentation("ask", &options).unwrap().0, "Manual");
+        assert!(provider_mode_presentation("yolo", &options).is_none());
+    }
 }

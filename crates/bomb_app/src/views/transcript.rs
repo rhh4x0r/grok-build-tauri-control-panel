@@ -139,6 +139,7 @@ impl TranscriptView {
                 .map(|i| entries[i].id);
             let mut rows: Vec<Row> = Vec::with_capacity(entries.len());
             let turn_start = entries.iter().rposition(|e| e.role == Role::You).unwrap_or(0);
+            let mut image_aliases = std::collections::HashMap::new();
             let mut i = 0;
             while i < entries.len() {
                 let e = &entries[i];
@@ -150,11 +151,16 @@ impl TranscriptView {
                     while i < entries.len() && is_activity(&entries[i]) {
                         let a = &entries[i];
                         match &a.body {
-                            Body::Tool(r) => items.push(Activity::Tool {
+                            Body::Tool(r) => {
+                                if let Some((alias, path)) = generated_image_alias(r) {
+                                    image_aliases.insert(alias, path);
+                                }
+                                items.push(Activity::Tool {
                                 id: a.id,
                                 row: r.clone(),
                                 expanded: t.expanded.contains(&a.id),
-                            }),
+                            });
+                            }
                             Body::Text(s) => {
                                 let state = t.markdown_state(a.id, s, cx);
                                 items.push(Activity::Thought {
@@ -197,8 +203,7 @@ impl TranscriptView {
                 match (&e.role, &e.body) {
                     (Role::Agent, Body::Text(s)) => {
                         let state = t.markdown_state(e.id, s, cx);
-                        let mut images: Vec<std::path::PathBuf> = if e.streaming { Vec::new() } else { local_images(s, &cwd, project_root.as_deref()) };
-                        let _ = &mut images;
+                        let images = if e.streaming { Vec::new() } else { local_images(s, &cwd, project_root.as_deref(), &image_aliases) };
                         let attached = if e.images.is_empty() { Vec::new() } else { t.images_for(e.id) };
                         rows.push(Row::Agent {
                             id: e.id,
@@ -1160,7 +1165,8 @@ fn image_placeholder(id: u64, args: &str, running: bool, ui: &Ui) -> AnyElement 
 
 fn generating_image(row: &ToolRow) -> bool {
     let name = row.name.to_ascii_lowercase().replace('-', "_");
-    let name = name.rsplit([':', '.']).next().unwrap_or(&name);
+    let name = if name.starts_with("imagine:") { "image_gen" } else { &name };
+    let name = name.rsplit([':', '.']).next().unwrap_or(name);
     matches!(row.status.as_str(), "pending" | "running" | "in_progress") &&
         matches!(name, "image_gen" | "imagegen" | "image_edit" | "generate_image" | "edit_image" | "image_generation" | "image generation")
 }
@@ -1221,15 +1227,30 @@ fn resolve_local(raw: &str, cwd: &std::path::Path, root: Option<&std::path::Path
     candidates.into_iter().find(|c| c.is_file())
 }
 
+/// Resolve only explicit provider artifact metadata, never a guessed session directory.
+fn generated_image_alias(row: &ToolRow) -> Option<(String, std::path::PathBuf)> {
+    if row.status != "completed" { return None; }
+    let result: serde_json::Value = serde_json::from_str(row.result.as_deref()?).ok()?;
+    let path = std::path::PathBuf::from(result.get("path")?.as_str()?);
+    let filename = result.get("filename")?.as_str()?;
+    let folder = result.get("session_folder")?.as_str()?;
+    let alias = std::path::Path::new(folder).join(filename);
+    if !path.is_absolute() || !is_image_path(filename) || path.file_name()?.to_str()? != filename
+        || !alias.components().all(|c| matches!(c, std::path::Component::Normal(_))) {
+        return None;
+    }
+    Some((alias.to_str()?.to_owned(), path))
+}
+
 /// Image files referenced in a reply: markdown images/links and bare paths.
-fn local_images(text: &str, cwd: &std::path::Path, root: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
+fn local_images(text: &str, cwd: &std::path::Path, root: Option<&std::path::Path>, aliases: &std::collections::HashMap<String, std::path::PathBuf>) -> Vec<std::path::PathBuf> {
     let mut out: Vec<std::path::PathBuf> = Vec::new();
     let mut push = |cand: &str| {
         let cand = cand.trim_matches(|c: char| matches!(c, '`' | '*' | '"' | '\'' | '(' | ')' | '<' | '>' | ',' | '.' | ':' | ';'));
         if !is_image_path(cand) || cand.starts_with("http") {
             return;
         }
-        if let Some(p) = resolve_local(cand, cwd, root) {
+        if let Some(p) = aliases.get(cand).filter(|p| p.is_file()).cloned().or_else(|| resolve_local(cand, cwd, root)) {
             if !out.contains(&p) {
                 out.push(p);
             }
@@ -1502,7 +1523,7 @@ mod image_generation_tests {
     #[test]
     fn only_active_generation_tools_get_placeholders() {
         let mut row = ToolRow { tool_id: "1".into(), name: "image_gen".into(), status: "running".into(), args: String::new(), result: None };
-        for name in ["image_gen", "image_edit", "generate_image", "functions.imagegen"] { row.name = name.into(); assert!(generating_image(&row)); }
+        for name in ["image_gen", "image_edit", "generate_image", "functions.imagegen", "imagine: A cinematic arcade."] { row.name = name.into(); assert!(generating_image(&row)); }
         for status in ["completed", "failed", "denied", "cancelled", "restored"] { row.status = status.into(); assert!(!generating_image(&row)); }
         row.status = "running".into();
         for name in ["read_image", "view_image", "image_search", "Read /tmp/image.png"] { row.name = name.into(); assert!(!generating_image(&row)); }
@@ -1511,5 +1532,25 @@ mod image_generation_tests {
     fn frame_uses_real_aspect_ratio_and_handles_partial_arguments() {
         assert_eq!(generation_frame(r#"{"aspect_ratio":"16:9","prompt":"Lake"}"#), (16./9., Some("Lake".into())));
         for args in ["", "{partial", r#"{"aspect_ratio":"1:0"}"#] { assert_eq!(generation_frame(args), (1., None)); }
+    }
+}
+
+#[cfg(test)]
+mod artifact_tests {
+    use super::{generated_image_alias, local_images, ToolRow};
+    #[test]
+    fn resolves_session_relative_artifacts_and_rejects_traversal() {
+        let dir = std::env::temp_dir().join(format!("bomb-artifact-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("1.jpg");
+        std::fs::write(&file, b"test image coordinates").unwrap();
+        let mut row = ToolRow {tool_id:"1".into(), name:"tool".into(),status:"completed".into(),args:String::new(),
+            result:Some(serde_json::json!({"path":file,"filename":"1.jpg","session_folder":"images"}).to_string())};
+        let (alias,path) = generated_image_alias(&row).unwrap();
+        let aliases = std::collections::HashMap::from([(alias,path.clone())]);
+        assert_eq!(local_images("![Arcade](images/1.jpg)", &dir, None, &aliases), vec![path]);
+        row.result = Some(serde_json::json!({"path":file,"filename":"1.jpg","session_folder":"../images"}).to_string());
+        assert!(generated_image_alias(&row).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -1105,8 +1105,19 @@ impl AppModel {
         cx.notify();
     }
 
+    pub fn provider_mode_options(&self, cx: &App) -> serde_json::Value {
+        self.selected.and_then(|id| self.threads.get(&id)).filter(|t| t.read(cx).meta.model == self.effective_model()).map(|t| &t.read(cx).provider_modes)
+            .filter(|v| v.get("backend").and_then(|v|v.as_str()) == Some(self.prefs.backend.as_str()))
+            .cloned().unwrap_or_default()
+    }
+
     pub fn cycle_mode(&mut self, cx: &mut Context<Self>) {
-        let next = next_shortcut_mode(&self.prefs.mode);
+        let options = self.provider_mode_options(cx);
+        let mut next = next_shortcut_mode(&self.prefs.mode);
+        for _ in 0..3 {
+            if crate::views::composer::provider_mode_presentation(next, &options).is_some() { break; }
+            next = next_shortcut_mode(next);
+        }
         self.set_mode(next, cx);
     }
 

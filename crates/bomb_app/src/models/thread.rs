@@ -18,6 +18,7 @@ pub struct ThreadModel {
     pub thread: Thread,
     /// Transcript rows have been loaded from SQLite at least once.
     pub hydrated: bool,
+    pub provider_modes: serde_json::Value,
     pub loading: bool,
     /// Markdown render state per entry id; the streaming tail gets `push_str`.
     pub markdown: HashMap<u64, Entity<TextViewState>>,
@@ -41,6 +42,7 @@ impl ThreadModel {
             meta,
             thread: Thread::new(),
             hydrated: false,
+            provider_modes: serde_json::Value::Null,
             loading: false,
             markdown: HashMap::new(),
             images: HashMap::new(),
@@ -130,6 +132,15 @@ impl ThreadModel {
     }
 
     pub fn apply(&mut self, ev: &ControlEvent, cx: &mut Context<Self>) -> Vec<Change> {
+        if let ControlEvent::Raw { payload, .. } = ev {
+            if payload.get("channel").and_then(|v|v.as_str()) == Some("provider_modes") {
+                if payload.get("backend") != self.provider_modes.get("backend") { self.provider_modes = payload.clone(); }
+                else if let (Some(target), Some(source)) = (self.provider_modes.as_object_mut(), payload.as_object()) {
+                    for (key, value) in source { target.insert(key.clone(), value.clone()); }
+                }
+                cx.notify();
+            }
+        }
         let changes = self.thread.apply(ev, Instant::now());
         self.absorb(&changes, cx);
         changes

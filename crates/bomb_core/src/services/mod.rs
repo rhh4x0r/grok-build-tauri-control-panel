@@ -580,7 +580,8 @@ pub async fn wait_until_idle(state: &AppState, id: &str, timeout: std::time::Dur
         match status {
             SessionStatus::Starting => {}
             SessionStatus::Failed => return Err("the agent failed to start — check Services".into()),
-            _ => return Ok(()),
+            _ if state.registry.is_ready(id) => return Ok(()),
+            _ => {}
         }
         if tokio::time::Instant::now() >= deadline {
             return Err("the agent is taking too long to start".into());
@@ -645,7 +646,7 @@ pub async fn send_prompt(
         let needs_read_only = workspace.as_ref().is_some_and(|w| w.inline) && !cur.read_only;
         if needs_read_only || backend_changed || (model_changed && cur.mode == grok_control_core::AgentMode::Acp) {
             persist_session(state, id).await;
-            state.registry.remove_session(id).await.map_err(err)?;
+            state.registry.retire_session(id).await.map_err(err)?;
             resume_saved_session(
                 state,
                 id,
