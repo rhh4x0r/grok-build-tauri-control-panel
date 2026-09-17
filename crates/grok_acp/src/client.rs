@@ -928,7 +928,7 @@ impl AcpClient {
     /// Only expose speed settings explicitly advertised by this session's agent.
     pub async fn speed_option(&self) -> Option<(String, Vec<String>, Option<String>)> {
         let options = self.config_options.read().await;
-        for id in ["service_tier", "fast_mode", "fastMode", "fast", "speed"] {
+        for id in ["fast-mode", "service_tier", "fast_mode", "fastMode", "fast", "speed"] {
             if let Some(values) = options.get(id).filter(|v| !v.is_empty()) {
                 return Some((id.into(), values.clone(), self.config_current.read().await.get(id).cloned()));
             }
@@ -2195,6 +2195,9 @@ impl AcpClient {
         // Some agents also flatten update fields onto params.
         let update = params.get("update").unwrap_or(params);
 
+        // Model changes can add/remove fast mode after session creation.
+        self.capture_config_options(update).await;
+
         // Grok streams totalTokens on params._meta (context window usage).
         if let Some(tokens) = params
             .get("_meta")
@@ -2914,6 +2917,26 @@ impl AcpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn codex_hyphenated_fast_mode_tracks_session_updates() {
+        let bus = EventBus::new();
+        let client = AcpClient::mock_for_tests("codex-speed", None);
+        let options = serde_json::json!({"configOptions":[{
+            "id":"fast-mode", "name":"Fast mode", "type":"select",
+            "currentValue":"off", "options":[{"value":"off","name":"Off"},{"value":"on","name":"On"}]
+        }]});
+        client.capture_config_options(&options).await;
+        assert_eq!(client.speed_option().await, Some(("fast-mode".into(), vec!["off".into(), "on".into()], Some("off".into()))));
+        client.map_session_update(&bus, uuid::Uuid::new_v4(), &serde_json::json!({"update":{
+            "sessionUpdate":"config_option_update", "configOptions":[]
+        }})).await;
+        assert!(client.speed_option().await.is_none());
+        client.map_session_update(&bus, uuid::Uuid::new_v4(), &serde_json::json!({"update":{
+            "sessionUpdate":"config_option_update", "configOptions":options["configOptions"]
+        }})).await;
+        assert_eq!(client.speed_option().await.unwrap().0, "fast-mode");
+    }
 
     #[tokio::test]
     async fn speed_requires_an_advertised_option_and_tracks_its_current_value() {

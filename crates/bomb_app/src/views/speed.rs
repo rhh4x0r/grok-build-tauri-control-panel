@@ -20,7 +20,7 @@ pub struct SpeedSelector {
 impl SpeedSelector {
     pub fn new(model: Entity<AppModel>, cx: &mut Context<Self>) -> Self {
         cx.observe(&model, |this, _, cx| {
-            this.refresh(cx);
+            this.refresh(true, cx);
             cx.notify();
         })
         .detach();
@@ -31,13 +31,13 @@ impl SpeedSelector {
             loading: false,
         }
     }
-    fn refresh(&mut self, cx: &mut Context<Self>) {
+    fn refresh(&mut self, force: bool, cx: &mut Context<Self>) {
         let m = self.model.read(cx);
         let key = m.selected.filter(|id| m.threads.get(id).is_some_and(|thread| thread.read(cx).meta.live)).map(|id| (id, m.effective_model()));
-        if self.loading || self.key == key {
+        if self.loading || (!force && self.key == key) {
             return;
         }
-        self.option = None;
+        if self.key != key { self.option = None; }
         self.key = key.clone();
         let Some((id, _)) = key.clone() else {
             return;
@@ -65,7 +65,7 @@ impl SpeedSelector {
 }
 impl Render for SpeedSelector {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.refresh(cx);
+        self.refresh(false, cx);
         let Some((option, values, current)) = self.option.clone() else {
             return div().into_any_element();
         };
@@ -101,11 +101,21 @@ impl Render for SpeedSelector {
 
 fn speed_label(option: &str, value: &str) -> String {
     match (option, value) {
-        ("fast_mode" | "fastMode" | "fast", "true" | "on" | "enabled") => "Fast".into(),
-        ("fast_mode" | "fastMode" | "fast", "false" | "off" | "disabled") => "Standard".into(),
+        ("fast-mode" | "fast_mode" | "fastMode" | "fast", "true" | "on" | "enabled") => "Fast".into(),
+        ("fast-mode" | "fast_mode" | "fastMode" | "fast", "false" | "off" | "disabled") => "Standard".into(),
         (_, "fast") => "Fast".into(),
         (_, "standard" | "normal" | "default") => "Standard".into(),
         (_, "priority") => "Priority".into(),
         _ => value.replace('_', " "),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::speed_label;
+    #[test]
+    fn codex_fast_mode_has_readable_labels() {
+        assert_eq!(speed_label("fast-mode", "on"), "Fast");
+        assert_eq!(speed_label("fast-mode", "off"), "Standard");
     }
 }
