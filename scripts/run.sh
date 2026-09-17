@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launch Bomb Code (dev or installed app).
+# Launch Bomb Code (dev build or installed app).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -7,12 +7,12 @@ cd "$ROOT"
 # Ensure CLI tools are on PATH for this process tree.
 export PATH="${HOME}/.grok/bin:${HOME}/.cargo/bin:${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:${PATH}"
 
-APP_BUNDLE="${ROOT}/target/release/bundle/macos/Bomb Code.app"
+APP_BUNDLE="${ROOT}/target/release/bundle/Bomb Code.app"
 INSTALLED="/Applications/Bomb Code.app"
-BIN="${ROOT}/target/release/grok-build-control-panel"
+BIN="${ROOT}/target/release/bomb_app"
 
 if [[ "${1:-}" == "--dev" ]]; then
-  exec cargo tauri dev
+  exec cargo run -p bomb_app
 fi
 
 if [[ -d "$INSTALLED" ]]; then
@@ -30,6 +30,6 @@ if [[ -x "$BIN" ]]; then
   exec "$BIN"
 fi
 
-echo "No build found. Building app bundle…"
-cargo tauri build --bundles app
-exec open "$APP_BUNDLE"
+echo "No build found. Building release binary…"
+cargo build --release -p bomb_app
+exec "$BIN"

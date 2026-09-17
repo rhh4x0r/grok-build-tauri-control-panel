@@ -1,10 +1,10 @@
-//! Tauri invoke command surface for the control panel.
+//! Service layer: every former Tauri command as a plain async fn over `&AppState`.
 
 use std::path::PathBuf;
 
 use chrono::Utc;
 use serde::Serialize;
-use tauri::State;
+
 use uuid::Uuid;
 
 use grok_config::{DiscoveryReport, GrokConfig};
@@ -30,13 +30,11 @@ fn err(e: impl ToString) -> String {
 
 // ── Phase 0: Discovery & Config ──────────────────────────────────────────
 
-#[tauri::command]
 pub async fn discover_environment() -> Result<DiscoveryReport, String> {
     grok_config::discover_environment().map_err(err)
 }
 
-#[tauri::command]
-pub async fn get_config(state: State<'_, AppState>) -> Result<GrokConfig, String> {
+pub async fn get_config(state: &AppState) -> Result<GrokConfig, String> {
     Ok(state.config.read().await.clone())
 }
 
@@ -55,8 +53,7 @@ pub struct BackendInfo {
     pub supports_headless: bool,
 }
 
-#[tauri::command]
-pub async fn list_backends(state: State<'_, AppState>) -> Result<Vec<BackendInfo>, String> {
+pub async fn list_backends(state: &AppState) -> Result<Vec<BackendInfo>, String> {
     let cfg = state.config.read().await.clone();
     // Grok's model ids move fast — ask the CLI for the live catalog so the
     // pickers never offer an id that fails every `-m` call.
@@ -106,8 +103,7 @@ pub async fn list_backends(state: State<'_, AppState>) -> Result<Vec<BackendInfo
         .collect())
 }
 
-#[tauri::command]
-pub async fn save_config(state: State<'_, AppState>, config: GrokConfig) -> Result<(), String> {
+pub async fn save_config(state: &AppState, config: GrokConfig) -> Result<(), String> {
     {
         let mut cfg = state.config.write().await;
         *cfg = config;
@@ -116,24 +112,21 @@ pub async fn save_config(state: State<'_, AppState>, config: GrokConfig) -> Resu
     Ok(())
 }
 
-#[tauri::command]
 pub async fn capture_baseline(
-    state: State<'_, AppState>,
+    state: &AppState,
 ) -> Result<grok_cli_wrapper::BaselineSnapshot, String> {
     Ok(state.grok_cli.capture_baseline().await)
 }
 
 // ── Auth / Grok login ────────────────────────────────────────────────────
 
-#[tauri::command]
 pub async fn get_auth_status() -> Result<grok_cli_wrapper::AuthStatus, String> {
     Ok(grok_cli_wrapper::GrokCli::auth_status())
 }
 
 /// Sign-in state for every backend: which services can actually run right now.
-#[tauri::command]
 pub async fn backend_auth_status(
-    state: State<'_, AppState>,
+    state: &AppState,
 ) -> Result<Vec<grok_cli_wrapper::BackendAuth>, String> {
     let cfg = state.config.read().await.clone();
     Ok(grok_cli_wrapper::backend_auth::all(&cfg).await)
@@ -144,7 +137,6 @@ pub async fn backend_auth_status(
 /// `claude auth login` and `codex login` drive a browser flow and expect a TTY,
 /// so we cannot run them headless the way we drive grok's device-code flow.
 /// The panel polls `backend_auth_status` afterwards to notice the result.
-#[tauri::command]
 pub async fn open_backend_login(backend: String, logout: bool) -> Result<(), String> {
     let cmd = if logout {
         grok_cli_wrapper::backend_auth::logout_command(&backend)
@@ -188,53 +180,46 @@ fn spawn_in_terminal(cmd: &str) -> std::io::Result<()> {
 }
 
 /// Start interactive login (device-code). Returns immediately with URL + confirm code.
-#[tauri::command]
 pub async fn start_grok_login(
-    state: State<'_, AppState>,
+    state: &AppState,
 ) -> Result<grok_cli_wrapper::LoginSessionState, String> {
     state.login.start_device_login().await.map_err(err)
 }
 
 /// Fallback OAuth browser login start.
-#[tauri::command]
 pub async fn start_grok_login_oauth(
-    state: State<'_, AppState>,
+    state: &AppState,
 ) -> Result<grok_cli_wrapper::LoginSessionState, String> {
     state.login.start_oauth_login().await.map_err(err)
 }
 
 /// Poll login session (phase, confirm code, logged-in status).
-#[tauri::command]
 pub async fn grok_login_status(
-    state: State<'_, AppState>,
+    state: &AppState,
 ) -> Result<grok_cli_wrapper::LoginSessionState, String> {
     Ok(state.login.state().await)
 }
 
 /// Paste a verification code from the browser into the running login process.
-#[tauri::command]
 pub async fn submit_grok_login_code(
-    state: State<'_, AppState>,
+    state: &AppState,
     code: String,
 ) -> Result<grok_cli_wrapper::LoginSessionState, String> {
     state.login.submit_code(&code).await.map_err(err)
 }
 
-#[tauri::command]
 pub async fn open_grok_login_url(
-    state: State<'_, AppState>,
+    state: &AppState,
 ) -> Result<Option<String>, String> {
     state.login.open_login_url().await.map_err(err)
 }
 
-#[tauri::command]
-pub async fn cancel_grok_login(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn cancel_grok_login(state: &AppState) -> Result<(), String> {
     state.login.cancel().await;
     Ok(())
 }
 
-#[tauri::command]
-pub async fn logout_grok(state: State<'_, AppState>) -> Result<grok_cli_wrapper::AuthStatus, String> {
+pub async fn logout_grok(state: &AppState) -> Result<grok_cli_wrapper::AuthStatus, String> {
     state.login.cancel().await;
     state.grok_cli.logout().await.map_err(err)
 }
@@ -254,11 +239,9 @@ pub struct RuntimeStatus {
     pub xai_api_key_present: bool,
     pub ready: bool,
     pub message: String,
-    pub haven: crate::haven::HavenStatus,
 }
 
-#[tauri::command]
-pub async fn get_runtime_status(state: State<'_, AppState>) -> Result<RuntimeStatus, String> {
+pub async fn get_runtime_status(state: &AppState) -> Result<RuntimeStatus, String> {
     let binary = state.grok_cli.grok_path.clone();
     let exists = binary.is_file();
     let version = if exists {
@@ -319,14 +302,6 @@ pub async fn get_runtime_status(state: State<'_, AppState>) -> Result<RuntimeSta
         )
     };
 
-    let haven = state.haven.last_status().await;
-    let message = if haven.connected {
-        format!("{message} · {}", haven.label)
-    } else if haven.configured {
-        format!("{message} · haven offline")
-    } else {
-        message
-    };
 
     Ok(RuntimeStatus {
         grok_binary: binary.display().to_string(),
@@ -341,129 +316,10 @@ pub async fn get_runtime_status(state: State<'_, AppState>) -> Result<RuntimeSta
         xai_api_key_present: xai,
         ready,
         message,
-        haven,
     })
 }
 
-// ── Haven (Hetzner process + temp store) ─────────────────────────────────
-
-#[tauri::command]
-pub async fn haven_status(state: State<'_, AppState>) -> Result<crate::haven::HavenStatus, String> {
-    Ok(state.haven.connect_and_status().await)
-}
-
-#[tauri::command]
-pub async fn haven_get_config(
-    state: State<'_, AppState>,
-) -> Result<crate::haven::HavenConfig, String> {
-    let mut cfg = state.haven.config().await;
-    // Never return full token to UI logs — mask middle (char-safe: byte
-    // slicing panics on multibyte tokens).
-    let chars: Vec<char> = cfg.auth_token.chars().collect();
-    if chars.len() > 12 {
-        let head: String = chars[..6].iter().collect();
-        let tail: String = chars[chars.len() - 4..].iter().collect();
-        cfg.auth_token = format!("{head}…{tail}");
-    }
-    Ok(cfg)
-}
-
-#[tauri::command]
-pub async fn haven_set_config(
-    state: State<'_, AppState>,
-    mut config: crate::haven::HavenConfig,
-) -> Result<crate::haven::HavenStatus, String> {
-    // If UI sent a masked token, keep existing secret.
-    let existing = state.haven.config().await;
-    if config.auth_token.contains('…') || config.auth_token.contains("...") {
-        config.auth_token = existing.auth_token;
-    }
-    // A bearer token over plaintext http is readable by anyone on the path —
-    // but private/tailnet hosts (Tailscale, LAN, localhost) are fine.
-    if config.base_url.starts_with("http://")
-        && !config.auth_token.is_empty()
-        && !is_private_host(&config.base_url)
-        && !config.allow_insecure_http
-    {
-        return Err(
-            "haven base_url must be https for public hosts (plain http is allowed for \
-             localhost, LAN, and Tailscale addresses — or tick 'allow insecure http' \
-             to accept the risk)"
-                .into(),
-        );
-    }
-    state.haven.set_config(config).await?;
-    Ok(state.haven.connect_and_status().await)
-}
-
-/// True for hosts where plaintext http is acceptable: loopback, RFC1918 LAN,
-/// Tailscale CGNAT range (100.64/10), .local, and MagicDNS .ts.net names.
-fn is_private_host(base_url: &str) -> bool {
-    let host = base_url
-        .trim_start_matches("http://")
-        .split(['/', ':'])
-        .next()
-        .unwrap_or("");
-    if host == "localhost" || host.ends_with(".local") || host.ends_with(".ts.net") {
-        return true;
-    }
-    let octets: Vec<u8> = host.split('.').filter_map(|p| p.parse().ok()).collect();
-    if octets.len() != 4 {
-        return false;
-    }
-    match octets[..] {
-        [127, ..] => true,
-        [10, ..] => true,
-        [192, 168, ..] => true,
-        [172, b, ..] if (16..=31).contains(&b) => true,
-        [100, b, ..] if (64..=127).contains(&b) => true,
-        _ => false,
-    }
-}
-
-#[tauri::command]
-pub async fn haven_list_jobs(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    state.haven.list_jobs().await
-}
-
-#[tauri::command]
-pub async fn haven_start_shell(
-    state: State<'_, AppState>,
-    name: String,
-    command: String,
-    cwd: Option<String>,
-    keep_alive: Option<bool>,
-) -> Result<serde_json::Value, String> {
-    state
-        .haven
-        .start_shell(name, command, cwd, keep_alive.unwrap_or(false))
-        .await
-}
-
-#[tauri::command]
-pub async fn haven_job_log(
-    state: State<'_, AppState>,
-    id: String,
-    bytes: Option<u64>,
-) -> Result<String, String> {
-    state.haven.job_log(id, bytes.unwrap_or(64_000)).await
-}
-
-#[tauri::command]
-pub async fn haven_remove_job(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<serde_json::Value, String> {
-    state.haven.remove_job(id).await
-}
-
-#[tauri::command]
-pub async fn haven_list_files(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    state.haven.list_files().await
-}
-
-#[tauri::command]
-pub async fn set_last_cwd(state: State<'_, AppState>, cwd: String) -> Result<(), String> {
+pub async fn set_last_cwd(state: &AppState, cwd: String) -> Result<(), String> {
     let path = PathBuf::from(&cwd);
     if !path.is_absolute() || !path.is_dir() {
         return Err("cwd must be an absolute existing directory".into());
@@ -480,9 +336,8 @@ pub struct CreateFolderResult {
 }
 
 /// Create a new project folder under a parent directory (default: ~/Projects or home).
-#[tauri::command]
 pub async fn create_project_folder(
-    state: State<'_, AppState>,
+    state: &AppState,
     name: String,
     parent: Option<String>,
 ) -> Result<CreateFolderResult, String> {
@@ -568,9 +423,8 @@ pub struct SessionIdResponse {
     pub id: String,
 }
 
-#[tauri::command]
 pub async fn start_session(
-    state: State<'_, AppState>,
+    state: &AppState,
     cwd: String,
     mut opts: SpawnOptions,
 ) -> Result<SessionIdResponse, String> {
@@ -673,9 +527,8 @@ pub async fn start_session(
     })
 }
 
-#[tauri::command]
 pub async fn start_mock_session(
-    state: State<'_, AppState>,
+    state: &AppState,
     cwd: String,
 ) -> Result<SessionIdResponse, String> {
     let id = state.registry.spawn_mock(&cwd).await.map_err(err)?;
@@ -686,22 +539,19 @@ pub async fn start_mock_session(
     })
 }
 
-#[tauri::command]
 pub async fn list_sessions(
-    state: State<'_, AppState>,
+    state: &AppState,
 ) -> Result<Vec<grok_control_core::SessionMetadata>, String> {
     Ok(state.registry.list_sessions())
 }
 
 /// Live + SQLite-restored threads for the UI thread list.
-#[tauri::command]
-pub async fn list_threads(state: State<'_, AppState>) -> Result<Vec<ThreadDto>, String> {
+pub async fn list_threads(state: &AppState) -> Result<Vec<ThreadDto>, String> {
     Ok(build_thread_list(&state))
 }
 
-#[tauri::command]
 pub async fn get_session(
-    state: State<'_, AppState>,
+    state: &AppState,
     id: String,
 ) -> Result<AgentHandleSnapshot, String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
@@ -709,9 +559,8 @@ pub async fn get_session(
 }
 
 /// Load transcript history from SQLite (works for live and restored threads).
-#[tauri::command]
 pub async fn get_session_transcript(
-    state: State<'_, AppState>,
+    state: &AppState,
     id: String,
 ) -> Result<Vec<TranscriptEntry>, String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
@@ -730,15 +579,13 @@ pub struct ImageInput {
 
 /// Whether the live agent for a thread accepts image prompts. Unknown / not-live
 /// threads answer `true` so the composer never blocks attaching pre-emptively.
-#[tauri::command]
-pub async fn agent_supports_images(state: State<'_, AppState>, id: String) -> Result<bool, String> {
+pub async fn agent_supports_images(state: &AppState, id: String) -> Result<bool, String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
     Ok(state.registry.image_prompts_supported(id).await.unwrap_or(true))
 }
 
-#[tauri::command]
 pub async fn send_prompt(
-    state: State<'_, AppState>,
+    state: &AppState,
     id: String,
     prompt: String,
     backend: Option<String>,
@@ -824,7 +671,7 @@ pub async fn send_prompt(
         let bus = state.event_bus.clone();
         let persistence = state.persistence.clone();
         let prompt_for_title = prompt.clone();
-        tauri::async_runtime::spawn(async move {
+        tokio::spawn(async move {
             if let Ok(title) = explainer.generate_title(&prompt_for_title).await {
                 if !title.is_empty() && registry.set_label(id, &title).is_ok() {
                     bus.emit(grok_events::ControlEvent::Raw {
@@ -1124,17 +971,15 @@ fn build_transcript_context(state: &AppState, id: Uuid) -> Option<String> {
     }
 }
 
-#[tauri::command]
-pub async fn cancel_session(state: State<'_, AppState>, id: String) -> Result<(), String> {
+pub async fn cancel_session(state: &AppState, id: String) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
     state.registry.cancel_session(id).await.map_err(err)?;
     persist_session(&state, id).await;
     Ok(())
 }
 
-#[tauri::command]
 pub async fn remove_session(
-    state: State<'_, AppState>,
+    state: &AppState,
     id: String,
     remove_worktree: Option<bool>,
 ) -> Result<(), String> {
@@ -1163,9 +1008,8 @@ pub async fn remove_session(
     Ok(())
 }
 
-#[tauri::command]
 pub async fn set_plan_mode(
-    state: State<'_, AppState>,
+    state: &AppState,
     id: String,
     enabled: bool,
 ) -> Result<(), String> {
@@ -1179,9 +1023,8 @@ pub async fn set_plan_mode(
 
 // ── Explainer (right-panel ELI12 narrator) ───────────────────────────────
 
-#[tauri::command]
 pub async fn explainer_focus(
-    state: State<'_, AppState>,
+    state: &AppState,
     id: Option<String>,
 ) -> Result<(), String> {
     let uuid = match id.as_deref().filter(|s| !s.is_empty()) {
@@ -1192,9 +1035,8 @@ pub async fn explainer_focus(
     Ok(())
 }
 
-#[tauri::command]
 pub async fn set_explainer_provider(
-    state: State<'_, AppState>,
+    state: &AppState,
     backend: Option<String>,
     model: Option<String>,
 ) -> Result<(), String> {
@@ -1215,9 +1057,8 @@ pub async fn set_explainer_provider(
     Ok(())
 }
 
-#[tauri::command]
 pub async fn set_explainer_enabled(
-    state: State<'_, AppState>,
+    state: &AppState,
     enabled: bool,
 ) -> Result<bool, String> {
     state.explainer.set_enabled(enabled);
@@ -1230,9 +1071,8 @@ pub async fn set_explainer_enabled(
 }
 
 /// Set a live session's approval stance: plan | ask | auto | yolo.
-#[tauri::command]
 pub async fn set_approval_mode(
-    state: State<'_, AppState>,
+    state: &AppState,
     id: String,
     mode: String,
 ) -> Result<(), String> {
@@ -1255,9 +1095,8 @@ pub async fn set_approval_mode(
 
 /// "Always allow this" from an approval card — auto-approves matching
 /// requests for the rest of the session.
-#[tauri::command]
 pub async fn add_session_allow_rule(
-    state: State<'_, AppState>,
+    state: &AppState,
     id: String,
     pattern: String,
 ) -> Result<(), String> {
@@ -1280,9 +1119,8 @@ pub async fn add_session_allow_rule(
     Ok(())
 }
 
-#[tauri::command]
 pub async fn set_always_approve(
-    state: State<'_, AppState>,
+    state: &AppState,
     id: String,
     enabled: bool,
 ) -> Result<(), String> {
@@ -1294,9 +1132,8 @@ pub async fn set_always_approve(
         .map_err(err)
 }
 
-#[tauri::command]
 pub async fn respond_approval(
-    state: State<'_, AppState>,
+    state: &AppState,
     id: String,
     request_id: String,
     option_id: Option<String>,
@@ -1312,9 +1149,8 @@ pub async fn respond_approval(
 /// Rename a thread (manual override of the smart name). Works for live and
 /// saved threads; manual names are never overwritten by the auto-titler
 /// (which only fires when a thread has no label at its first prompt).
-#[tauri::command]
 pub async fn rename_thread(
-    state: State<'_, AppState>,
+    state: &AppState,
     id: String,
     label: String,
 ) -> Result<(), String> {
@@ -1346,8 +1182,7 @@ pub async fn rename_thread(
 
 // ── Projects (persisted folder list for the sidebar) ─────────────────────
 
-#[tauri::command]
-pub async fn list_projects(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+pub async fn list_projects(state: &AppState) -> Result<Vec<String>, String> {
     Ok(state
         .persistence
         .get_kv("projects")
@@ -1357,13 +1192,12 @@ pub async fn list_projects(state: State<'_, AppState>) -> Result<Vec<String>, St
         .unwrap_or_default())
 }
 
-#[tauri::command]
-pub async fn add_project(state: State<'_, AppState>, path: String) -> Result<Vec<String>, String> {
+pub async fn add_project(state: &AppState, path: String) -> Result<Vec<String>, String> {
     let path = path.trim().trim_end_matches('/').to_string();
     if path.is_empty() || !PathBuf::from(&path).is_dir() {
         return Err(format!("not a folder: {path}"));
     }
-    let mut list = list_projects(state.clone()).await?;
+    let mut list = list_projects(state).await?;
     if !list.contains(&path) {
         list.push(path);
         list.sort();
@@ -1375,12 +1209,11 @@ pub async fn add_project(state: State<'_, AppState>, path: String) -> Result<Vec
     Ok(list)
 }
 
-#[tauri::command]
 pub async fn remove_project(
-    state: State<'_, AppState>,
+    state: &AppState,
     path: String,
 ) -> Result<Vec<String>, String> {
-    let mut list = list_projects(state.clone()).await?;
+    let mut list = list_projects(state).await?;
     list.retain(|p| p != &path);
     state
         .persistence
@@ -1440,9 +1273,8 @@ async fn thread_worktree_context(
 }
 
 /// Merge the thread's worktree branch back into the project's current branch.
-#[tauri::command]
 pub async fn land_thread(
-    state: State<'_, AppState>,
+    state: &AppState,
     id: String,
 ) -> Result<ThreadMergeResult, String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
@@ -1507,9 +1339,8 @@ pub async fn land_thread(
 
 /// Merge the project's current branch INTO the thread's worktree. Conflicts
 /// stay in the worktree where the thread's own agent can resolve them.
-#[tauri::command]
 pub async fn sync_thread(
-    state: State<'_, AppState>,
+    state: &AppState,
     id: String,
 ) -> Result<ThreadMergeResult, String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
@@ -1569,9 +1400,8 @@ pub async fn sync_thread(
 
 // ── Phase 2: Worktrees & Permissions ─────────────────────────────────────
 
-#[tauri::command]
 pub async fn list_worktrees(
-    state: State<'_, AppState>,
+    state: &AppState,
     repo: String,
 ) -> Result<Vec<WorktreeInfo>, String> {
     state
@@ -1581,9 +1411,8 @@ pub async fn list_worktrees(
         .map_err(err)
 }
 
-#[tauri::command]
 pub async fn create_worktree(
-    state: State<'_, AppState>,
+    state: &AppState,
     repo: String,
     name: String,
     base_ref: Option<String>,
@@ -1604,9 +1433,8 @@ pub async fn create_worktree(
         .map_err(err)
 }
 
-#[tauri::command]
 pub async fn remove_worktree(
-    state: State<'_, AppState>,
+    state: &AppState,
     repo: String,
     name: String,
     force: bool,
@@ -1618,9 +1446,8 @@ pub async fn remove_worktree(
         .map_err(err)
 }
 
-#[tauri::command]
 pub async fn prune_worktrees(
-    state: State<'_, AppState>,
+    state: &AppState,
     repo: String,
 ) -> Result<String, String> {
     state
@@ -1630,9 +1457,8 @@ pub async fn prune_worktrees(
         .map_err(err)
 }
 
-#[tauri::command]
 pub async fn worktree_diff(
-    state: State<'_, AppState>,
+    state: &AppState,
     path: String,
 ) -> Result<String, String> {
     state
@@ -1642,7 +1468,6 @@ pub async fn worktree_diff(
         .map_err(err)
 }
 
-#[tauri::command]
 pub async fn list_permission_presets() -> Result<Vec<PermissionPreset>, String> {
     Ok(builtin_presets())
 }
@@ -1652,9 +1477,8 @@ pub struct PermissionEvalResult {
     pub decision: PermissionDecision,
 }
 
-#[tauri::command]
 pub async fn evaluate_permission(
-    state: State<'_, AppState>,
+    state: &AppState,
     tool: String,
     detail: String,
     preset: Option<String>,
@@ -1677,15 +1501,13 @@ pub async fn evaluate_permission(
 
 // ── Phase 3: Extensions / MCP / Memory / Scheduler ───────────────────────
 
-#[tauri::command]
-pub async fn list_extensions(state: State<'_, AppState>) -> Result<Vec<ExtensionEntry>, String> {
+pub async fn list_extensions(state: &AppState) -> Result<Vec<ExtensionEntry>, String> {
     Ok(state.extensions.list_all().await)
 }
 
 /// Legacy simple add — prefers full `add_mcp_server` for catalog/security.
-#[tauri::command]
 pub async fn add_mcp(
-    state: State<'_, AppState>,
+    state: &AppState,
     name: String,
     command: String,
     args: Vec<String>,
@@ -1720,14 +1542,12 @@ pub async fn add_mcp(
     Ok(())
 }
 
-#[tauri::command]
-pub async fn remove_mcp(state: State<'_, AppState>, name: String) -> Result<(), String> {
+pub async fn remove_mcp(state: &AppState, name: String) -> Result<(), String> {
     state.mcp.remove(&name).await.map_err(err)
 }
 
-#[tauri::command]
 pub async fn toggle_mcp(
-    state: State<'_, AppState>,
+    state: &AppState,
     name: String,
     enabled: bool,
 ) -> Result<(), String> {
@@ -1736,45 +1556,39 @@ pub async fn toggle_mcp(
 
 // ── Full MCP manager surface ─────────────────────────────────────────────
 
-#[tauri::command]
 pub async fn list_mcp_servers(
-    state: State<'_, AppState>,
+    state: &AppState,
 ) -> Result<Vec<McpServerConfigExt>, String> {
     Ok(state.mcp.list().await)
 }
 
-#[tauri::command]
 pub async fn get_mcp_server(
-    state: State<'_, AppState>,
+    state: &AppState,
     name: String,
 ) -> Result<McpServerConfigExt, String> {
     state.mcp.get(&name).await.map_err(err)
 }
 
-#[tauri::command]
 pub async fn add_mcp_server(
-    state: State<'_, AppState>,
+    state: &AppState,
     request: AddMcpRequest,
 ) -> Result<McpServerConfigExt, String> {
     state.mcp.add(request).await.map_err(err)
 }
 
-#[tauri::command]
 pub async fn update_mcp_server(
-    state: State<'_, AppState>,
+    state: &AppState,
     request: UpdateMcpRequest,
 ) -> Result<McpServerConfigExt, String> {
     state.mcp.update(request).await.map_err(err)
 }
 
-#[tauri::command]
-pub async fn remove_mcp_server(state: State<'_, AppState>, name: String) -> Result<(), String> {
+pub async fn remove_mcp_server(state: &AppState, name: String) -> Result<(), String> {
     state.mcp.remove(&name).await.map_err(err)
 }
 
-#[tauri::command]
 pub async fn doctor_mcp_server(
-    state: State<'_, AppState>,
+    state: &AppState,
     name: Option<String>,
 ) -> Result<Vec<DoctorReport>, String> {
     state
@@ -1784,46 +1598,40 @@ pub async fn doctor_mcp_server(
         .map_err(err)
 }
 
-#[tauri::command]
 pub async fn list_mcp_tools(
-    state: State<'_, AppState>,
+    state: &AppState,
     name: Option<String>,
 ) -> Result<Vec<McpToolInfo>, String> {
     state.mcp.list_tools(name.as_deref()).await.map_err(err)
 }
 
-#[tauri::command]
 pub async fn list_mcp_catalog() -> Result<Vec<McpCatalogEntry>, String> {
     Ok(grok_mcp::builtin_catalog())
 }
 
-#[tauri::command]
 pub async fn set_mcp_credential(
-    state: State<'_, AppState>,
+    state: &AppState,
     key: String,
     value: String,
 ) -> Result<(), String> {
     state.mcp.set_credential(&key, &value).await.map_err(err)
 }
 
-#[tauri::command]
 pub async fn list_mcp_credentials(
-    state: State<'_, AppState>,
+    state: &AppState,
 ) -> Result<Vec<McpCredential>, String> {
     state.mcp.list_credentials_masked().await.map_err(err)
 }
 
-#[tauri::command]
 pub async fn remove_mcp_credential(
-    state: State<'_, AppState>,
+    state: &AppState,
     key: String,
 ) -> Result<(), String> {
     state.mcp.credentials().remove(&key).map_err(err)
 }
 
-#[tauri::command]
 pub async fn suggest_mcp_for_project(
-    state: State<'_, AppState>,
+    state: &AppState,
     git_remote: Option<String>,
     branch: Option<String>,
 ) -> Result<Vec<String>, String> {
@@ -1833,9 +1641,8 @@ pub async fn suggest_mcp_for_project(
         .await)
 }
 
-#[tauri::command]
 pub async fn preview_session_mcp(
-    state: State<'_, AppState>,
+    state: &AppState,
     names: Vec<String>,
     approved_high_risk: Vec<String>,
     include_auto: bool,
@@ -1858,9 +1665,8 @@ pub async fn preview_session_mcp(
     }))
 }
 
-#[tauri::command]
 pub async fn add_skill(
-    state: State<'_, AppState>,
+    state: &AppState,
     name: String,
     path: Option<String>,
     description: Option<String>,
@@ -1873,27 +1679,23 @@ pub async fn add_skill(
         .map_err(err)
 }
 
-#[tauri::command]
-pub async fn remove_skill(state: State<'_, AppState>, name: String) -> Result<(), String> {
+pub async fn remove_skill(state: &AppState, name: String) -> Result<(), String> {
     state.extensions.remove_skill(&name).await.map_err(err)
 }
 
-#[tauri::command]
-pub async fn extensions_doctor(state: State<'_, AppState>) -> Result<String, String> {
+pub async fn extensions_doctor(state: &AppState) -> Result<String, String> {
     state.extensions.doctor().await.map_err(err)
 }
 
-#[tauri::command]
 pub async fn memory_list(
-    state: State<'_, AppState>,
+    state: &AppState,
     scope: Option<String>,
 ) -> Result<Vec<MemoryEntry>, String> {
     Ok(state.memory.list(scope.as_deref()).await)
 }
 
-#[tauri::command]
 pub async fn memory_add(
-    state: State<'_, AppState>,
+    state: &AppState,
     scope: String,
     content: String,
     tags: Vec<String>,
@@ -1901,21 +1703,18 @@ pub async fn memory_add(
     state.memory.add(scope, content, tags).await.map_err(err)
 }
 
-#[tauri::command]
-pub async fn memory_remove(state: State<'_, AppState>, id: String) -> Result<(), String> {
+pub async fn memory_remove(state: &AppState, id: String) -> Result<(), String> {
     state.memory.remove(&id).await.map_err(err)
 }
 
-#[tauri::command]
-pub async fn memory_flush(state: State<'_, AppState>, scope: String) -> Result<String, String> {
+pub async fn memory_flush(state: &AppState, scope: String) -> Result<String, String> {
     state.memory.flush_markdown(&scope).await.map_err(err)
 }
 
 /// Digest: LLM-summarize a scope's notes into one compact entry (tagged
 /// `digest`). Originals stay — the user deletes what's superseded.
-#[tauri::command]
 pub async fn memory_digest(
-    state: State<'_, AppState>,
+    state: &AppState,
     scope: String,
 ) -> Result<MemoryEntry, String> {
     let pack = state
@@ -1939,7 +1738,6 @@ pub async fn memory_digest(
 }
 
 /// Scope key the given project folder maps to (for the Memory view).
-#[tauri::command]
 pub async fn project_scope(path: String) -> Result<String, String> {
     if path.trim().is_empty() {
         return Ok("global".into());
@@ -1948,9 +1746,8 @@ pub async fn project_scope(path: String) -> Result<String, String> {
 }
 
 /// Pin a piece of transcript text into the project's durable memory.
-#[tauri::command]
 pub async fn remember(
-    state: State<'_, AppState>,
+    state: &AppState,
     id: String,
     content: String,
 ) -> Result<MemoryEntry, String> {
@@ -1978,8 +1775,7 @@ pub async fn remember(
         .map_err(err)
 }
 
-#[tauri::command]
-pub async fn scheduler_list(state: State<'_, AppState>) -> Result<Vec<ScheduledJob>, String> {
+pub async fn scheduler_list(state: &AppState) -> Result<Vec<ScheduledJob>, String> {
     Ok(state.scheduler.list().await)
 }
 
@@ -1995,9 +1791,8 @@ pub struct SchedulerAddRequest {
     pub max_runs: Option<u64>,
 }
 
-#[tauri::command]
 pub async fn scheduler_add(
-    state: State<'_, AppState>,
+    state: &AppState,
     request: SchedulerAddRequest,
 ) -> Result<ScheduledJob, String> {
     let schedule = if let Some(expr) = request.cron {
@@ -2022,65 +1817,55 @@ pub async fn scheduler_add(
         .map_err(err)
 }
 
-#[tauri::command]
-pub async fn scheduler_cancel(state: State<'_, AppState>, id: String) -> Result<(), String> {
+pub async fn scheduler_cancel(state: &AppState, id: String) -> Result<(), String> {
     state.scheduler.cancel(&id).await.map_err(err)
 }
 
-#[tauri::command]
-pub async fn scheduler_pause(state: State<'_, AppState>, id: String) -> Result<(), String> {
+pub async fn scheduler_pause(state: &AppState, id: String) -> Result<(), String> {
     state.scheduler.pause(&id).await.map_err(err)
 }
 
-#[tauri::command]
-pub async fn scheduler_resume(state: State<'_, AppState>, id: String) -> Result<(), String> {
+pub async fn scheduler_resume(state: &AppState, id: String) -> Result<(), String> {
     state.scheduler.resume(&id).await.map_err(err)
 }
 
 // ── Phase 4: Diff, Export, Recovery ──────────────────────────────────────
 
-#[tauri::command]
 pub async fn diff_current(cwd: String) -> Result<DiffSummary, String> {
     DiffEngine::current_summary(PathBuf::from(cwd).as_path())
         .await
         .map_err(err)
 }
 
-#[tauri::command]
 pub async fn diff_capture_before(cwd: String) -> Result<DiffCapture, String> {
     DiffEngine::capture_before(PathBuf::from(cwd).as_path())
         .await
         .map_err(err)
 }
 
-#[tauri::command]
 pub async fn diff_capture_after(capture: DiffCapture) -> Result<DiffCapture, String> {
     DiffEngine::capture_after(capture).await.map_err(err)
 }
 
-#[tauri::command]
 pub async fn export_session_markdown(
-    state: State<'_, AppState>,
+    state: &AppState,
     id: String,
 ) -> Result<String, String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
     state.persistence.export_markdown(id).map_err(err)
 }
 
-#[tauri::command]
 pub async fn list_persisted_sessions(
-    state: State<'_, AppState>,
+    state: &AppState,
 ) -> Result<Vec<SessionRecord>, String> {
     state.persistence.list_sessions().map_err(err)
 }
 
-#[tauri::command]
-pub async fn persistence_checkpoint(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn persistence_checkpoint(state: &AppState) -> Result<(), String> {
     state.persistence.checkpoint().map_err(err)
 }
 
-#[tauri::command]
-pub async fn shutdown_all(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn shutdown_all(state: &AppState) -> Result<(), String> {
     state.registry.shutdown_all().await;
     state.persistence.checkpoint().map_err(err)?;
     Ok(())
@@ -2449,9 +2234,8 @@ fn resolve_preview_cwd(state: &AppState, cwd: Option<String>, session_id: Option
     Err("No project path — select a session or set cwd".into())
 }
 
-#[tauri::command]
 pub async fn detect_dev_server(
-    state: State<'_, AppState>,
+    state: &AppState,
     cwd: Option<String>,
     session_id: Option<String>,
 ) -> Result<crate::devserver::DetectedProject, String> {
@@ -2459,9 +2243,8 @@ pub async fn detect_dev_server(
     crate::devserver::DevServerManager::detect(&path)
 }
 
-#[tauri::command]
 pub async fn start_dev_server(
-    state: State<'_, AppState>,
+    state: &AppState,
     cwd: Option<String>,
     session_id: Option<String>,
     open_browser: Option<bool>,
@@ -2474,28 +2257,24 @@ pub async fn start_dev_server(
         .await
 }
 
-#[tauri::command]
 pub async fn stop_dev_server(
-    state: State<'_, AppState>,
+    state: &AppState,
 ) -> Result<crate::devserver::DevServerStatus, String> {
     Ok(state.dev_server.stop().await)
 }
 
-#[tauri::command]
 pub async fn dev_server_status(
-    state: State<'_, AppState>,
+    state: &AppState,
 ) -> Result<crate::devserver::DevServerStatus, String> {
     Ok(state.dev_server.status().await)
 }
 
-#[tauri::command]
-pub async fn open_dev_server(state: State<'_, AppState>) -> Result<String, String> {
+pub async fn open_dev_server(state: &AppState) -> Result<String, String> {
     state.dev_server.open_in_browser().await
 }
 
-#[tauri::command]
 pub async fn reveal_project(
-    state: State<'_, AppState>,
+    state: &AppState,
     cwd: Option<String>,
     session_id: Option<String>,
 ) -> Result<(), String> {

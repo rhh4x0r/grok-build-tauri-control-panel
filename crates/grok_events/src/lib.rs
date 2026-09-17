@@ -119,7 +119,7 @@ pub enum ControlEvent {
 }
 
 /// One option offered by the agent in a `session/request_permission` request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionOptionInfo {
     pub id: String,
     pub kind: String,

@@ -2,7 +2,7 @@
 
 ## Project
 
-**Bomb Code** — production-oriented **Rust + Tauri 2** desktop control panel for **Grok Build** (xAI agentic coding CLI).
+**Bomb Code** — production-oriented **pure-Rust (GPUI)** desktop control panel for **Grok Build** (xAI agentic coding CLI).
 
 Primary integration path: **ACP** (`grok agent stdio`, JSON-RPC over NDJSON stdio).  
 Fallback: headless CLI (`grok -p ...`) for batch/scheduler jobs.
@@ -24,7 +24,8 @@ Fallback: headless CLI (`grok -p ...`) for batch/scheduler jobs.
 | `grok_scheduler` | Interval/cron/once jobs |
 | `grok_persistence` | SQLite crash recovery + transcripts |
 | `grok_diff` | Diff capture / summaries |
-| `src-tauri` | Tauri app, invoke commands, event bridge |
+| `bomb_core` | Framework-free app core: `AppState`, services (every user action), `transcript`/`presence` reducers |
+| `bomb_app` | GPUI desktop app (gpui-kit): windows, views, tokio↔GPUI bridge |
 
 ## Build commands
 
@@ -32,7 +33,7 @@ Fallback: headless CLI (`grok -p ...`) for batch/scheduler jobs.
 cargo check --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-cargo tauri dev   # full desktop UI
+cargo run -p bomb_app   # desktop UI
 ```
 
 ## Security defaults

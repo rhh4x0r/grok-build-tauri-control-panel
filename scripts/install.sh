@@ -18,9 +18,9 @@ fi
 grok version || true
 
 echo "==> Building app bundle (release)"
-cargo tauri build --bundles app
+"${ROOT}/scripts/bundle.sh"
 
-SRC="${ROOT}/target/release/bundle/macos/Bomb Code.app"
+SRC="${ROOT}/target/release/bundle/Bomb Code.app"
 DEST="/Applications/Bomb Code.app"
 
 if [[ ! -d "$SRC" ]]; then

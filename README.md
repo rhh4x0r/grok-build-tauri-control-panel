@@ -2,9 +2,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Rust](https://img.shields.io/badge/rust-edition%202021-orange.svg)](./Cargo.toml)
-[![Tauri](https://img.shields.io/badge/tauri-2-blue.svg)](https://tauri.app)
+[![GPUI](https://img.shields.io/badge/ui-GPUI-purple.svg)](https://www.gpui.rs)
 
-**Bomb Code** is an open-source **Tauri 2** desktop control panel for [Grok Build](https://x.ai) — multi-session agent orchestration with **ACP-first** integration, worktrees, permissions, MCP/skills, memory, scheduler, and crash recovery.
+**Bomb Code** is an open-source **pure-Rust desktop app (GPUI + gpui-kit)**, a control panel for [Grok Build](https://x.ai) — multi-session agent orchestration with **ACP-first** integration, worktrees, permissions, MCP/skills, memory, scheduler, and crash recovery.
 
 > **Requires** the [Grok Build CLI](https://x.ai) (`grok`) installed and authenticated. This panel does not ship the Grok binary.
 
@@ -23,7 +23,7 @@
 - **Scheduler** — interval, cron, one-shot routines (persisted; survive restart; each job needs an explicit working directory)
 - **Persistence** — SQLite session/transcript recovery
 - **Diff engine** — before/after capture and summaries
-- **Live Dev Server** dock for project preview
+- **Live Dev Server** control for project preview
 - **macOS app** install under `/Applications/Bomb Code.app`
 
 ## Quick start
@@ -31,9 +31,8 @@
 ### Prerequisites
 
 1. [Rust](https://rustup.rs/) (stable) + Xcode CLT on macOS
-2. [Tauri 2 CLI](https://v2.tauri.app/start/prerequisites/): `cargo install tauri-cli --version "^2"`
-3. Grok Build CLI on `PATH` or at `~/.grok/bin/grok`
-4. Grok auth (`grok` login / panel Login)
+2. Grok Build CLI on `PATH` or at `~/.grok/bin/grok`
+3. Grok auth (`grok` login / panel Login)
 
 ### Install from source (macOS)
 
@@ -58,8 +57,8 @@ See **[QUICKSTART.md](./QUICKSTART.md)** for first ACP session, MCP setup, and c
 ```bash
 ./scripts/run.sh --dev
 # or
-cargo tauri dev
-cargo tauri build --bundles app
+cargo run -p bomb_app          # dev build
+./scripts/bundle.sh            # release .app under target/release/bundle/
 ```
 
 The app discovers `~/.grok/bin/grok` even when launched from Finder (PATH is bootstrapped).
@@ -77,8 +76,8 @@ The app discovers `~/.grok/bin/grok` even when launched from Finder (PATH is boo
 
 ```
 crates/           # backend libraries
-src-tauri/        # Tauri host + commands
-frontend/         # lightweight control UI
+crates/bomb_core/ # app core: state, services, transcript reducer
+crates/bomb_app/  # GPUI desktop app
 docs/plan/        # original multi-agent build plan
 scripts/          # install / run helpers
 ```

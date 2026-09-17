@@ -14,9 +14,10 @@ members = [
     "crates/grok_scheduler",
     "crates/grok_persistence",
     "crates/grok_diff",
-    "src-tauri",
+    "crates/bomb_core",
+    "crates/bomb_app",
 ]
-default-members = ["src-tauri"]
+default-members = ["crates/bomb_app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -52,9 +53,3 @@ hex = "0.4"
 tempfile = "3"
 rusqlite = { version = "0.32", features = ["bundled"] }
 cron = "0.15"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
-tauri = { version = "2", features = [] }
-tauri-plugin-shell = "2"
-tauri-plugin-fs = "2"
-tauri-plugin-dialog = "2"
-tauri-build = { version = "2", features = [] }

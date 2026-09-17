@@ -4,7 +4,7 @@
 
 1. **Grok Build CLI** installed (`grok version` works).
 2. Auth configured for Grok (login via `grok` once if needed).
-3. Rust + Tauri deps (only needed to rebuild).
+3. Rust toolchain (only needed to rebuild).
 
 Your CLI lives at e.g. `~/.grok/bin/grok` — the panel discovers this automatically, including when launched from Finder.
 
@@ -54,7 +54,7 @@ open "/Applications/Bomb Code.app"
 ```bash
 ./scripts/run.sh --dev
 # or
-cargo tauri dev
+cargo run -p bomb_app
 ```
 
 ## Troubleshooting
@@ -63,7 +63,7 @@ cargo tauri dev
 |---------|-----|
 | Status: Grok not found | Ensure `~/.grok/bin/grok` exists; re-run install |
 | ACP start fails | Run `grok agent stdio` once in a terminal; complete auth |
-| Empty UI / no Tauri bridge | Must use `.app` or `cargo tauri dev`, not opening `index.html` |
+| Window opens but nothing loads | Run `RUST_LOG=debug cargo run -p bomb_app` and check the terminal for errors |
 | MCP doctor warns | Install Node/npx for stdio servers; set credentials |
 
 ## Safety
