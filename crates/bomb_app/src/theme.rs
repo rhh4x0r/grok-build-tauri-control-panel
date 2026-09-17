@@ -185,14 +185,13 @@ impl Ui {
         }
     }
 
+    /// Brand tint for a backend mark. Like Zeron: only Claude carries a
+    /// color; Grok and OpenAI marks are neutral text.
     pub fn backend(&self, key: &str) -> Hsla {
         match (key, self.dark) {
-            ("grok", true) => c(0x8be28b),
-            ("grok", false) => c(0x2f8f3a),
             ("claude", true) => c(0xd97757),
             ("claude", false) => c(0xb85c3a),
-            ("codex", true) => c(0x74aa9c),
-            ("codex", false) => c(0x3f8a78),
+            ("grok" | "codex", _) => self.text,
             _ => self.text_muted,
         }
     }

@@ -11,6 +11,7 @@ use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::popover::Popover;
 use gpui_kit::component::{Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -35,6 +36,7 @@ pub struct ComposerView {
     input: Entity<TextareaState>,
     attachments: Vec<Attachment>,
     drag_over: bool,
+    model_menu_open: bool,
 }
 
 impl ComposerView {
@@ -57,6 +59,7 @@ impl ComposerView {
             input,
             attachments: Vec::new(),
             drag_over: false,
+            model_menu_open: false,
         }
     }
 
@@ -236,56 +239,145 @@ impl ComposerView {
         )
     }
 
-    fn model_picker(&self, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
+    /// Model + reasoning selector: vendors as sections with their models
+    /// (checkmark on the current one), then a segmented reasoning row for
+    /// backends that take an effort. Picking a model closes the popover;
+    /// picking an effort keeps it open so you can compare.
+    fn model_selector(&self, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
         let m = self.model.read(cx);
         let backend = m.prefs.backend.clone();
         let model = m.effective_model();
-        let backends = m.backends.clone();
+        let effort = m.prefs.effort.clone();
         let app = self.model.clone();
-        let label = if model.is_empty() { backend.clone() } else { model };
+        let this = cx.entity().clone();
         let mark = crate::views::brand::brand_mark(&backend, 14., true, ui);
-        Button::new("model-picker")
+        let label = if model.is_empty() { backend.clone() } else { model };
+        let trigger = Button::new("model-selector")
             .ghost()
             .small()
             .compact()
-            .label(label)
-            .icon(Icon::empty())
-            .dropdown_menu(move |mut menu, _, _| {
-                for b in &backends {
-                    menu = menu.label(format!(
-                        "{}{}",
-                        b.display_name,
-                        if b.available { "" } else { " · unavailable" }
-                    ));
-                    let models: Vec<String> = if b.models.is_empty() {
-                        vec![b.default_model.clone()]
-                    } else {
-                        b.models.clone()
-                    };
-                    for md in models {
-                        let app = app.clone();
-                        let bid = b.id.clone();
-                        let mdl = md.clone();
-                        let item = PopupMenuItem::new(md.clone())
-                            .disabled(!b.available)
-                            .on_click(move |_, _, cx| {
-                                app.update(cx, |m, cx| m.set_backend(&bid, Some(mdl.clone()), cx));
-                            });
-                        menu = menu.item(item);
-                    }
-                    menu = menu.separator();
+            .label(if backend == "grok" { format!("{label}  ·  {effort}") } else { label })
+            .icon(Icon::empty());
+        let popover = Popover::new("model-selector-popover")
+            .anchor(Anchor::BottomRight)
+            .trigger(trigger)
+            .open(self.model_menu_open)
+            .on_open_change({
+                let this = this.clone();
+                move |open, _, cx| {
+                    let open = *open;
+                    this.update(cx, |c, cx| {
+                        c.model_menu_open = open;
+                        cx.notify();
+                    })
                 }
-                menu
             })
-            .map(|el| {
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(mark)
-                    .child(el)
-                    .into_any_element()
-            })
+            .content(move |_, _, cx| {
+                let ui = Ui::of(cx);
+                let (backends, cur_backend, cur_model, cur_effort) = {
+                    let m = app.read(cx);
+                    (m.backends.clone(), m.prefs.backend.clone(), m.effective_model(), m.prefs.effort.clone())
+                };
+                let hover = ui.hover;
+                let mut col = div().flex().flex_col().w(px(300.)).py_1();
+                for b in &backends {
+                    col = col.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_3()
+                            .pt_2()
+                            .pb_1()
+                            .child(crate::views::brand::brand_mark(&b.id, 13., true, &ui))
+                            .child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(ui.text_muted).child(b.display_name.clone()))
+                            .when(!b.available, |el| el.child(div().text_xs().text_color(ui.text_faint).child("unavailable"))),
+                    );
+                    let models: Vec<String> = if b.models.is_empty() { vec![b.default_model.clone()] } else { b.models.clone() };
+                    for md in models {
+                        let selected = b.id == cur_backend && md == cur_model;
+                        let app = app.clone();
+                        let this = this.clone();
+                        let (bid, mdl) = (b.id.clone(), md.clone());
+                        let available = b.available;
+                        col = col.child(
+                            div()
+                                .id(SharedString::from(format!("model-{}-{md}", b.id)))
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .h(px(28.))
+                                .mx_1()
+                                .px_2()
+                                .rounded(px(6.))
+                                .text_size(px(13.))
+                                .text_color(if available { ui.text } else { ui.text_faint })
+                                .when(available, |el| {
+                                    el.cursor_pointer().hover(move |s| s.bg(hover)).on_click(move |_, _, cx| {
+                                        app.update(cx, |a, cx| a.set_backend(&bid, Some(mdl.clone()), cx));
+                                        this.update(cx, |c, cx| {
+                                            c.model_menu_open = false;
+                                            cx.notify();
+                                        });
+                                    })
+                                })
+                                .child(div().flex_1().child(md.clone()))
+                                .when(selected, |el| {
+                                    el.child(div().size(px(14.)).text_color(ui.text).child(Icon::from(Lucide::Check)))
+                                }),
+                        );
+                    }
+                }
+                if cur_backend == "grok" {
+                    let mut seg = div()
+                        .flex()
+                        .items_center()
+                        .p_0p5()
+                        .rounded(px(7.))
+                        .bg(ui.ink(0.06));
+                    for e in ["low", "medium", "high"] {
+                        let app = app.clone();
+                        let on = cur_effort == e;
+                        seg = seg.child(
+                            div()
+                                .id(SharedString::from(format!("effort-{e}")))
+                                .flex_1()
+                                .h(px(24.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(5.))
+                                .text_xs()
+                                .font_weight(if on { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                                .text_color(if on { ui.text } else { ui.text_muted })
+                                .when(on, |el| el.bg(ui.ink(0.12)))
+                                .cursor_pointer()
+                                .on_click(move |_, _, cx| app.update(cx, |a, cx| a.set_effort(e, cx)))
+                                .child(e),
+                        );
+                    }
+                    col = col
+                        .child(div().mx_3().my_1().h(px(1.)).bg(ui.border))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .px_3()
+                                .py_2()
+                                .child(div().w(px(72.)).text_xs().text_color(ui.text_muted).child("Reasoning"))
+                                .child(div().flex_1().child(seg)),
+                        );
+                }
+                col
+            });
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(mark)
+            .child(popover)
+            .into_any_element()
     }
 
     fn mcp_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -441,10 +533,9 @@ impl Render for ComposerView {
 
         let drag_border = if self.drag_over { ui.accent } else { ui.border };
         let tray = self.tray(&ui, cx);
-        let model_picker = self.model_picker(&ui, cx);
+        let model_picker = self.model_selector(&ui, cx);
         let mode_picker = self.mode_picker(&ui, cx);
         let mcp_picker = self.mcp_picker(cx);
-        let effort_picker = self.effort_picker(cx);
         let hover = ui.hover;
         let _ = danger;
 
@@ -517,7 +608,6 @@ impl Render for ComposerView {
                                             .gap_0p5()
                                             .pb_0p5()
                                             .child(model_picker)
-                                            .children(effort_picker)
                                             .child(mode_picker)
                                             .children(mcp_picker)
                                             .child(
