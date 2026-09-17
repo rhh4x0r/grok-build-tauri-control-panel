@@ -28,6 +28,11 @@ pub struct SidebarView {
 }
 
 /// Recency bucket for thread search results.
+/// Folder mark size on a project header, and where its name starts. Nested
+/// rows begin at that x so their marks line up under the name (Codex).
+const GROUP_ICON: f32 = 16.0;
+const GROUP_INDENT: f32 = Layout::SPACE_SM + GROUP_ICON + Layout::SPACE_SM;
+
 fn recency_group(iso: &str) -> &'static str {
     let Ok(t) = iso.parse::<DateTime<Utc>>() else { return "Earlier" };
     let now = Utc::now();
@@ -198,16 +203,17 @@ impl SidebarView {
                 .flex()
                 .items_center()
                 .gap(px(Layout::SPACE_SM))
-                .h(px(28.))
+                .h(px(29.))
                 .px(px(Layout::SPACE_SM))
-                .child(div().size(px(14.)).flex_shrink_0().text_color(Ui::alpha(ui.text_muted, 0.7)).child(Icon::from(Lucide::Folder)))
+                .child(div().size(px(GROUP_ICON)).flex_shrink_0().text_color(ui.text_muted).child(Icon::from(if collapsed { Lucide::Folder } else { Lucide::FolderOpen })))
                 .child(
                     div()
                         .id(SharedString::from(format!("project-{root}")))
+                        .flex_1()
                         .min_w_0()
-                        .text_size(px(12.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(Ui::alpha(ui.text_muted, 0.7))
+                        .text_size(px(13.))
+                        .line_height(px(17.))
+                        .text_color(Ui::alpha(ui.text, 0.8))
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
@@ -215,7 +221,6 @@ impl SidebarView {
                         .child(g.name.clone())
                         .on_click(move |_, _, cx| app.update(cx, |m, cx| m.set_active_project(root.clone(), cx))),
                 )
-                .child(div().flex_1().h(px(1.)).bg(Ui::alpha(ui.border, 0.6)))
                 .child(
                     div()
                         .id(SharedString::from(format!("new-{}", g.root)))
@@ -260,7 +265,8 @@ impl SidebarView {
                             .flex()
                             .items_center()
                             .gap(px(Layout::SPACE_XS))
-                            .px(px(Layout::SPACE_SM))
+                            .pl(px(GROUP_INDENT))
+                            .pr(px(Layout::SPACE_SM))
                             .h(px(14.))
                             .text_size(px(11.))
                             .line_height(px(14.))
@@ -283,7 +289,8 @@ impl SidebarView {
                         .items_center()
                         .gap(px(Layout::SPACE_XS))
                         .h(px(24.))
-                        .px(px(Layout::SPACE_SM))
+                        .pl(px(GROUP_INDENT))
+                        .pr(px(Layout::SPACE_SM))
                         .text_size(px(11.))
                         .text_color(ui.subline())
                         .cursor_pointer()
@@ -331,6 +338,7 @@ impl SidebarView {
                         .flex()
                         .flex_col()
                         .gap(px(2.))
+                        .ml(px(GROUP_INDENT - Layout::SPACE_SM))
                         .px(px(Layout::SPACE_SM))
                         .py(px(6.))
                         .rounded(px(8.))
@@ -387,7 +395,7 @@ impl SidebarView {
                             .items_center()
                             .gap(px(Layout::SPACE_XS))
                             .h(px(22.))
-                            .pl(px(Layout::SPACE_SM + 21.))
+                            .pl(px(GROUP_INDENT + 21.))
                             .pr(px(Layout::SPACE_SM))
                             .text_size(px(11.))
                             .text_color(ui.subline())
@@ -469,6 +477,7 @@ impl SidebarView {
             .flex()
             .flex_col()
             .gap(px(2.))
+            .when(project.is_empty(), |el| el.ml(px(GROUP_INDENT - Layout::SPACE_SM)))
             .px(px(Layout::SPACE_SM))
             .py(px(6.))
             .rounded(px(8.))
