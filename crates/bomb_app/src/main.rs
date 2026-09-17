@@ -25,11 +25,11 @@ impl AssetSource for Assets {
             };
             return Ok(data.map(std::borrow::Cow::Borrowed));
         }
-        gpui_kit::assets::Assets.load(path)
+        gpui_kit::assets::AllAssets.load(path)
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        gpui_kit::assets::Assets.list(path)
+        gpui_kit::assets::AllAssets.list(path)
     }
 }
 

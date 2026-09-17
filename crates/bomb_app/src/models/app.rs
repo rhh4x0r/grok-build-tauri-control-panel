@@ -235,6 +235,7 @@ impl AppModel {
                         // A live stream may already have more than the DB.
                         if t.thread.entries.len() <= rows.len() {
                             t.thread.hydrate(&rows);
+                            t.after_hydrate(cx);
                         }
                     }
                     cx.notify();
