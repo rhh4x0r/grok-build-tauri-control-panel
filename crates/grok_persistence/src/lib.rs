@@ -172,7 +172,7 @@ impl Persistence {
                 ON sessions(updated_at DESC);
             CREATE TABLE IF NOT EXISTS workspaces (
                 id TEXT PRIMARY KEY,
-                path TEXT NOT NULL UNIQUE,
+                path TEXT NOT NULL,
                 data TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS session_workspaces (
@@ -185,6 +185,18 @@ impl Persistence {
             );
             "#,
         )?;
+        // Read-only and writable conversations may share a checkout without
+        // inheriting each other's permissions. Preserve ids and associations.
+        let schema:String=conn.query_row("SELECT sql FROM sqlite_master WHERE type='table' AND name='workspaces'",[],|row|row.get(0))?;
+        if schema.contains("path TEXT NOT NULL UNIQUE") {
+            conn.execute_batch("PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;
+                CREATE TABLE workspaces_v2 (id TEXT PRIMARY KEY, path TEXT NOT NULL, data TEXT NOT NULL);
+                INSERT INTO workspaces_v2 SELECT id,path,data FROM workspaces;
+                DROP TABLE workspaces;
+                ALTER TABLE workspaces_v2 RENAME TO workspaces;
+                COMMIT; PRAGMA foreign_keys=ON;")?;
+        }
+        conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_workspaces_path ON workspaces(path);")?;
         Ok(())
     }
 

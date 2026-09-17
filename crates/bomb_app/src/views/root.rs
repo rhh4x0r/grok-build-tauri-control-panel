@@ -362,7 +362,7 @@ impl Render for RootView {
                     })
                     .child(resizable_panel().child(if self.foundry_open { self.foundry.clone().unwrap().into_any_element() } else { self.thread.clone().into_any_element() }))
                     .when(self.model.read(cx).review_open, |el| {
-                        el.child(resizable_panel().size(px(480.)).size_range(px(320.)..px(1000.)).child(self.review.clone()))
+                        el.child(resizable_panel().size(px(640.)).size_range(px(400.)..px(1100.)).child(self.review.clone()))
                     })
                     .when(self.preview_open && !self.model.read(cx).review_open, |el| {
                         el.child(

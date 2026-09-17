@@ -44,6 +44,7 @@ pub struct ComposerView {
     model_search: Entity<InputState>,
     provider_filter: Option<String>,
     speed: Entity<super::speed::SpeedSelector>,
+    location: Entity<super::work_location::WorkLocation>,
     sent_draft: Option<(String, Vec<Attachment>, u64)>,
     failed_draft: Option<(String, Vec<Attachment>)>,
     destination_busy: bool,
@@ -97,7 +98,9 @@ impl ComposerView {
         let memory_search=cx.new(|cx|InputState::new(window,cx).placeholder("Search saved memories…"));
         cx.observe(&memory_search,|_,_,cx|cx.notify()).detach();
         let speed = cx.new(|cx| super::speed::SpeedSelector::new(model.clone(), cx));
+        let location=cx.new(|cx|super::work_location::WorkLocation::new(model.clone(),cx));
         Self {
+            location,
             speed,
             model,
             input,
@@ -512,6 +515,14 @@ impl ComposerView {
         let backend=m.prefs.backend.clone();
         let model=m.effective_model();
         let approval=m.prefs.mode.clone();
+        let location = grok_control_core::SpawnOptions {
+            backend:grok_config::Backend::from_key(&backend).unwrap_or_default(),model:Some(model.clone()),
+            approval_mode:serde_json::from_value(serde_json::json!(approval)).ok(),
+            isolate_worktree:m.prefs.location=="new" && !m.prefs.temporary,
+            edit_checkout:m.prefs.location=="checkout" && !m.prefs.temporary,
+            checkout_branch:if m.prefs.location=="branch"{m.prefs.existing_branch.clone()}else{None},
+            base_ref:m.prefs.base_branch.clone(),read_only:m.prefs.read_only,..Default::default()
+        };
         let origin=m.selected;
         let target=match backend.as_str(){"grok"=>"grok-build","claude"=>"claude-code","codex"=>"openai-codex",_=>"general-assistant"};
         let options=bomb_foundry::PromptOptions{depth:"full-project".into(),target:target.into(),work_type:"implementation-plus-verification".into(),autonomy:self.foundry_autonomy.read(cx).value().to_string(),sources:self.foundry_sources.iter().map(|(input,role)|bomb_foundry::PromptSource{value:input.read(cx).value().to_string(),role:role.clone()}).collect()};
@@ -526,7 +537,7 @@ impl ComposerView {
                 let home=std::env::var_os("HOME").ok_or("Home directory unavailable")?;
                 bomb_core::services::scratch::create(&std::path::PathBuf::from(home).join(".bombcode/chats")).await?.to_string_lossy().into_owned()
             }};
-            let run=bomb_core::foundry::FoundryService::start(state.clone(),document,cwd,backend,model,approval,parent).await?;
+            let run=bomb_core::foundry::FoundryService::start_at(state.clone(),document,cwd,backend,model,approval,parent,Some(location)).await?;
             let threads=bomb_core::services::list_threads(&state).await.ok();
             Ok::<_,String>((run,threads))
         },move |result,cx|{let _=weak.update(cx,|v,cx|{
@@ -1611,7 +1622,6 @@ impl Render for ComposerView {
             .unwrap_or_else(|| "New conversation".into());
         let has_text =
             !self.input.read(cx).value().trim().is_empty() || !self.attachments.is_empty();
-        let app = self.model.clone();
         let (solid, on_solid, danger) = (ui.solid, ui.on_solid, ui.danger);
 
         let send_button: AnyElement = if busy {
@@ -1829,58 +1839,21 @@ impl Render for ComposerView {
                         div()
                             .flex()
                             .items_center()
-                            .h(px(24.))
+                            .min_h(px(24.)).flex_wrap()
                             .gap(px(Layout::SPACE_XS))
                             .px(px(10.))
                             .child(footer_label(Lucide::MessageCircle, location_label, &ui))
                             .when(worktree_on, |el| {
                                 el.child(footer_label(
                                     Lucide::GitBranch,
-                                    "Isolated branch".into(),
+                                    if self.model.read(cx).active_workspace.as_ref().and_then(|id|self.model.read(cx).workspaces.iter().find(|w|&w.id==id)).is_some_and(|w|w.shared_checkout){"Shared checkout"}else{"Isolated branch"}.into(),
                                     &ui,
                                 ))
                             })
                             .when_some(branch, |el, b| {
                                 el.child(footer_label(Lucide::GitBranch, b, &ui))
                             })
-                            .when(!has_thread && new_target, |el| {
-                                el.child(
-                                    Button::new("conversation-intent")
-                                        .ghost()
-                                        .small()
-                                        .compact()
-                                        .label(if worktree_on {
-                                            "Make changes"
-                                        } else {
-                                            "Ask a question"
-                                        })
-                                        .dropdown_caret(true)
-                                        .dropdown_menu(move |menu, _, _| {
-                                            let questions = app.clone();
-                                            let changes = app.clone();
-                                            menu.item(
-                                                PopupMenuItem::new(
-                                                    "Ask a question — leave files unchanged",
-                                                )
-                                                .on_click(move |_, _, cx| {
-                                                    questions.update(cx, |m, cx| {
-                                                        m.set_new_intent(true, cx)
-                                                    })
-                                                }),
-                                            )
-                                            .item(
-                                                PopupMenuItem::new(
-                                                    "Make changes — isolated branch",
-                                                )
-                                                .on_click(move |_, _, cx| {
-                                                    changes.update(cx, |m, cx| {
-                                                        m.set_new_intent(false, cx)
-                                                    })
-                                                }),
-                                            )
-                                        }),
-                                )
-                            })
+                            .when(!has_thread && new_target, |el| el.child(self.location.clone()))
                             .child(div().flex_1())
                             .when(starting, |el| {
                                 el.child(

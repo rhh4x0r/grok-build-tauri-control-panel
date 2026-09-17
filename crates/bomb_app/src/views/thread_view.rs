@@ -476,6 +476,7 @@ impl ThreadView {
                     .child(crate::views::brand::brand_mark(&backend, 13., true, ui))
                     .child(if model.is_empty() { backend } else { model }),
             )
+            .child(super::workspaces::branch_control(self.model.clone(),cx))
             .child(div().flex_1())
             .child(
                 action("new-workspace-thread", "New chat", Lucide::Plus)
@@ -495,7 +496,7 @@ impl ThreadView {
                         }),
                 )
             })
-            .when(has_worktree, |el| {
+            .when(self.model.read(cx).active_workspace.is_some(), |el| {
                 el.child(
                     action("workspace-review", &changes_label, Lucide::GitBranch)
                         .tooltip(changes_hint)

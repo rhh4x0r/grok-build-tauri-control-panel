@@ -8,6 +8,14 @@ use std::path::Path;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkspaceReview {
     pub branch: String,
+    pub default_branch: String,
+    pub comparison: String,
+    pub dirty: Vec<super::git_ui::FileChange>,
+    pub branch_files: Vec<super::git_ui::FileChange>,
+    pub upstream: Option<String>,
+    pub unpushed: usize,
+    pub remote_behind: usize,
+    pub main_unpushed: usize,
     pub base: String,
     pub ahead: usize,
     pub behind: usize,
@@ -16,6 +24,7 @@ pub struct WorkspaceReview {
     pub diff: String,
     pub remote: bool,
     pub pr: Option<String>,
+    pub pr_url: Option<String>,
     pub conflicts: Vec<String>,
 }
 
@@ -103,6 +112,8 @@ pub async fn list_workspaces(state: &AppState) -> Result<Vec<WorkspaceRecord>, S
                 created_at: rec.created_at.to_rfc3339(),
                 archived_at: None,
                 inline,
+                shared_checkout: inline,
+                read_only: inline,
                 threads: vec![],
             };
             state.persistence.save_workspace(&w).map_err(err)?;
@@ -137,10 +148,11 @@ pub fn ensure_idle(state: &AppState, w: &WorkspaceRecord) -> Result<(), String> 
         .workspace_turns
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .contains(&w.id)
+        .contains(&w.path)
     {
         return Err("This thread is finishing a turn or checkpoint. Please wait.".into());
     }
+    if state.registry.list_sessions().iter().any(|s|s.cwd==w.path && matches!(s.status,grok_events::SessionStatus::Running|grok_events::SessionStatus::WaitingApproval|grok_events::SessionStatus::Starting)) {return Err("Another conversation is using this working copy. Wait for it to finish.".into());}
     for t in &w.threads {
         if let Ok(id) = Uuid::parse_str(t) {
             if let Ok(s) = state.registry.get_snapshot(id) {
@@ -165,7 +177,8 @@ pub fn ensure_idle(state: &AppState, w: &WorkspaceRecord) -> Result<(), String> 
 pub async fn review_workspace(state: &AppState, id: String) -> Result<WorkspaceReview, String> {
     let w = workspace(state, &id)?;
     let path = Path::new(&w.path);
-    let base = workspace_base(Path::new(&w.project_root)).await?;
+    let default_branch=default_branch(Path::new(&w.project_root)).await?;
+    let base = default_branch.clone();
     let range = format!("{base}...HEAD");
     let counts = run_git(path, &["rev-list", "--left-right", "--count", &range])
         .await
@@ -214,8 +227,21 @@ pub async fn review_workspace(state: &AppState, id: String) -> Result<WorkspaceR
     } else {
         None
     };
+    let pr_url=if pr.is_some(){
+        tokio::time::timeout(std::time::Duration::from_secs(5),tokio::process::Command::new("gh").args(["pr","view","--json","url","--jq",".url"]).current_dir(path).output()).await.ok().and_then(Result::ok).filter(|o|o.status.success()).map(|o|String::from_utf8_lossy(&o.stdout).trim().to_string())
+    }else{None};
+    let dirty=super::git_ui::changes(path,"HEAD").await?;
+    let branch_files=super::git_ui::changes(path,comparison).await?;
+    let upstream=run_git(path,&["rev-parse","--abbrev-ref","--symbolic-full-name","@{upstream}"]).await.ok().map(|s|s.trim().to_string());
+    let sync=if let Some(upstream)=&upstream {run_git(path,&["rev-list","--left-right","--count",&format!("{upstream}...HEAD")]).await.unwrap_or_default()}else{String::new()};
+    let sync:Vec<usize>=sync.split_whitespace().filter_map(|n|n.parse().ok()).collect();
+    let main_unpushed=run_git(Path::new(&w.project_root),&["rev-list","--count",&format!("origin/{default_branch}..{default_branch}")]).await.ok().and_then(|s|s.trim().parse().ok()).unwrap_or(0);
     Ok(WorkspaceReview {
-        branch: w.branch,
+        branch: state.worktrees.current_branch(path).await.map_err(err)?,
+        default_branch,
+        comparison: comparison.into(),
+        dirty, branch_files, upstream,
+        unpushed: *sync.get(1).unwrap_or(&0),remote_behind:*sync.first().unwrap_or(&0),main_unpushed,
         base,
         ahead: *counts.get(1).unwrap_or(&0),
         behind: *counts.first().unwrap_or(&0),
@@ -227,6 +253,7 @@ pub async fn review_workspace(state: &AppState, id: String) -> Result<WorkspaceR
         diff,
         remote,
         pr,
+        pr_url,
         conflicts,
     })
 }
@@ -255,8 +282,9 @@ pub async fn archive_workspace(state: &AppState, id: String) -> Result<(), Strin
     let _gate = state.workspace_gate.lock().await;
     let mut w = workspace(state, &id)?;
     ensure_idle(state, &w)?;
-    if w.inline {
-        return Err("The main checkout cannot be archived".into());
+    for other in state.persistence.list_workspaces().map_err(err)?.iter().filter(|other|other.path==w.path && other.id!=w.id) {ensure_idle(state,other)?;}
+    if w.inline || w.shared_checkout {
+        return Err("Shared checkouts cannot be archived or removed".into());
     }
     if !state
         .worktrees
@@ -294,9 +322,10 @@ pub async fn workspace_action(
     let _gate = state.workspace_gate.lock().await;
     let w = workspace(state, &id)?;
     ensure_idle(state, &w)?;
-    if w.inline || w.archived_at.is_some() {
+    if w.inline || w.read_only || w.archived_at.is_some() {
         return Err("Create an active thread to make changes".into());
     }
+    if w.shared_checkout && matches!(action.as_str(),"archive"|"squash"|"restore"|"revert-file") {return Err("This action is unavailable in a shared checkout".into());}
     let path = Path::new(&w.path);
     if matches!(action.as_str(), "push" | "pr")
         && !state.worktrees.is_clean(path).await.map_err(err)?
@@ -304,6 +333,14 @@ pub async fn workspace_action(
         return Err("Save a checkpoint before shipping so all changes are included".into());
     }
     let result = match action.as_str() {
+        "commit-selected" => super::git_ui::commit_selected(path,&value).await?,
+        "push-main" => {
+            let root=Path::new(&w.project_root);
+            let base=default_branch(root).await?;
+            for other in state.persistence.list_workspaces().map_err(err)?.iter().filter(|other|other.path==w.project_root){ensure_idle(state,other)?;}
+            run_git(root,&["push","origin",&format!("refs/heads/{base}:refs/heads/{base}")]).await.map_err(err)?;
+            format!("Pushed {base} to origin")
+        }
         "checkpoint" => {
             state
                 .worktrees
@@ -337,13 +374,20 @@ pub async fn workspace_action(
             }
         }
         "push" => {
-            run_git(path, &["push", "-u", "origin", &w.branch])
+            run_git(path, &["push", "-u", "origin", &state.worktrees.current_branch(path).await.map_err(err)?])
                 .await
                 .map_err(err)?;
             "Branch pushed".into()
         }
         "pr" => {
-            run_git(path, &["push", "-u", "origin", &w.branch])
+            let payload:serde_json::Value=serde_json::from_str(&value).map_err(err)?;
+            let title=payload["title"].as_str().filter(|s|!s.trim().is_empty()).ok_or("Enter a PR title")?;
+            let body=payload["body"].as_str().unwrap_or("");
+            let target=payload["base"].as_str().ok_or("Choose a target branch")?;
+            run_git(Path::new(&w.project_root),&["show-ref","--verify",&format!("refs/heads/{target}")]).await.map_err(err)?;
+            let branch=state.worktrees.current_branch(path).await.map_err(err)?;
+            if branch==target {return Err("Choose a different target branch for the pull request".into());}
+            run_git(path, &["push", "-u", "origin", &state.worktrees.current_branch(path).await.map_err(err)?])
                 .await
                 .map_err(err)?;
             let out = tokio::process::Command::new("gh")
@@ -351,13 +395,13 @@ pub async fn workspace_action(
                     "pr",
                     "create",
                     "--head",
-                    &w.branch,
+                    &branch,
                     "--base",
-                    &default_branch(Path::new(&w.project_root)).await?,
+                    target,
                     "--title",
-                    &w.name,
+                    title,
                     "--body",
-                    &value,
+                    body,
                 ])
                 .current_dir(path)
                 .output()
@@ -369,13 +413,8 @@ pub async fn workspace_action(
             String::from_utf8_lossy(&out.stdout).trim().into()
         }
         "merge" => {
-            if run_git(path, &["remote", "get-url", "origin"])
-                .await
-                .is_ok()
-            {
-                return Err("This project has origin; use Push or Open pull request".into());
-            }
             let root = Path::new(&w.project_root);
+            for other in state.persistence.list_workspaces().map_err(err)?.iter().filter(|other|other.path==w.project_root) {ensure_idle(state,other)?;}
             if !state.worktrees.is_clean(root).await.map_err(err)?
                 || !state.worktrees.is_clean(path).await.map_err(err)?
             {
@@ -387,13 +426,15 @@ pub async fn workspace_action(
             if state.worktrees.current_branch(root).await.map_err(err)? != base {
                 return Err(format!("Check out {base} in the project before merging"));
             }
+            let current=state.worktrees.current_branch(path).await.map_err(err)?;
+            if current == base {return Err("This thread is already on the target branch".into());}
             match state
                 .worktrees
-                .merge(root, &w.branch, &format!("Merge {}", w.name))
+                .merge(root, &current, &format!("Merge {}", w.name))
                 .await
                 .map_err(err)?
             {
-                grok_worktree::MergeOutcome::Merged => format!("Merged into {base}"),
+                grok_worktree::MergeOutcome::Merged => format!("Merged into local {base} · Not pushed"),
                 grok_worktree::MergeOutcome::Conflicts { .. } => {
                     state.worktrees.merge_abort(root).await;
                     return Err(
@@ -715,7 +756,7 @@ mod tests {
         assert!(super::super::start_session(&state, root.display().to_string(), overlapping.clone()).await.is_err());
         tokio::time::timeout(std::time::Duration::from_secs(20), async {
             loop {
-                if state.worktrees.is_clean(Path::new(&w.path)).await.unwrap() && !state.workspace_turns.lock().unwrap().contains(&w.id) { break; }
+                if state.worktrees.is_clean(Path::new(&w.path)).await.unwrap() && !state.workspace_turns.lock().unwrap().contains(&w.path) { break; }
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         }).await.unwrap();
@@ -746,6 +787,33 @@ mod tests {
         assert!(!Path::new(&w.path).exists());
         assert!(workspace(&state, &w.id).unwrap().archived_at.is_some());
         assert!(run_git(&root, &["show-ref", "--verify", &format!("refs/heads/{}", w.branch)]).await.is_ok());
+        super::super::wait_until_idle(&state, &inline.id, std::time::Duration::from_secs(5)).await.unwrap();
+        let direct=super::super::start_session(&state,root.display().to_string(),SpawnOptions{model:Some("mock".into()),isolate_worktree:false,edit_checkout:true,..Default::default()}).await.unwrap();
+        super::super::wait_until_idle(&state,&direct.id,std::time::Duration::from_secs(5)).await.unwrap();
+        let direct_id=Uuid::parse_str(&direct.id).unwrap();
+        let direct_w=state.persistence.workspace_for_session(direct_id).unwrap().unwrap();
+        assert!(direct_w.shared_checkout);assert!(!direct_w.inline);assert!(!direct_w.read_only);
+        assert!(!state.registry.get_snapshot(direct_id).unwrap().metadata.read_only);
+        assert!(state.persistence.workspace_for_session(inline_id).unwrap().unwrap().inline);
+        assert!(archive_workspace(&state,direct_w.id.clone()).await.is_err());assert!(root.exists());
+        std::fs::write(root.join("local.txt"),"direct checkout").unwrap();
+        workspace_action(&state,direct_w.id.clone(),"commit-selected".into(),serde_json::json!({"message":"Local edit","files":["local.txt"]}).to_string()).await.unwrap();
+        assert!(state.worktrees.is_clean(&root).await.unwrap());
+        // Existing branch is opened without switching or modifying main.
+        run_git(&root,&["branch","feature-existing"]).await.unwrap();
+        let existing=super::super::start_session(&state,root.display().to_string(),SpawnOptions{model:Some("mock".into()),checkout_branch:Some("feature-existing".into()),..Default::default()}).await.unwrap();
+        super::super::wait_until_idle(&state,&existing.id,std::time::Duration::from_secs(5)).await.unwrap();
+        let existing_w=state.persistence.workspace_for_session(Uuid::parse_str(&existing.id).unwrap()).unwrap().unwrap();
+        assert_eq!(state.worktrees.current_branch(&root).await.unwrap(),"main");
+        assert_ne!(existing_w.path,root.display().to_string());
+        std::fs::write(Path::new(&existing_w.path).join("feature.txt"),"feature").unwrap();
+        workspace_action(&state,existing_w.id.clone(),"commit-selected".into(),serde_json::json!({"message":"Feature","files":["feature.txt"]}).to_string()).await.unwrap();
+        let remote=temp.path().join("remote.git");run_git(temp.path(),&["init","--bare",remote.to_str().unwrap()]).await.unwrap();
+        run_git(&root,&["remote","add","origin",remote.to_str().unwrap()]).await.unwrap();
+        workspace_action(&state,existing_w.id.clone(),"merge".into(),String::new()).await.unwrap();assert!(root.join("feature.txt").exists());
+        assert!(run_git(&remote,&["show-ref","--verify","refs/heads/main"]).await.is_err());
+        workspace_action(&state,existing_w.id,"push-main".into(),String::new()).await.unwrap();
+        assert!(run_git(&remote,&["show-ref","--verify","refs/heads/main"]).await.is_ok());
         super::super::shutdown_all(&state).await.unwrap();
     }
 

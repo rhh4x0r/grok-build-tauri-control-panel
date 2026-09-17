@@ -502,3 +502,13 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 ## 2026-09-17 — Remove standalone Foundry sidebar entry
 - Removed the out-of-place Foundry sidebar button. Enhance Prompt, Run with review loop, and the loop panel’s Advanced details action remain the entry points.
 - Workspace check, strict all-target Clippy and development build passed; updated and reopened the dev bundle.
+
+## 2026-09-17 — Thread locations, branch state, Changes redesign and loop dismissal
+- Added Close/Show details to the review-loop panel and linked completed loops with uncommitted files to the commit dialog.
+- Added Work in (new branch with base selector, current checkout, existing local branch) and independent read-only access. Existing branches reuse or acquire a working copy without switching the main checkout. Shared locations retain explicit permission records, block overlapping turns and cannot be removed/rewritten through archive/restore/squash.
+- Migrated the old unique-path workspace schema transactionally so read-only and writable conversations can share a checkout without inheriting permissions. Preserved ids, associations and legacy defaults; covered migration and foreign-key integrity in tests.
+- Added a header branch menu with local-base and upstream comparisons, working folder access and a direct-checkout badge. The active sidebar branch reflects live Git state and dirty status.
+- Replaced the Changes command collection with Uncommitted/Branch changes tabs, file statistics, explicit commit selection, per-file diff views and a stable action footer. Commit dialogs preserve unselected staged changes; PR dialogs expose source/target/title/body. History/restore, update and squash move behind More.
+- Local merge now works with remotes and remains separate from pushing the default branch. Dynamic default-branch names and no-force pushes are used. Added Git-action progress and periodic local review refresh while Changes is open.
+- Validation: selected-file commit test (including unselected staged changes), workspace integration tests covering direct checkout permissions, existing branches without switching main, archive protection, merge with a local bare remote and separate push; persistence migration tests; Foundry regression suite. Native visual verification remains pending after the prior Computer Use denial.
+- Final workspace check, strict all-target Clippy and development build passed. Updated and reopened the dev bundle.

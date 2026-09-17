@@ -48,6 +48,10 @@ pub struct ComposerPrefs {
     /// plan | ask | auto | yolo
     pub mode: String,
     pub worktree: bool,
+    pub location: String,
+    pub base_branch: Option<String>,
+    pub existing_branch: Option<String>,
+    pub read_only: bool,
     pub mcp_servers: Vec<String>,
     /// low | medium | high (Grok only today).
     pub effort: String,
@@ -64,6 +68,10 @@ impl Default for ComposerPrefs {
             model: None,
             mode: "plan".into(),
             worktree: true,
+            location: "new".into(),
+            base_branch: None,
+            existing_branch: None,
+            read_only: false,
             mcp_servers: Vec::new(),
             effort: "high".into(),
             fast_mode: Some(false),
@@ -85,6 +93,7 @@ pub struct AppModel {
     pub source_thread: Option<String>,
     pub review: Option<bomb_core::services::workspaces::WorkspaceReview>,
     pub review_open: bool,
+    pub git_busy: bool,
     pub review_loading: bool,
     pub active_project: Option<String>,
     pub thread_order: Vec<Uuid>,
@@ -134,6 +143,7 @@ impl AppModel {
             source_thread: None,
             review: None,
             review_open: false,
+            git_busy: false,
             review_loading: false,
             active_project: None,
             thread_order: Vec::new(),
@@ -277,6 +287,8 @@ impl AppModel {
 
     /// An intent choice for a new conversation, not a Git-mode switch.
     pub fn set_new_intent(&mut self, questions: bool, cx: &mut Context<Self>) {
+        self.prefs.read_only = questions;
+        self.prefs.location = if questions {"checkout"}else{"new"}.into();
         self.prefs.temporary = questions;
         self.prefs.worktree = !questions;
         if questions { self.prefs.mode = "plan".into(); }
@@ -297,6 +309,7 @@ impl AppModel {
     pub fn refresh_review(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.active_workspace.clone() else { self.review = None; return; };
         if self.workspaces.iter().any(|w| w.id == id && w.archived_at.is_some()) { self.review = None; return; }
+        if self.review_loading {return;}
         self.review_loading = true;
         let state = svc(cx);
         let this = cx.entity().downgrade();
@@ -312,6 +325,8 @@ impl AppModel {
     }
 
     pub fn run_workspace_action(&mut self, id: String, action: String, value: String, cx: &mut Context<Self>) {
+        if self.git_busy {return;}
+        self.git_busy=true;cx.notify();
         let state = svc(cx);
         let this = cx.entity().downgrade();
         spawn_service(cx, async move {
@@ -320,8 +335,9 @@ impl AppModel {
             else { services::workspaces::workspace_action(&state, id, action, value).await }
         }, move |res, cx| {
             let _ = this.update(cx, |m, cx| {
+                m.git_busy=false;
                 match res { Ok(note) => m.toast(ToastKind::Success, note), Err(e) => m.fail(e, cx) }
-                m.refresh_threads(cx);
+                m.refresh_threads(cx);m.refresh_review(cx);
                 cx.notify();
             });
         });
@@ -663,6 +679,7 @@ impl AppModel {
         self.prefs.fast_mode = Some(false);
         self.new_thread_open = false;
         self.review = None;
+        self.review_loading=false;
         self.active_workspace = id.and_then(|id| self.workspaces.iter().find(|w| w.threads.contains(&id.to_string())).map(|w| w.id.clone()));
         if let Some(w) = self.active_workspace.as_deref().and_then(|id| self.workspaces.iter().find(|w| w.id == id)) {
             self.prefs.temporary = w.inline;
@@ -705,6 +722,8 @@ impl AppModel {
         self.active_workspace = None;
         self.prefs.temporary = false;
         self.prefs.worktree = true;
+        self.prefs.location="new".into();
+        self.prefs.base_branch=None;self.prefs.existing_branch=None;self.prefs.read_only=false;
         self.selected = None;
         // Fresh thread → backend default model, never a stale id.
         self.prefs.model = None;
@@ -923,7 +942,11 @@ impl AppModel {
                     backend,
                     model: model.clone(),
                     approval_mode,
-                    isolate_worktree: prefs.worktree && !prefs.temporary,
+                    isolate_worktree: prefs.location=="new" && !prefs.temporary,
+                    edit_checkout: prefs.location=="checkout" && !prefs.temporary,
+                    checkout_branch: if prefs.location=="branch"{prefs.existing_branch.clone()}else{None},
+                    base_ref: prefs.base_branch.clone(),
+                    read_only: prefs.read_only,
                     workspace_id: self.active_workspace.clone(),
                     source_thread: self.source_thread.take(),
                     prompt: Some(text.clone()),

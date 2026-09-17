@@ -385,7 +385,7 @@ impl SidebarView {
                                 .line_height(px(14.))
                                 .text_color(ui.subline())
                                 .child(div().size(px(11.)).flex_shrink_0().child(Icon::from(Lucide::GitBranch)))
-                                .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(w.branch.clone())),
+                                .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(if active {self.model.read(cx).review.as_ref().map(|r|format!("{}{}",r.branch,if r.dirty.is_empty(){""}else{" · ●"})).unwrap_or_else(||w.branch.clone())}else{w.branch.clone()})),
                         )
                         .child(model_history_stack(&history, &current, ui)),
                 );

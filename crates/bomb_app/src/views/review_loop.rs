@@ -20,6 +20,7 @@ pub struct ReviewLoopView {
     feedback: Entity<InputState>,
     feedback_open: bool,
     run_id: String,
+    hidden: HashSet<String>,
     busy: bool,
     error: Option<String>,
 }
@@ -34,6 +35,7 @@ impl ReviewLoopView {
             }),
             feedback_open: false,
             run_id: String::new(),
+            hidden: HashSet::new(),
             busy: false,
             error: None,
         }
@@ -108,6 +110,10 @@ impl Render for ReviewLoopView {
             self.error = None;
             self.feedback
                 .update(cx, |s, cx| s.set_value("", window, cx));
+        }
+        if self.hidden.contains(&run.id) {
+            let id=run.id.clone();
+            return div().mx_6().my_1().child(Button::new("reopen-review-loop").ghost().small().icon(Lucide::Repeat).label(format!("{} · Show details",status(&run))).on_click(cx.listener(move|v,_,_,cx|{v.hidden.remove(&id);cx.notify();}))).into_any_element();
         }
         let waiting = run.status == RunStatus::WaitingGate;
         let complete = run.status == RunStatus::Completed;
@@ -333,6 +339,15 @@ impl Render for ReviewLoopView {
                     })),
             );
         }
+        if complete {
+            let m=self.model.read(cx);
+            if let (Some(wid),Some(review))=(m.active_workspace.clone(),m.review.as_ref()) {
+                if !review.dirty.is_empty() {
+                    let files:Vec<_>=review.dirty.iter().map(|f|f.path.clone()).collect();let app=self.model.clone();
+                    actions=actions.child(Button::new("loop-commit").primary().small().label(format!("Commit {} files…",files.len())).on_click(move|_,window,cx|super::workspaces::commit_dialog(app.clone(),wid.clone(),files.clone(),window,cx)));
+                }
+            }
+        }
         actions = actions
             .child(
                 Button::new("loop-changes")
@@ -395,7 +410,8 @@ impl Render for ReviewLoopView {
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(status(&run)),
-                    ),
+                    ).child(div().flex_1())
+                    .child({let id=run.id.clone();Button::new("hide-review-loop").ghost().small().icon(Lucide::X).label("Close").on_click(cx.listener(move|v,_,_,cx|{v.hidden.insert(id.clone());cx.notify();}))}),
             )
             .child(strip)
             .child(content)

@@ -12,7 +12,7 @@ The review-loop panel’s **Advanced details** action opens Foundry for advanced
 
 **Run with review loop**, beside Enhance Prompt, uses the current draft as the request and starts Plan → Build and verify → Independent review → Approve result. Review findings return to Build and verify within the existing retry limits. The selected provider/model and approval mode are preserved; Plan mode remains read-only. Planning and independent review sessions are read-only regardless of the selected mode.
 
-The action uses the current thread, creates an isolated thread for a selected project, or creates a temporary chat when no project is selected. Use the loop panel above the composer to inspect stages, pause, stop, resume, approve, or request changes. **Advanced details** opens the full run inspector. Startup errors preserve the draft. Image attachments are not passed to loop stages; the UI asks you to send them in a normal chat or include file paths instead. Explicit Foundry sources and approval notes are included.
+The action uses the current thread, follows the composer’s Work in selection for a new project thread, or creates a temporary chat when no project is selected. Use the loop panel above the composer to inspect stages, pause, stop, resume, approve, or request changes. **Advanced details** opens the full run inspector. Startup errors preserve the draft. Image attachments are not passed to loop stages; the UI asks you to send them in a normal chat or include file paths instead. Explicit Foundry sources and approval notes are included.
 
 ## Author a contract
 
@@ -57,3 +57,5 @@ The thread keeps a stage strip above the composer with explicit Working, Awaitin
 At a human gate, **Approve result** accepts the displayed run revision. **Request changes** sends your feedback back to the most recent build/revision stage and the subsequent independent review, invalidating downstream acceptance. The same attempt limits apply; exhausted limits require explicit extension. Stale approvals are rejected. The completed card records approval, keeps review limitations visible, and offers Preview and View changes. Approval does not commit, merge, or deploy.
 
 Visual patterns adapt assistant-ui's Task card, Tool timeline and Approval card into native GPUI controls; no embedded React runtime is required.
+
+The loop panel has a Close control. Closing keeps a compact Show details control in the thread; it does not stop the run. After completion, uncommitted files can be committed through the same selected-file confirmation used by Changes.

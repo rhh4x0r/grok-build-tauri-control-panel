@@ -13,6 +13,10 @@ pub struct WorkspaceRecord {
     pub archived_at: Option<String>,
     pub inline: bool,
     #[serde(default)]
+    pub shared_checkout: bool,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
     pub threads: Vec<String>,
 }
 
@@ -76,6 +80,8 @@ mod tests {
             created_at: Utc::now().to_rfc3339(),
             archived_at: None,
             inline: false,
+            shared_checkout: false,
+            read_only: false,
             threads: vec![],
         };
         db.save_workspace(&w).unwrap();
@@ -92,6 +98,8 @@ mod tests {
             db.workspace_for_session(b).unwrap().unwrap().name,
             "Feature"
         );
+        // Simulate the previous unique-path schema before reopening.
+        db.conn().unwrap().execute_batch("PRAGMA foreign_keys=OFF; BEGIN; CREATE TABLE old_workspaces(id TEXT PRIMARY KEY,path TEXT NOT NULL UNIQUE,data TEXT NOT NULL); INSERT INTO old_workspaces SELECT * FROM workspaces; DROP TABLE workspaces; ALTER TABLE old_workspaces RENAME TO workspaces; COMMIT;").unwrap();
         drop(db);
         let db = Persistence::open(path).unwrap();
         let mut loaded = db.list_workspaces().unwrap().remove(0);
@@ -107,5 +115,9 @@ mod tests {
         );
         db.delete_session(b).unwrap();
         assert_eq!(db.list_workspaces().unwrap().len(), 1);
+        let mut shared=loaded.clone();shared.id="shared-writable".into();shared.shared_checkout=true;shared.read_only=false;
+        db.save_workspace(&shared).unwrap();
+        assert_eq!(db.list_workspaces().unwrap().len(),2);
+        let violations:i64=db.conn().unwrap().query_row("SELECT count(*) FROM pragma_foreign_key_check",[],|r|r.get(0)).unwrap();assert_eq!(violations,0);
     }
 }

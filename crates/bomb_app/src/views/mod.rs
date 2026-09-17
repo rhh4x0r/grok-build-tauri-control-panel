@@ -28,3 +28,5 @@ mod terminal;
 pub mod foundry;
 
 mod review_loop;
+
+mod work_location;

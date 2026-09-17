@@ -4,6 +4,7 @@ pub mod project_overview;
 pub mod thread_setup;
 pub mod prompt_sources;
 pub mod workspaces;
+pub mod git_ui;
 
 use std::path::PathBuf;
 
@@ -422,20 +423,22 @@ pub async fn start_session(
         opts.project_root = Some(w.project_root.clone());
         opts.isolate_worktree = false;
         opts.worktree = if w.inline { None } else { Some(w.name.clone()) };
-        opts.read_only = w.inline;
+        opts.read_only = w.inline || w.read_only;
         workspace_record = Some(w);
     } else if opts.mode == grok_control_core::AgentMode::Acp {
         let root = std::path::Path::new(&cwd);
         if !root.is_absolute() || !root.is_dir() {
             return Err("Choose an existing absolute project folder".into());
         }
-        let inline = !opts.isolate_worktree;
+        let shared = !opts.isolate_worktree || opts.checkout_branch.is_some();
+        let inline = !opts.isolate_worktree && !opts.edit_checkout && opts.checkout_branch.is_none();
         if !inline && !grok_worktree::is_git_repo(root).await {
             return Err("Create a Git repository before starting a thread, or choose Inline to ask read-only questions".into());
         }
-        let base = workspaces::workspace_base(root)
-            .await
-            .unwrap_or_else(|_| "HEAD".into());
+        let base = if let Some(base)=&opts.base_ref {
+            grok_worktree::run_git(root,&["show-ref","--verify",&format!("refs/heads/{base}")]).await.map_err(err)?;
+            base.clone()
+        } else { workspaces::default_branch(root).await.unwrap_or_else(|_| "HEAD".into()) };
         let name = opts
             .prompt
             .as_deref()
@@ -443,7 +446,20 @@ pub async fn start_session(
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "New thread".into());
         let branch;
-        if !inline {
+        if let Some(existing_branch)=opts.checkout_branch.clone() {
+            grok_worktree::run_git(root,&["check-ref-format","--branch",&existing_branch]).await.map_err(err)?;
+            grok_worktree::run_git(root,&["show-ref","--verify",&format!("refs/heads/{existing_branch}")]).await.map_err(err)?;
+            if let Some(wt)=state.worktrees.list(root).await.map_err(err)?.into_iter().find(|w|w.branch.as_deref()==Some(&existing_branch)) {
+                spawn_cwd=wt.path.to_string_lossy().into_owned();
+            } else {
+                let target=state.paths.worktrees_dir.join(format!("existing-{}",&id.to_string()[..8]));
+                tokio::fs::create_dir_all(&state.paths.worktrees_dir).await.map_err(err)?;
+                grok_worktree::run_git(root,&["worktree","add",target.to_str().ok_or("Invalid worktree path")?,&existing_branch]).await.map_err(err)?;
+                spawn_cwd=target.to_string_lossy().into_owned();
+            }
+            branch=existing_branch;
+            opts.worktree=Some(branch.clone());
+        } else if !shared {
             let slug: String = name
                 .to_lowercase()
                 .chars()
@@ -476,15 +492,16 @@ pub async fn start_session(
                 .current_branch(root)
                 .await
                 .unwrap_or_default();
-            opts.read_only = true;
+            opts.read_only |= inline;
         }
+        for other in state.persistence.list_workspaces().map_err(err)?.iter().filter(|w|w.path==spawn_cwd) {workspaces::ensure_idle(state,other)?;}
         opts.project_root = Some(cwd.clone());
         let existing = state
             .persistence
             .list_workspaces()
             .map_err(err)?
             .into_iter()
-            .find(|w| w.path == spawn_cwd);
+            .find(|w| w.path == spawn_cwd && w.inline == inline && w.read_only == opts.read_only);
         workspace_record = Some(existing.unwrap_or(grok_persistence::WorkspaceRecord {
             id: Uuid::new_v4().to_string(),
             project_root: cwd.clone(),
@@ -499,6 +516,8 @@ pub async fn start_session(
             created_at: Utc::now().to_rfc3339(),
             archived_at: None,
             inline,
+            shared_checkout: shared,
+            read_only: opts.read_only,
             threads: vec![],
         }));
     }
@@ -716,7 +735,7 @@ pub async fn send_prompt(
         let model_changed = want_model
             .as_deref()
             .is_some_and(|m| !m.eq_ignore_ascii_case(&cur.model) && cur.model != "mock");
-        let needs_read_only = workspace.as_ref().is_some_and(|w| w.inline) && !cur.read_only;
+        let needs_read_only = workspace.as_ref().is_some_and(|w| w.inline || w.read_only) && !cur.read_only;
         if needs_read_only
             || backend_changed
             || (model_changed && cur.mode == grok_control_core::AgentMode::Acp)
@@ -829,14 +848,14 @@ pub async fn send_prompt(
     let mut completion = state.event_bus.subscribe();
     let turn_guard = workspace
         .as_ref()
-        .map(|w| workspaces::WorkspaceTurn::new(state.workspace_turns.clone(), &w.id))
+        .map(|w| workspaces::WorkspaceTurn::new(state.workspace_turns.clone(), &w.path))
         .transpose()?;
     state
         .registry
         .send_prompt_with_images(id, &prompt, &acp_images)
         .await
         .map_err(err)?;
-    if let Some(w) = workspace.filter(|w| !w.inline) {
+    if let Some(w) = workspace.filter(|w| !w.inline && !w.read_only && !w.shared_checkout) {
         let manager = state.worktrees.clone();
         let db = state.persistence.clone();
         let bus = state.event_bus.clone();
@@ -1032,7 +1051,7 @@ async fn resume_saved_session(
         .persistence
         .workspace_for_session(id)
         .map_err(err)?
-        .is_some_and(|w| w.inline)
+        .is_some_and(|w| w.inline || w.read_only)
     {
         enforce_inline(&mut opts);
     }
@@ -1242,7 +1261,7 @@ pub async fn set_plan_mode(state: &AppState, id: String, enabled: bool) -> Resul
             .persistence
             .workspace_for_session(id)
             .map_err(err)?
-            .is_some_and(|w| w.inline)
+            .is_some_and(|w| w.inline || w.read_only)
     {
         return Err("Inline is read-only. Create a thread to make changes.".into());
     }
@@ -1311,7 +1330,7 @@ pub async fn set_approval_mode(state: &AppState, id: String, mode: String) -> Re
             .persistence
             .workspace_for_session(id)
             .map_err(err)?
-            .is_some_and(|w| w.inline)
+            .is_some_and(|w| w.inline || w.read_only)
     {
         return Err("Inline is read-only. Create a thread to make changes.".into());
     }
@@ -1389,7 +1408,7 @@ pub async fn set_always_approve(state: &AppState, id: String, enabled: bool) -> 
             .persistence
             .workspace_for_session(id)
             .map_err(err)?
-            .is_some_and(|w| w.inline)
+            .is_some_and(|w| w.inline || w.read_only)
     {
         return Err("Inline is read-only. Create a thread to make changes.".into());
     }

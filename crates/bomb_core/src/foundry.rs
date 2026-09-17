@@ -132,13 +132,17 @@ impl FoundryService {
     }
     pub async fn start(
         state: Arc<AppState>,
-        mut document: Document,
+        document: Document,
         cwd: String,
         backend: String,
         model: String,
         approval: String,
         parent: Option<String>,
     ) -> Result<Run, String> {
+        Self::start_at(state,document,cwd,backend,model,approval,parent,None).await
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_at(state:Arc<AppState>,mut document:Document,cwd:String,backend:String,model:String,approval:String,parent:Option<String>,location:Option<SpawnOptions>)->Result<Run,String>{
         let _starting = state.foundry.starting.lock().await;
         let _gate = state.workspace_gate.lock().await;
         let cwd = std::fs::canonicalize(cwd)
@@ -176,13 +180,13 @@ impl FoundryService {
             id
         } else {
             drop(gate.take());
-            let opts = SpawnOptions {
+            let opts = location.unwrap_or(SpawnOptions {
                 backend: grok_config::Backend::from_key(&backend).ok_or("Unknown provider")?,
                 model: Some(model),
                 approval_mode: Some(approval_mode(&approval)?),
                 isolate_worktree: true,
                 ..Default::default()
-            };
+            });
             let response = crate::services::start_session(&state, cwd, opts).await?;
             if let Ok(snapshot) = state
                 .registry
@@ -369,7 +373,7 @@ async fn execute_stage(
         .as_ref()
         .and_then(|p| Uuid::parse_str(p).ok())
         .and_then(|id| state.persistence.workspace_for_session(id).ok().flatten())
-        .is_some_and(|w| w.inline);
+        .is_some_and(|w| w.inline || w.read_only);
     let read_only = question_thread
         || ["independent-review", "research"].contains(&node.role.as_str())
         || [
