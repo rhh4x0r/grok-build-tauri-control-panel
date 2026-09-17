@@ -487,11 +487,15 @@ impl AppModel {
                 let _ = weak.update(cx, |t, cx| {
                     t.loading = false;
                     t.hydrated = true;
-                    if let Ok(rows) = res {
-                        if t.thread.entries.is_empty() {
-                            t.thread.hydrate(&rows);
-                            t.after_hydrate(cx);
+                    match res {
+                        Ok(rows) => {
+                            tracing::debug!(%id, rows = rows.len(), live = t.thread.entries.len(), "thread hydrated");
+                            if t.thread.entries.is_empty() {
+                                t.thread.hydrate(&rows);
+                                t.after_hydrate(cx);
+                            }
                         }
+                        Err(e) => tracing::warn!(%id, error = %e, "transcript load failed"),
                     }
                     cx.notify();
                 });

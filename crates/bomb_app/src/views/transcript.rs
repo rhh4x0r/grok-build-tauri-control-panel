@@ -26,6 +26,9 @@ pub struct TranscriptView {
     scroll: ScrollHandle,
     follow: bool,
     seen_tail: u64,
+    /// Frames left to keep forcing the bottom: freshly hydrated rows have no
+    /// measured bounds yet, so one `scroll_to_item` lands short.
+    pin_frames: u8,
     /// Find-in-conversation: query and the active hit (index into `matches`).
     search: Option<(String, usize)>,
     matches: Vec<usize>,
@@ -117,6 +120,7 @@ impl TranscriptView {
             scroll: ScrollHandle::new(),
             follow: true,
             seen_tail: u64::MAX,
+            pin_frames: 0,
             search: None,
             matches: Vec::new(),
             scrolled_to: None,
@@ -816,8 +820,11 @@ impl Render for TranscriptView {
         if !self.follow && self.near_bottom() {
             self.follow = true;
         }
-        let should_pin = self.follow && (tail_version != self.seen_tail);
+        if self.follow && tail_version != self.seen_tail {
+            self.pin_frames = 3;
+        }
         self.seen_tail = tail_version;
+        let should_pin = self.follow && self.pin_frames > 0;
 
         let count = rows.len();
         // Find-in-conversation: which rows contain the query.
@@ -873,6 +880,14 @@ impl Render for TranscriptView {
             }
         } else if should_pin && count > 0 {
             self.scroll.scroll_to_item(count - 1);
+            let max = self.scroll.max_offset().y;
+            if max > px(0.) {
+                self.scroll.set_offset(point(px(0.), -max));
+            }
+            self.pin_frames -= 1;
+            if self.pin_frames > 0 {
+                cx.notify();
+            }
         }
         let marks: Vec<AnyElement> = if self.search.is_some() && count > 0 {
             self.matches
