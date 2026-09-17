@@ -1,12 +1,16 @@
 //! Main window: unified title bar over a resizable sidebar | thread view split.
+//! Also owns app-level actions and drains toasts into the notification layer.
 
 use gpui_kit::assets::IconName as Lucide;
-use gpui_kit::component::{h_resizable, resizable_panel, Icon, Root, TitleBar};
+use gpui_kit::component::notification::Notification;
+use gpui_kit::component::{h_resizable, resizable_panel, Icon, Root, TitleBar, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::actions::{NewMockSession, NewThread, OpenProject, OpenSettings};
-use crate::models::app::{project_name, AppModel};
+use crate::actions::{
+    CycleApprovalMode, NewMockSession, NewThread, OpenProject, OpenSettings, RevealProject, StopTurn,
+};
+use crate::models::app::{project_name, AppModel, ToastKind};
 use crate::theme::{Layout, Ui};
 use crate::views::sidebar::SidebarView;
 use crate::views::thread_view::ThreadView;
@@ -20,10 +24,10 @@ pub struct RootView {
 }
 
 impl RootView {
-    pub fn new(model: Entity<AppModel>, cx: &mut Context<Self>) -> Self {
+    pub fn new(model: Entity<AppModel>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe(&model, |_, _, cx| cx.notify()).detach();
         let sidebar = cx.new(|cx| SidebarView::new(model.clone(), cx));
-        let thread = cx.new(|cx| ThreadView::new(model.clone(), cx));
+        let thread = cx.new(|cx| ThreadView::new(model.clone(), window, cx));
         Self {
             model,
             sidebar,
@@ -33,13 +37,26 @@ impl RootView {
         }
     }
 
+    fn drain_toasts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let toasts: Vec<(ToastKind, String)> = self.model.update(cx, |m, _| m.toasts.drain(..).collect());
+        for (kind, msg) in toasts {
+            let note = match kind {
+                ToastKind::Info => Notification::info(msg),
+                ToastKind::Success => Notification::success(msg),
+                ToastKind::Warning => Notification::warning(msg),
+                ToastKind::Error => Notification::error(msg),
+            };
+            window.push_notification(note, cx);
+        }
+    }
+
     fn title_bar(&self, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
         let model = self.model.read(cx);
         let selected = model.selected_thread();
         let title = selected
             .as_ref()
             .map(|t| t.read(cx).title())
-            .unwrap_or_else(|| "Bomb Code".to_string());
+            .unwrap_or_else(|| "New thread".to_string());
         let project = model
             .active_project
             .as_deref()
@@ -70,12 +87,12 @@ impl RootView {
                 .pl_1()
                 .pr_3()
                 .gap_1()
-                .child(icon_button("toggle-sidebar", Lucide::PanelLeft).on_click(
-                    cx.listener(|this, _, _, cx| {
+                .child(icon_button("toggle-sidebar", Lucide::PanelLeft).on_click(cx.listener(
+                    |this, _, _, cx| {
                         this.sidebar_open = !this.sidebar_open;
                         cx.notify();
-                    }),
-                ))
+                    },
+                )))
                 .child(icon_button("new-thread-tb", Lucide::Plus).on_click(cx.listener(
                     |_, _, window, cx| {
                         window.dispatch_action(Box::new(NewThread), cx);
@@ -88,12 +105,7 @@ impl RootView {
                         .gap_2()
                         .ml_3()
                         .min_w_0()
-                        .child(
-                            div()
-                                .size(px(14.))
-                                .text_color(ui.text_muted)
-                                .child(Icon::from(Lucide::Bomb)),
-                        )
+                        .child(div().size(px(14.)).text_color(ui.text_muted).child(Icon::from(Lucide::Bomb)))
                         .child(
                             div()
                                 .text_sm()
@@ -124,17 +136,34 @@ impl RootView {
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::theme::follow_system(window, cx);
+        self.drain_toasts(window, cx);
         let ui = Ui::of(cx);
         let model = self.model.clone();
+        let m2 = self.model.clone();
+        let m3 = self.model.clone();
+        let m4 = self.model.clone();
+        let m5 = self.model.clone();
         div()
             .id("root")
             .track_focus(&self.focus)
             .on_action(cx.listener(move |_, _: &NewMockSession, _, cx| {
                 model.update(cx, |m, cx| m.new_mock_session(cx));
             }))
-            .on_action(cx.listener(|_, _: &NewThread, _, cx| {
-                tracing::info!("new thread requested (Phase 3)");
-                cx.notify();
+            .on_action(cx.listener(move |this, _: &NewThread, window, cx| {
+                m2.update(cx, |m, cx| m.new_thread(cx));
+                this.thread.update(cx, |t, cx| t.focus_composer(window, cx));
+            }))
+            .on_action(cx.listener(move |_, _: &OpenProject, _, cx| {
+                m3.update(cx, |m, cx| m.open_project(cx));
+            }))
+            .on_action(cx.listener(move |_, _: &RevealProject, _, cx| {
+                m4.update(cx, |m, cx| m.reveal_project(cx));
+            }))
+            .on_action(cx.listener(move |_, _: &CycleApprovalMode, _, cx| {
+                m5.update(cx, |m, cx| m.cycle_mode(cx));
+            }))
+            .on_action(cx.listener(|this, _: &StopTurn, _, cx| {
+                this.model.update(cx, |m, cx| m.cancel_selected(cx));
             }))
             .on_action(cx.listener(|_, _: &OpenSettings, _, _| {
                 tracing::info!("settings requested (Phase 4)");
@@ -169,7 +198,7 @@ pub fn open_main_window(model: Entity<AppModel>, cx: &mut App) {
     };
     cx.spawn(async move |cx| {
         let result = cx.open_window(options, |window, cx| {
-            let view = cx.new(|cx| RootView::new(model.clone(), cx));
+            let view = cx.new(|cx| RootView::new(model.clone(), window, cx));
             cx.new(|cx| Root::new(view, window, cx))
         });
         if let Err(e) = result {

@@ -26,6 +26,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-n", NewThread, None),
         KeyBinding::new("cmd-o", OpenProject, None),
         KeyBinding::new("cmd-shift-e", ToggleExplainer, None),
+        KeyBinding::new("cmd-.", StopTurn, None),
     ]);
     cx.set_menus(vec![
         Menu {

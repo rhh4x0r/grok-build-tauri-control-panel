@@ -408,6 +408,16 @@ impl AcpClient {
 
     /// Mock-friendly constructor for tests without a real process.
     pub fn mock_for_tests(session_id: &str, event_bus: Option<Arc<EventBus>>) -> Arc<Self> {
+        Self::mock_for_session(session_id, event_bus, Uuid::new_v4())
+    }
+
+    /// A transport-less client whose events carry `control_session_id`, so
+    /// the UI can route a mock turn to the thread that owns it.
+    pub fn mock_for_session(
+        session_id: &str,
+        event_bus: Option<Arc<EventBus>>,
+        control_session_id: Uuid,
+    ) -> Arc<Self> {
         let config = AcpClientConfig::new("/bin/true", "/tmp");
         Arc::new(Self {
             config,
@@ -417,7 +427,7 @@ impl AcpClient {
             agent_capabilities: RwLock::new(None),
             auth_methods: RwLock::new(Vec::new()),
             event_bus,
-            control_session_id: Uuid::new_v4(),
+            control_session_id,
             notification_rx: Mutex::new(None),
             agent_request_rx: Mutex::new(None),
             always_approve: std::sync::atomic::AtomicBool::new(false),
@@ -1026,19 +1036,61 @@ impl AcpClient {
                 .await;
         }
 
-        // Mock clients: no transport — accept and return.
+        // Mock clients: no transport — stream a scripted turn so the UI can
+        // be exercised offline (thought → tool call → reply → idle).
         if self.transport.read().await.is_none() {
             if let Some(bus) = &self.event_bus {
-                bus.emit(ControlEvent::AgentMessage {
-                    session_id: self.control_session_id,
-                    text: format!(
-                        "[mock] Got it — working on your prompt ({} chars).",
-                        prompt.len()
-                    ),
-                    at: Utc::now(),
+                let bus = bus.clone();
+                let sid = self.control_session_id;
+                let chars = prompt.len();
+                tokio::spawn(async move {
+                    use tokio::time::{sleep, Duration};
+                    let say = |t: &str| ControlEvent::AgentMessage {
+                        session_id: sid,
+                        text: t.to_string(),
+                        at: Utc::now(),
+                    };
+                    sleep(Duration::from_millis(400)).await;
+                    for chunk in ["💭Looking at the request", "💭 (", "💭mock", "💭 agent, ", "💭no real work)."] {
+                        bus.emit(say(chunk));
+                        sleep(Duration::from_millis(120)).await;
+                    }
+                    let tool_id = format!("mock-{}", Uuid::new_v4());
+                    bus.emit(ControlEvent::ToolCall {
+                        session_id: sid,
+                        event: grok_events::ToolCallEvent {
+                            id: tool_id.clone(),
+                            tool: "Bash".into(),
+                            args_summary: "cmd: cargo check --workspace".into(),
+                            status: grok_events::ToolCallStatus::Running,
+                            result_summary: None,
+                            at: Utc::now(),
+                        },
+                    });
+                    sleep(Duration::from_millis(900)).await;
+                    bus.emit(ControlEvent::ToolCall {
+                        session_id: sid,
+                        event: grok_events::ToolCallEvent {
+                            id: tool_id,
+                            tool: "Bash".into(),
+                            args_summary: "cmd: cargo check --workspace".into(),
+                            status: grok_events::ToolCallStatus::Completed,
+                            result_summary: Some("Finished `dev` profile in 0.4s".into()),
+                            at: Utc::now(),
+                        },
+                    });
+                    sleep(Duration::from_millis(300)).await;
+                    let reply = format!(
+                        "Got it — this is the **mock** agent, so nothing ran for real.\n\n\
+                         Your prompt was {chars} chars. Here is what a reply looks like:\n\n\
+                         - streamed markdown\n- with a code block\n\n```rust\nfn main() {{ println!(\"boom\"); }}\n```\n"
+                    );
+                    for word in reply.split_inclusive(' ') {
+                        bus.emit(say(word));
+                        sleep(Duration::from_millis(25)).await;
+                    }
+                    bus.emit_status(sid, SessionStatus::Idle).await;
                 });
-                bus.emit_status(self.control_session_id, SessionStatus::Idle)
-                    .await;
             }
             return Ok(());
         }

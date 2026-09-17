@@ -3,6 +3,7 @@
 mod actions;
 mod models;
 mod runtime;
+mod smoke;
 mod theme;
 mod views;
 
@@ -67,7 +68,8 @@ fn main() {
         let model = cx.new(|cx| models::app::AppModel::new(cx));
         runtime::start_bridge(cx, model.downgrade());
         cx.set_global(models::app::AppModelHandle(model.clone()));
-        views::root::open_main_window(model, cx);
+        views::root::open_main_window(model.clone(), cx);
+        smoke::maybe_run(model, cx);
         cx.activate(true);
     });
 }

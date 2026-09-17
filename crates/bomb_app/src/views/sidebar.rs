@@ -3,7 +3,10 @@
 
 use chrono::{DateTime, Utc};
 use gpui_kit::assets::IconName as Lucide;
-use gpui_kit::component::Icon;
+use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::{Icon, Sizable, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use grok_cli_wrapper::BackendAuth;
@@ -26,6 +29,8 @@ impl SidebarView {
 
     fn header(&self, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
         let hover = ui.hover;
+        let projects = self.model.read(cx).projects.clone();
+        let model = self.model.clone();
         let project = self
             .model
             .read(cx)
@@ -46,15 +51,26 @@ impl SidebarView {
                     .child(Icon::from(Lucide::Folder)),
             )
             .child(
-                div()
-                    .flex_1()
-                    .text_sm()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(ui.text)
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .child(project),
+                Button::new("project-menu")
+                    .ghost()
+                    .small()
+                    .compact()
+                    .label(project)
+                    .dropdown_caret(true)
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for p in &projects {
+                            let m = model.clone();
+                            let root = p.clone();
+                            menu = menu.item(PopupMenuItem::new(project_name(p)).on_click(move |_, _, cx| {
+                                m.update(cx, |a, cx| a.set_active_project(root.clone(), cx));
+                            }));
+                        }
+                        menu = menu.separator();
+                        let m = model.clone();
+                        menu.item(PopupMenuItem::new("Open project…").on_click(move |_, _, cx| {
+                            m.update(cx, |a, cx| a.open_project(cx));
+                        }))
+                    }),
             )
             .child(
                 div()
@@ -136,6 +152,9 @@ impl SidebarView {
                 .into_any_element()
         };
 
+        let has_worktree = tm.meta.worktree.is_some();
+        let menu_model = self.model.clone();
+        let current_title = title.clone();
         div()
             .id(SharedString::from(format!("thread-{id}")))
             .flex()
@@ -150,6 +169,44 @@ impl SidebarView {
             .hover(move |s| s.bg(hover))
             .on_click(move |_, _, cx| {
                 model.update(cx, |m, cx| m.select(Some(id), cx));
+            })
+            .context_menu(move |mut menu, _, _| {
+                let m = menu_model.clone();
+                let t = current_title.clone();
+                menu = menu.item(PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
+                    open_rename_dialog(m.clone(), id, t.clone(), window, cx);
+                }));
+                if has_worktree {
+                    let m = menu_model.clone();
+                    menu = menu.item(PopupMenuItem::new("Sync from project branch").on_click(move |_, _, cx| {
+                        m.update(cx, |a, cx| a.sync_thread(id, cx));
+                    }));
+                    let m = menu_model.clone();
+                    menu = menu.item(PopupMenuItem::new("Land into project branch").on_click(move |_, _, cx| {
+                        m.update(cx, |a, cx| a.land_thread(id, cx));
+                    }));
+                }
+                let m = menu_model.clone();
+                menu = menu.item(PopupMenuItem::new("Reveal in Finder").on_click(move |_, _, cx| {
+                    m.update(cx, |a, cx| {
+                        a.select(Some(id), cx);
+                        a.reveal_project(cx);
+                    });
+                }));
+                menu = menu.separator();
+                let m = menu_model.clone();
+                menu.item(PopupMenuItem::new("Delete thread…").on_click(move |_, window, cx| {
+                    let m = m.clone();
+                    window.open_alert_dialog(cx, move |dlg, _, _| {
+                        let m = m.clone();
+                        dlg.title("Delete this thread?")
+                            .description("Its transcript and worktree are removed. This cannot be undone.")
+                            .on_ok(move |_, _, cx| {
+                                m.update(cx, |a, cx| a.remove_thread(id, cx));
+                                true
+                            })
+                    });
+                }))
             })
             .child(
                 div()
@@ -206,6 +263,10 @@ impl SidebarView {
     }
 
     fn service_row(&self, a: &BackendAuth, ui: &Ui) -> impl IntoElement {
+        let model = self.model.clone();
+        let backend = a.backend.clone();
+        let logged_in = a.logged_in;
+        let runnable = a.runnable;
         let dot = if a.logged_in {
             ui.success
         } else if a.runnable {
@@ -219,7 +280,7 @@ impl SidebarView {
                 .or_else(|| a.plan.clone())
                 .unwrap_or_else(|| "signed in".into())
         } else if a.runnable {
-            "not signed in".into()
+            "click to sign in".into()
         } else {
             "not installed".into()
         };
@@ -233,7 +294,17 @@ impl SidebarView {
             .px_2()
             .py_1()
             .rounded(px(6.))
+            .cursor_pointer()
             .hover(move |s| s.bg(hover))
+            .on_click(move |_, window, cx| {
+                if logged_in {
+                    model.update(cx, |m, cx| m.sign_out(&backend, cx));
+                } else if backend == "grok" {
+                    crate::views::login_dialog::open_login_dialog(model.clone(), window, cx);
+                } else if runnable {
+                    model.update(cx, |m, cx| m.sign_in(&backend, cx));
+                }
+            })
             .child(div().size(px(7.)).rounded_full().bg(dot))
             .child(
                 div()
@@ -322,4 +393,35 @@ pub fn time_ago(iso: &str) -> String {
         s if s < 30 * 86_400 => format!("{}w", s / (7 * 86_400)),
         s => format!("{}mo", s / (30 * 86_400)),
     }
+}
+
+/// Rename a thread through a small dialog (inline editing needs focus
+/// plumbing the sidebar rows do not have).
+pub fn open_rename_dialog(model: Entity<AppModel>, id: Uuid, current: String, window: &mut Window, cx: &mut App) {
+    let input = cx.new(|cx| {
+        let mut s = InputState::new(window, cx).placeholder("Thread name");
+        s.set_value(current.clone(), window, cx);
+        s
+    });
+    let focus_input = input.clone();
+    window.open_dialog(cx, move |dialog, window, cx| {
+        let model = model.clone();
+        let input = input.clone();
+        let input_for_content = input.clone();
+        focus_input.update(cx, |s, cx| s.focus(window, cx));
+        dialog
+            .title("Rename thread")
+            .w(px(420.))
+            .content(move |content, _, _| {
+                content.child(Input::new(&input_for_content))
+            })
+            .on_ok(move |_, window, cx| {
+                let label = input.read(cx).value().to_string();
+                if !label.trim().is_empty() {
+                    model.update(cx, |m, cx| m.rename_thread(id, label, cx));
+                }
+                window.close_dialog(cx);
+                true
+            })
+    });
 }

@@ -278,7 +278,7 @@ impl SessionRegistry {
                 // Offline / mock threads from memory
                 if model.eq_ignore_ascii_case("mock") {
                     let client =
-                        AcpClient::mock_for_tests(&format!("mock-{id}"), Some(self.event_bus.clone()));
+                        AcpClient::mock_for_session(&format!("mock-{id}"), Some(self.event_bus.clone()), id);
                     metadata.acp_session_id = Some(format!("mock-{id}"));
                     metadata.status = SessionStatus::Idle;
                     metadata.label = Some("mock".into());

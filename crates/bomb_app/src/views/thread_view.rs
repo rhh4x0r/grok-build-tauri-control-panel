@@ -1,5 +1,5 @@
-//! Center column: header · transcript · status line + meter · composer.
-//! The composer is a styled placeholder until Phase 3 wires the input.
+//! Center column: header · transcript (or welcome) · status line + meter ·
+//! composer.
 
 use std::time::Instant;
 
@@ -7,10 +7,12 @@ use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::Icon;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use uuid::Uuid;
 
 use crate::models::app::AppModel;
 use crate::models::thread::ThreadModel;
 use crate::theme::{Layout, Ui};
+use crate::views::composer::ComposerView;
 use crate::views::meter::meter_bar;
 use crate::views::motion::fade_in;
 use crate::views::status_line::{status_line, StatusLineProps};
@@ -24,25 +26,30 @@ const BANNER: &str = r#"┌─────────────────�
 pub struct ThreadView {
     model: Entity<AppModel>,
     transcript: Option<(String, Entity<TranscriptView>)>,
+    composer: Entity<ComposerView>,
 }
 
 impl ThreadView {
-    pub fn new(model: Entity<AppModel>, cx: &mut Context<Self>) -> Self {
+    pub fn new(model: Entity<AppModel>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe(&model, |this, _, cx| {
             this.sync_transcript(cx);
             cx.notify()
         })
         .detach();
+        let composer = cx.new(|cx| ComposerView::new(model.clone(), window, cx));
         let mut this = Self {
             model,
             transcript: None,
+            composer,
         };
         this.sync_transcript(cx);
         this
     }
 
-    /// One TranscriptView per selected thread; recreated on switch so the
-    /// entrance animation and scroll state start fresh.
+    pub fn focus_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer.update(cx, |c, cx| c.focus(window, cx));
+    }
+
     fn sync_transcript(&mut self, cx: &mut Context<Self>) {
         let selected = self.model.read(cx).selected_thread();
         match selected {
@@ -63,7 +70,13 @@ impl ThreadView {
         }
     }
 
-    fn welcome(&self, ui: &Ui) -> impl IntoElement {
+    fn welcome(&self, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
+        let project = self
+            .model
+            .read(cx)
+            .active_project
+            .as_deref()
+            .map(crate::models::app::project_name);
         div()
             .size_full()
             .flex()
@@ -79,138 +92,127 @@ impl ThreadView {
                     .whitespace_nowrap()
                     .children(BANNER.lines().map(|l| div().child(l.to_string()))),
             )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(ui.text_muted)
-                    .child("Pick a project and press + to start a thread."),
-            )
+            .child(div().text_sm().text_color(ui.text_muted).child(match project {
+                Some(p) => format!("New thread in {p}. Type below to start."),
+                None => "Open a project (⌘O) to start a thread.".to_string(),
+            }))
     }
 
-    fn footer(&self, thread: &Entity<ThreadModel>, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
+    fn header(&self, thread: &Entity<ThreadModel>, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
         let t = thread.read(cx);
+        let id = Uuid::parse_str(&t.meta.id).ok();
+        let backend = t.meta.backend.clone();
+        let model = t.meta.model.clone();
+        let has_worktree = t.meta.worktree.is_some();
         let branch = t
             .meta
             .worktree
             .as_deref()
             .and_then(|w| std::path::Path::new(w).file_name())
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "main".into());
-        let ctx = t
-            .thread
-            .context_tokens
-            .map(|n| format!("ctx {}", bomb_core::presence::format_count(n as usize)));
-        let backend = t.meta.backend.clone();
-        let model = t.meta.model.clone();
-        let mode = t.meta.approval_mode.clone().unwrap_or_else(|| "plan".into());
-        let (surface_raised, border, input_bg, solid, on_solid) =
-            (ui.surface_raised, ui.border, ui.input_bg, ui.solid, ui.on_solid);
-        let _ = surface_raised;
+            .map(|s| s.to_string_lossy().to_string());
+        let live = t.meta.live;
+        let brain = t.meta.brain_mode.clone();
+        let dev = self.model.read(cx).dev_server.clone();
+        let dev_running = dev.as_ref().map(|d| d.running).unwrap_or(false);
+        let dev_url = dev.as_ref().and_then(|d| d.url.clone());
+        let app = self.model.clone();
+        let hover = ui.hover;
+
+        let chip = |id: &'static str, label: String, ui: &Ui| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .gap_1()
+                .h(px(24.))
+                .px_2()
+                .rounded(px(6.))
+                .text_xs()
+                .text_color(ui.text_muted)
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .child(label)
+        };
 
         div()
-            .w_full()
             .flex()
-            .flex_col()
             .items_center()
-            .px_6()
-            .pb_4()
+            .gap_2()
+            .h(px(Layout::HEADER))
+            .px_4()
             .child(
                 div()
-                    .w_full()
-                    .max_w(px(Layout::COMPOSER_MAX))
                     .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        // Composer frame (input arrives in Phase 3).
-                        div()
-                            .w_full()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .h(px(52.))
-                            .pl_5()
-                            .pr_3()
-                            .rounded(px(Layout::COMPOSER_RADIUS))
-                            .border_1()
-                            .border_color(border)
-                            .bg(input_bg)
-                            .when(!ui.dark, |el| el.shadow_sm())
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_sm()
-                                    .text_color(ui.text_faint)
-                                    .child("Do anything…"),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1p5()
-                                    .text_xs()
-                                    .text_color(ui.text_muted)
-                                    .child(div().size(px(7.)).rounded_full().bg(ui.backend(&backend)))
-                                    .child(div().font_weight(FontWeight::MEDIUM).child(if model.is_empty() { backend } else { model }))
-                                    .child(div().text_color(ui.text_faint).child(mode)),
-                            )
-                            .child(
-                                div()
-                                    .size(px(24.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(ui.text_muted)
-                                    .child(div().size(px(15.)).child(Icon::from(Lucide::Paperclip))),
-                            )
-                            .child(
-                                div()
-                                    .size(px(28.))
-                                    .rounded_full()
-                                    .bg(solid)
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .opacity(0.35)
-                                    .child(div().size(px(14.)).text_color(on_solid).child(Icon::from(Lucide::ArrowUp))),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .px_2()
-                            .text_xs()
-                            .text_color(ui.text_faint)
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(div().size(px(11.)).child(Icon::from(Lucide::Folder)))
-                                    .child("Local checkout"),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(div().size(px(11.)).child(Icon::from(Lucide::GitBranch)))
-                                    .child(branch),
-                            )
-                            .child(div().flex_1())
-                            .when_some(ctx, |el, c| el.child(c)),
-                    ),
+                    .items_center()
+                    .gap_1()
+                    .text_xs()
+                    .text_color(ui.text_faint)
+                    .child(div().size(px(7.)).rounded_full().bg(ui.backend(&backend)))
+                    .child(if model.is_empty() { backend } else { model })
+                    .child("·")
+                    .child(if live { brain.unwrap_or_else(|| "live".into()) } else { "saved".into() }),
             )
+            .child(div().flex_1())
+            .when(has_worktree, |el| {
+                let app_land = app.clone();
+                let app_sync = app.clone();
+                el.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_xs()
+                        .text_color(ui.text_faint)
+                        .child(div().size(px(11.)).child(Icon::from(Lucide::GitBranch)))
+                        .child(branch.clone().unwrap_or_default()),
+                )
+                .child(chip("sync", "Sync".into(), ui).on_click(move |_, _, cx| {
+                    if let Some(id) = id {
+                        app_sync.update(cx, |m, cx| m.sync_thread(id, cx));
+                    }
+                }))
+                .child(chip("land", "Land".into(), ui).on_click(move |_, _, cx| {
+                    if let Some(id) = id {
+                        app_land.update(cx, |m, cx| m.land_thread(id, cx));
+                    }
+                }))
+            })
+            .child({
+                let app = app.clone();
+                chip(
+                    "dev-toggle",
+                    if dev_running { "Stop dev server".into() } else { "Dev server".into() },
+                    ui,
+                )
+                .child(div().size(px(12.)).child(Icon::from(if dev_running { Lucide::Square } else { Lucide::Play })))
+                .on_click(move |_, _, cx| app.update(cx, |m, cx| m.dev_server_toggle(cx)))
+            })
+            .when_some(dev_url.filter(|_| dev_running), |el, url| {
+                let app = app.clone();
+                el.child(
+                    chip("dev-open", url, ui)
+                        .text_color(ui.accent)
+                        .on_click(move |_, _, cx| app.update(cx, |m, cx| m.dev_server_open(cx))),
+                )
+            })
     }
 }
 
 impl Render for ThreadView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = Ui::of(cx);
-        let Some(thread) = self.model.read(cx).selected_thread() else {
-            return div().size_full().child(self.welcome(&ui)).into_any_element();
+        let thread = self.model.read(cx).selected_thread();
+        let composer = self.composer.clone();
+
+        let Some(thread) = thread else {
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .bg(ui.bg)
+                .child(div().flex_1().min_h_0().child(self.welcome(&ui, cx)))
+                .child(composer)
+                .into_any_element();
         };
         let Some((tid, transcript)) = self.transcript.clone() else {
             return div().size_full().into_any_element();
@@ -235,6 +237,7 @@ impl Render for ThreadView {
             .flex()
             .flex_col()
             .bg(ui.bg)
+            .child(self.header(&thread, &ui, cx))
             .child(fade_in(
                 SharedString::from(format!("transcript-{tid}")),
                 div().flex_1().min_h_0().child(transcript),
@@ -272,10 +275,10 @@ impl Render for ThreadView {
                                 ))
                                 .child(div().pb_2().child(meter_bar("meter", meter, &ui)))
                             })
-                            .when(!show_status, |el| el.child(div().h(px(28.)))),
+                            .when(!show_status, |el| el.child(div().h(px(20.)))),
                     ),
             )
-            .child(self.footer(&thread, &ui, cx))
+            .child(composer)
             .into_any_element()
     }
 }

@@ -1,11 +1,17 @@
-//! Top-level UI state: projects, threads, services, selection.
+//! Top-level UI state: projects, threads, services, selection, composer
+//! preferences, and every user action that talks to the backend.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
+use std::time::Duration;
 
-use bomb_core::services;
+use bomb_core::devserver::DevServerStatus;
+use bomb_core::services::{self, BackendInfo, ImageInput};
+use bomb_core::transcript::ImageAttachment;
 use bomb_core::ControlEvent;
 use gpui_kit::*;
-use grok_cli_wrapper::BackendAuth;
+use grok_cli_wrapper::{BackendAuth, LoginPhase, LoginSessionState};
+use grok_control_core::{ApprovalMode, SpawnOptions};
 use grok_persistence::ThreadDto;
 use tracing::debug;
 use uuid::Uuid;
@@ -22,8 +28,40 @@ pub struct ProjectGroup {
     pub root: String,
     pub name: String,
     pub threads: Vec<Uuid>,
-    pub collapsed: bool,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastKind {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+/// What the composer sends with each prompt.
+#[derive(Debug, Clone)]
+pub struct ComposerPrefs {
+    pub backend: String,
+    pub model: Option<String>,
+    /// plan | ask | auto | yolo
+    pub mode: String,
+    pub worktree: bool,
+    pub mcp_servers: Vec<String>,
+}
+
+impl Default for ComposerPrefs {
+    fn default() -> Self {
+        Self {
+            backend: "grok".into(),
+            model: None,
+            mode: "plan".into(),
+            worktree: true,
+            mcp_servers: Vec::new(),
+        }
+    }
+}
+
+pub const APPROVAL_CYCLE: [&str; 4] = ["plan", "ask", "auto", "yolo"];
 
 pub struct AppModel {
     pub projects: Vec<String>,
@@ -32,8 +70,19 @@ pub struct AppModel {
     pub threads: HashMap<Uuid, Entity<ThreadModel>>,
     pub selected: Option<Uuid>,
     pub auth: Vec<BackendAuth>,
+    pub backends: Vec<BackendInfo>,
+    pub prefs: ComposerPrefs,
+    pub dev_server: Option<DevServerStatus>,
+    pub login: Option<LoginSessionState>,
+    /// A device-code login was requested and the first status is pending.
+    pub login_starting: bool,
     pub last_error: Option<String>,
-    collapsed: HashMap<String, bool>,
+    /// Pending toasts; the root view drains them into the notification layer.
+    pub toasts: VecDeque<(ToastKind, String)>,
+    /// A prompt is in flight for a not-yet-created thread.
+    pub starting: bool,
+    login_poll: Option<Task<()>>,
+    dev_poll: Option<Task<()>>,
 }
 
 impl AppModel {
@@ -45,17 +94,30 @@ impl AppModel {
             threads: HashMap::new(),
             selected: None,
             auth: Vec::new(),
+            backends: Vec::new(),
+            prefs: ComposerPrefs::default(),
+            dev_server: None,
+            login: None,
+            login_starting: false,
             last_error: None,
-            collapsed: HashMap::new(),
+            toasts: VecDeque::new(),
+            starting: false,
+            login_poll: None,
+            dev_poll: None,
         };
         this.refresh_all(cx);
+        this.start_service_poll(cx);
         this
     }
+
+    // ── refresh ─────────────────────────────────────────────────────────
 
     pub fn refresh_all(&mut self, cx: &mut Context<Self>) {
         self.refresh_threads(cx);
         self.refresh_projects(cx);
         self.refresh_services(cx);
+        self.refresh_backends(cx);
+        self.refresh_dev_server(cx);
     }
 
     pub fn refresh_threads(&mut self, cx: &mut Context<Self>) {
@@ -110,6 +172,101 @@ impl AppModel {
         );
     }
 
+    pub fn refresh_backends(&mut self, cx: &mut Context<Self>) {
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(
+            cx,
+            async move { services::list_backends(&state).await },
+            move |res, cx| {
+                let _ = this.update(cx, |m, cx| {
+                    if let Ok(list) = res {
+                        // Keep the preferred backend runnable.
+                        if !list.iter().any(|b| b.id == m.prefs.backend && b.available) {
+                            if let Some(b) = list.iter().find(|b| b.available) {
+                                m.prefs.backend = b.id.clone();
+                                m.prefs.model = None;
+                            }
+                        }
+                        m.backends = list;
+                        cx.notify();
+                    }
+                });
+            },
+        );
+    }
+
+    pub fn refresh_dev_server(&mut self, cx: &mut Context<Self>) {
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(
+            cx,
+            async move { services::dev_server_status(&state).await },
+            move |res, cx| {
+                let _ = this.update(cx, |m, cx| {
+                    if let Ok(s) = res {
+                        let running = s.running;
+                        m.dev_server = Some(s);
+                        if running {
+                            m.ensure_dev_poll(cx);
+                        }
+                        cx.notify();
+                    }
+                });
+            },
+        );
+    }
+
+    /// Services change rarely; a slow poll keeps the footer honest after a
+    /// sign-in that happened in a terminal.
+    fn start_service_poll(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |weak, cx| loop {
+            cx.background_executor().timer(Duration::from_secs(20)).await;
+            if weak.update(cx, |m, cx| m.refresh_services(cx)).is_err() {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    fn ensure_dev_poll(&mut self, cx: &mut Context<Self>) {
+        if self.dev_poll.is_some() {
+            return;
+        }
+        self.dev_poll = Some(cx.spawn(async move |weak, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(3)).await;
+                let state = cx.update(|cx| svc(cx));
+                let status = {
+                    let (tx, rx) = async_channel::bounded(1);
+                    let handle = cx.update(|cx| cx.global::<crate::runtime::Tokio>().0.clone());
+                    handle.spawn(async move {
+                        let _ = tx.send(services::dev_server_status(&state).await).await;
+                    });
+                    rx.recv().await
+                };
+                let keep = match status {
+                    Ok(Ok(s)) => {
+                        let running = s.running;
+                        weak.update(cx, |m, cx| {
+                            m.dev_server = Some(s);
+                            if !running {
+                                m.dev_poll = None;
+                            }
+                            cx.notify();
+                        })
+                        .map(|_| running)
+                        .unwrap_or(false)
+                    }
+                    _ => false,
+                };
+                if !keep {
+                    break;
+                }
+            }
+        }));
+    }
+
     fn set_threads(&mut self, list: Vec<ThreadDto>, cx: &mut Context<Self>) {
         let mut order = Vec::with_capacity(list.len());
         for dto in list {
@@ -140,9 +297,16 @@ impl AppModel {
 
     fn fail(&mut self, message: String, cx: &mut Context<Self>) {
         tracing::warn!(%message, "backend call failed");
-        self.last_error = Some(message);
+        self.last_error = Some(message.clone());
+        self.toast(ToastKind::Error, message);
         cx.notify();
     }
+
+    pub fn toast(&mut self, kind: ToastKind, message: impl Into<String>) {
+        self.toasts.push_back((kind, message.into()));
+    }
+
+    // ── queries ─────────────────────────────────────────────────────────
 
     /// Threads grouped by project root, in list order.
     pub fn groups(&self, cx: &App) -> Vec<ProjectGroup> {
@@ -158,18 +322,15 @@ impl AppModel {
                 Some(g) => g.threads.push(*id),
                 None => groups.push(ProjectGroup {
                     name: project_name(&root),
-                    collapsed: self.collapsed.get(&root).copied().unwrap_or(false),
                     root,
                     threads: vec![*id],
                 }),
             }
         }
-        // Known projects without threads still get a (empty) group.
         for p in &self.projects {
             if !groups.iter().any(|g| &g.root == p) {
                 groups.push(ProjectGroup {
                     name: project_name(p),
-                    collapsed: self.collapsed.get(p).copied().unwrap_or(false),
                     root: p.clone(),
                     threads: Vec::new(),
                 });
@@ -178,11 +339,24 @@ impl AppModel {
         groups
     }
 
-    pub fn toggle_group(&mut self, root: &str, cx: &mut Context<Self>) {
-        let v = self.collapsed.entry(root.to_string()).or_insert(false);
-        *v = !*v;
-        cx.notify();
+    pub fn selected_thread(&self) -> Option<Entity<ThreadModel>> {
+        self.selected.and_then(|id| self.threads.get(&id).cloned())
     }
+
+    pub fn backend_info(&self, id: &str) -> Option<&BackendInfo> {
+        self.backends.iter().find(|b| b.id == id)
+    }
+
+    /// Model shown in the composer: explicit choice, else the backend default.
+    pub fn effective_model(&self) -> String {
+        self.prefs
+            .model
+            .clone()
+            .or_else(|| self.backend_info(&self.prefs.backend).map(|b| b.default_model.clone()))
+            .unwrap_or_default()
+    }
+
+    // ── selection ───────────────────────────────────────────────────────
 
     pub fn select(&mut self, id: Option<Uuid>, cx: &mut Context<Self>) {
         if self.selected == id {
@@ -191,12 +365,14 @@ impl AppModel {
         self.selected = id;
         if let Some(id) = id {
             if let Some(t) = self.threads.get(&id) {
-                let meta = &t.read(cx).meta;
-                self.active_project = Some(
-                    meta.project_root
-                        .clone()
-                        .unwrap_or_else(|| meta.cwd.clone()),
-                );
+                let meta = t.read(cx).meta.clone();
+                self.active_project = Some(meta.project_root.clone().unwrap_or(meta.cwd.clone()));
+                // The composer follows the thread's own backend/model/mode.
+                self.prefs.backend = meta.backend.clone();
+                self.prefs.model = if meta.model.is_empty() { None } else { Some(meta.model.clone()) };
+                if let Some(mode) = meta.approval_mode.clone() {
+                    self.prefs.mode = mode;
+                }
             }
             self.hydrate(id, cx);
             let state = svc(cx);
@@ -209,7 +385,12 @@ impl AppModel {
         cx.notify();
     }
 
-    /// Load the persisted transcript for a thread once.
+    /// Deselect: the composer starts a fresh thread in the active project.
+    pub fn new_thread(&mut self, cx: &mut Context<Self>) {
+        self.selected = None;
+        cx.notify();
+    }
+
     fn hydrate(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let Some(entity) = self.threads.get(&id).cloned() else {
             return;
@@ -232,7 +413,6 @@ impl AppModel {
                     t.loading = false;
                     t.hydrated = true;
                     if let Ok(rows) = res {
-                        // A live stream may already have more than the DB.
                         if t.thread.entries.len() <= rows.len() {
                             t.thread.hydrate(&rows);
                             t.after_hydrate(cx);
@@ -244,11 +424,8 @@ impl AppModel {
         );
     }
 
-    pub fn selected_thread(&self) -> Option<Entity<ThreadModel>> {
-        self.selected.and_then(|id| self.threads.get(&id).cloned())
-    }
+    // ── events ──────────────────────────────────────────────────────────
 
-    /// Fold a batch of backend events into the thread models.
     pub fn apply_events(&mut self, batch: Vec<ControlEvent>, cx: &mut Context<Self>) {
         let mut need_refresh = false;
         for ev in batch {
@@ -267,7 +444,13 @@ impl AppModel {
                     ..
                 } => {
                     self.last_error = Some(message.clone());
+                    self.toast(ToastKind::Error, message.clone());
                     cx.notify();
+                }
+                ControlEvent::Raw { payload, session_id: Some(_) }
+                    if payload.get("channel").and_then(|c| c.as_str()) == Some("thread") =>
+                {
+                    need_refresh = true;
                 }
                 _ => {}
             }
@@ -285,6 +468,527 @@ impl AppModel {
         if need_refresh {
             self.refresh_threads(cx);
         }
+    }
+
+    // ── prompts / sessions ──────────────────────────────────────────────
+
+    /// Send to the selected thread, or start a new one in the active project.
+    pub fn send_prompt(&mut self, text: String, images: Vec<ImageInput>, cx: &mut Context<Self>) {
+        let prefs = self.prefs.clone();
+        let attachments: Vec<ImageAttachment> = images
+            .iter()
+            .map(|i| ImageAttachment {
+                mime_type: i.mime_type.clone(),
+                data: i.data.clone(),
+                name: i.name.clone(),
+            })
+            .collect();
+        match self.selected_thread() {
+            Some(t) => {
+                let id = t.read(cx).id();
+                t.update(cx, |t, cx| {
+                    let ch = t.thread.note_prompt(&text, attachments, std::time::Instant::now());
+                    t.absorb(&ch, cx);
+                });
+                let state = svc(cx);
+                let this = cx.entity().downgrade();
+                let weak = t.downgrade();
+                spawn_service(
+                    cx,
+                    async move {
+                        services::send_prompt(
+                            &state,
+                            id,
+                            text,
+                            Some(prefs.backend),
+                            prefs.model,
+                            Some(prefs.mode),
+                            None,
+                            None,
+                            Some(images),
+                        )
+                        .await
+                    },
+                    move |res, cx| {
+                        if let Err(e) = res {
+                            let _ = weak.update(cx, |t, cx| {
+                                let ch = t.thread.note_system(&format!("send failed: {e}"));
+                                t.absorb(&ch, cx);
+                            });
+                            let _ = this.update(cx, |m, cx| m.fail(e, cx));
+                        }
+                    },
+                );
+            }
+            None => {
+                let Some(cwd) = self.active_project.clone() else {
+                    self.toast(ToastKind::Warning, "Open a project first (⌘O).");
+                    cx.notify();
+                    return;
+                };
+                self.starting = true;
+                cx.notify();
+                let state = svc(cx);
+                let this = cx.entity().downgrade();
+                let backend = grok_config::Backend::from_key(&prefs.backend).unwrap_or_default();
+                let approval_mode = match prefs.mode.as_str() {
+                    "plan" => Some(ApprovalMode::Plan),
+                    "ask" => Some(ApprovalMode::Ask),
+                    "auto" => Some(ApprovalMode::Auto),
+                    "yolo" => Some(ApprovalMode::Yolo),
+                    _ => None,
+                };
+                let opts = SpawnOptions {
+                    backend,
+                    model: prefs.model.clone(),
+                    approval_mode,
+                    isolate_worktree: prefs.worktree,
+                    project_root: Some(cwd.clone()),
+                    mcp_server_names: prefs.mcp_servers.clone(),
+                    ..Default::default()
+                };
+                spawn_service(
+                    cx,
+                    async move {
+                        let started = services::start_session(&state, cwd, opts).await?;
+                        let id = started.id.clone();
+                        services::send_prompt(
+                            &state,
+                            id.clone(),
+                            text,
+                            Some(prefs.backend),
+                            prefs.model,
+                            Some(prefs.mode),
+                            None,
+                            None,
+                            Some(images),
+                        )
+                        .await?;
+                        Ok::<String, String>(id)
+                    },
+                    move |res, cx| {
+                        let _ = this.update(cx, |m, cx| {
+                            m.starting = false;
+                            match res {
+                                Ok(id) => {
+                                    if let Ok(id) = Uuid::parse_str(&id) {
+                                        m.selected = Some(id);
+                                    }
+                                    m.refresh_threads(cx);
+                                }
+                                Err(e) => m.fail(e, cx),
+                            }
+                        });
+                    },
+                );
+            }
+        }
+    }
+
+    pub fn cancel_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.selected else { return };
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(
+            cx,
+            async move { services::cancel_session(&state, id.to_string()).await },
+            move |res, cx| {
+                if let Err(e) = res {
+                    let _ = this.update(cx, |m, cx| m.fail(e, cx));
+                }
+            },
+        );
+    }
+
+    pub fn set_mode(&mut self, mode: &str, cx: &mut Context<Self>) {
+        self.prefs.mode = mode.to_string();
+        if let Some(id) = self.selected {
+            let state = svc(cx);
+            let mode = mode.to_string();
+            spawn_service(
+                cx,
+                async move { services::set_approval_mode(&state, id.to_string(), mode).await },
+                |_, _| {},
+            );
+        }
+        cx.notify();
+    }
+
+    pub fn cycle_mode(&mut self, cx: &mut Context<Self>) {
+        let i = APPROVAL_CYCLE
+            .iter()
+            .position(|m| *m == self.prefs.mode)
+            .unwrap_or(0);
+        let next = APPROVAL_CYCLE[(i + 1) % APPROVAL_CYCLE.len()];
+        self.set_mode(next, cx);
+    }
+
+    pub fn set_backend(&mut self, backend: &str, model: Option<String>, cx: &mut Context<Self>) {
+        self.prefs.backend = backend.to_string();
+        self.prefs.model = model;
+        cx.notify();
+    }
+
+    pub fn remove_thread(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(
+            cx,
+            async move { services::remove_session(&state, id.to_string(), Some(true)).await },
+            move |res, cx| {
+                let _ = this.update(cx, |m, cx| {
+                    match res {
+                        Ok(()) => {
+                            if m.selected == Some(id) {
+                                m.selected = None;
+                            }
+                            m.threads.remove(&id);
+                            m.thread_order.retain(|x| *x != id);
+                        }
+                        Err(e) => m.fail(e, cx),
+                    }
+                    m.refresh_threads(cx);
+                });
+            },
+        );
+    }
+
+    pub fn rename_thread(&mut self, id: Uuid, label: String, cx: &mut Context<Self>) {
+        if let Some(t) = self.threads.get(&id) {
+            t.update(cx, |t, cx| {
+                t.thread.label = Some(label.clone());
+                cx.notify();
+            });
+        }
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(
+            cx,
+            async move { services::rename_thread(&state, id.to_string(), label).await },
+            move |res, cx| {
+                let _ = this.update(cx, |m, cx| match res {
+                    Ok(()) => m.refresh_threads(cx),
+                    Err(e) => m.fail(e, cx),
+                });
+            },
+        );
+    }
+
+    pub fn land_thread(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(
+            cx,
+            async move { services::land_thread(&state, id.to_string()).await },
+            move |res, cx| {
+                let _ = this.update(cx, |m, cx| {
+                    match res {
+                        Ok(r) if r.status == "landed" => m.toast(
+                            ToastKind::Success,
+                            format!("Landed {} into {} ({} files)", r.branch, r.target_branch, r.files.len()),
+                        ),
+                        Ok(r) => m.toast(
+                            ToastKind::Warning,
+                            format!("Conflicts with {}: run Sync so the agent can resolve them", r.target_branch),
+                        ),
+                        Err(e) => m.fail(e, cx),
+                    }
+                    m.refresh_threads(cx);
+                });
+            },
+        );
+    }
+
+    pub fn sync_thread(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(
+            cx,
+            async move { services::sync_thread(&state, id.to_string()).await },
+            move |res, cx| {
+                let _ = this.update(cx, |m, cx| {
+                    match res {
+                        Ok(r) if r.status == "synced" || r.status == "landed" => {
+                            m.toast(ToastKind::Success, format!("Synced {} from {}", r.branch, r.target_branch))
+                        }
+                        Ok(r) => m.toast(
+                            ToastKind::Warning,
+                            format!("Sync hit conflicts in {} file(s); ask the agent to resolve them", r.files.len()),
+                        ),
+                        Err(e) => m.fail(e, cx),
+                    }
+                    m.refresh_threads(cx);
+                });
+            },
+        );
+    }
+
+    // ── projects ────────────────────────────────────────────────────────
+
+    pub fn open_project(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open".into()),
+        });
+        cx.spawn(async move |weak, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            let _ = weak.update(cx, |m, cx| m.add_project(path, cx));
+        })
+        .detach();
+    }
+
+    pub fn add_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let p = path.display().to_string();
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(
+            cx,
+            async move { services::add_project(&state, p.clone()).await.map(|list| (p, list)) },
+            move |res, cx| {
+                let _ = this.update(cx, |m, cx| match res {
+                    Ok((p, list)) => {
+                        m.projects = list;
+                        m.active_project = Some(p);
+                        m.selected = None;
+                        cx.notify();
+                    }
+                    Err(e) => m.fail(e, cx),
+                });
+            },
+        );
+    }
+
+    pub fn set_active_project(&mut self, root: String, cx: &mut Context<Self>) {
+        self.active_project = Some(root);
+        self.selected = None;
+        cx.notify();
+    }
+
+    pub fn reveal_project(&mut self, cx: &mut Context<Self>) {
+        let cwd = self.active_project.clone();
+        let sid = self.selected.map(|s| s.to_string());
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(
+            cx,
+            async move { services::reveal_project(&state, cwd, sid).await },
+            move |res, cx| {
+                if let Err(e) = res {
+                    let _ = this.update(cx, |m, cx| m.fail(e, cx));
+                }
+            },
+        );
+    }
+
+    // ── dev server ──────────────────────────────────────────────────────
+
+    pub fn dev_server_toggle(&mut self, cx: &mut Context<Self>) {
+        let running = self.dev_server.as_ref().map(|s| s.running).unwrap_or(false);
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        if running {
+            spawn_service(
+                cx,
+                async move { services::stop_dev_server(&state).await },
+                move |res, cx| {
+                    let _ = this.update(cx, |m, cx| match res {
+                        Ok(s) => {
+                            m.dev_server = Some(s);
+                            m.toast(ToastKind::Info, "Dev server stopped");
+                            cx.notify();
+                        }
+                        Err(e) => m.fail(e, cx),
+                    });
+                },
+            );
+        } else {
+            let cwd = self.active_project.clone();
+            let sid = self.selected.map(|s| s.to_string());
+            spawn_service(
+                cx,
+                async move { services::start_dev_server(&state, cwd, sid, Some(true)).await },
+                move |res, cx| {
+                    let _ = this.update(cx, |m, cx| match res {
+                        Ok(s) => {
+                            let msg = s.url.clone().map(|u| format!("Dev server at {u}")).unwrap_or(s.message.clone());
+                            m.dev_server = Some(s);
+                            m.ensure_dev_poll(cx);
+                            m.toast(ToastKind::Success, msg);
+                            cx.notify();
+                        }
+                        Err(e) => m.fail(e, cx),
+                    });
+                },
+            );
+        }
+    }
+
+    pub fn dev_server_open(&mut self, cx: &mut Context<Self>) {
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(
+            cx,
+            async move { services::open_dev_server(&state).await },
+            move |res, cx| {
+                if let Err(e) = res {
+                    let _ = this.update(cx, |m, cx| m.fail(e, cx));
+                }
+            },
+        );
+    }
+
+    // ── sign-in ─────────────────────────────────────────────────────────
+
+    /// Grok signs in inside the app (device code); other CLIs open a terminal.
+    pub fn sign_in(&mut self, backend: &str, cx: &mut Context<Self>) {
+        if backend == "grok" {
+            self.start_grok_login(cx);
+            return;
+        }
+        let b = backend.to_string();
+        let this = cx.entity().downgrade();
+        spawn_service(
+            cx,
+            async move { services::open_backend_login(b, false).await },
+            move |res, cx| {
+                let _ = this.update(cx, |m, cx| match res {
+                    Ok(()) => m.toast(ToastKind::Info, "Sign in from the terminal window that just opened."),
+                    Err(e) => m.fail(e, cx),
+                });
+            },
+        );
+    }
+
+    pub fn sign_out(&mut self, backend: &str, cx: &mut Context<Self>) {
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        let b = backend.to_string();
+        spawn_service(
+            cx,
+            async move {
+                if b == "grok" {
+                    services::logout_grok(&state).await.map(|_| ())
+                } else {
+                    services::open_backend_login(b, true).await
+                }
+            },
+            move |res, cx| {
+                let _ = this.update(cx, |m, cx| {
+                    if let Err(e) = res {
+                        m.fail(e, cx);
+                    }
+                    m.refresh_services(cx);
+                });
+            },
+        );
+    }
+
+    pub fn start_grok_login(&mut self, cx: &mut Context<Self>) {
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        self.login = None;
+        self.login_starting = true;
+        cx.notify();
+        spawn_service(
+            cx,
+            async move { services::start_grok_login(&state).await },
+            move |res, cx| {
+                let _ = this.update(cx, |m, cx| {
+                    m.login_starting = false;
+                    match res {
+                        Ok(s) => {
+                            m.login = Some(s);
+                            m.ensure_login_poll(cx);
+                            cx.notify();
+                        }
+                        Err(e) => {
+                            m.login = None;
+                            m.fail(e, cx);
+                        }
+                    }
+                });
+            },
+        );
+    }
+
+    fn ensure_login_poll(&mut self, cx: &mut Context<Self>) {
+        if self.login_poll.is_some() {
+            return;
+        }
+        self.login_poll = Some(cx.spawn(async move |weak, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let state = cx.update(|cx| svc(cx));
+                let handle = cx.update(|cx| cx.global::<crate::runtime::Tokio>().0.clone());
+                let (tx, rx) = async_channel::bounded(1);
+                handle.spawn(async move {
+                    let _ = tx.send(services::grok_login_status(&state).await).await;
+                });
+                let keep = match rx.recv().await {
+                    Ok(Ok(s)) => {
+                        let done = matches!(s.phase, LoginPhase::Completed | LoginPhase::Failed) || !s.active;
+                        weak.update(cx, |m, cx| {
+                            if m.login.is_some() || m.login_starting {
+                                m.login = Some(s);
+                            }
+                            if done {
+                                m.login_poll = None;
+                                m.refresh_services(cx);
+                            }
+                            cx.notify();
+                        })
+                        .map(|_| !done)
+                        .unwrap_or(false)
+                    }
+                    _ => false,
+                };
+                if !keep {
+                    break;
+                }
+            }
+        }));
+    }
+
+    pub fn submit_login_code(&mut self, code: String, cx: &mut Context<Self>) {
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(
+            cx,
+            async move { services::submit_grok_login_code(&state, code).await },
+            move |res, cx| {
+                let _ = this.update(cx, |m, cx| match res {
+                    Ok(s) => {
+                        m.login = Some(s);
+                        cx.notify();
+                    }
+                    Err(e) => m.fail(e, cx),
+                });
+            },
+        );
+    }
+
+    pub fn open_login_url(&mut self, cx: &mut Context<Self>) {
+        if let Some(url) = self.login.as_ref().and_then(|l| l.login_url.clone()) {
+            cx.open_url(&url);
+        }
+    }
+
+    pub fn cancel_login(&mut self, cx: &mut Context<Self>) {
+        self.login = None;
+        self.login_poll = None;
+        let state = svc(cx);
+        spawn_service(cx, async move { services::cancel_grok_login(&state).await }, |_, _| {});
+        cx.notify();
+    }
+
+    pub fn close_login(&mut self, cx: &mut Context<Self>) {
+        self.login = None;
+        self.login_poll = None;
+        self.refresh_services(cx);
+        cx.notify();
     }
 
     pub fn new_mock_session(&mut self, cx: &mut Context<Self>) {
@@ -324,9 +1028,7 @@ fn session_of(ev: &ControlEvent) -> Option<Uuid> {
         | ControlEvent::AgentMessage { session_id, .. }
         | ControlEvent::ApprovalRequired { session_id, .. }
         | ControlEvent::ApprovalResolved { session_id, .. } => Some(*session_id),
-        ControlEvent::Error { session_id, .. } | ControlEvent::Raw { session_id, .. } => {
-            *session_id
-        }
+        ControlEvent::Error { session_id, .. } | ControlEvent::Raw { session_id, .. } => *session_id,
         _ => None,
     }
 }

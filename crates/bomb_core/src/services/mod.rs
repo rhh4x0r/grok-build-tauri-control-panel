@@ -38,7 +38,7 @@ pub async fn get_config(state: &AppState) -> Result<GrokConfig, String> {
     Ok(state.config.read().await.clone())
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendInfo {
     pub id: String,
