@@ -301,3 +301,10 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 - Fixed invisible delete confirmations: the main application view now renders GPUI Root's dialog layer, plus its sheet and notification layers. Root stores their state but does not render them automatically.
 - Added Cancel buttons to the sidebar's two delete confirmations and the Delete Thread action confirmation.
 - Validation: workspace check, strict all-target Clippy, development build, and the existing workspace deletion/restart persistence test passed. Live click verification was unavailable because Computer Use denied access to Bomb Code Dev.
+
+## 2026-09-17 — In-window Settings and opaque dialogs
+- Replaced the separate Settings window with a lazily created screen inside the main window. It shares the app's title bar, artwork, tint, and Geist typography, uses a matching-width settings navigation sidebar, and includes a Back button that preserves the existing thread and panels.
+- New-thread actions return to the conversation screen. Delete Thread is disabled while Settings hides the conversation; the thread-sidebar toggle is hidden there.
+- Made the dark component background opaque so confirmation dialogs no longer show underlying content through their surface. The app's artwork and glass tint remain independently rendered.
+- Updated the smoke workflow to open Settings through its normal action instead of creating another window.
+- Validation: workspace check, strict all-target Clippy, development build, and diff whitespace checks passed. Live visual verification remains unavailable following the Computer Use access denial; the smoke workflow was updated but not executed.

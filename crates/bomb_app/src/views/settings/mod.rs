@@ -1,4 +1,4 @@
-//! Settings window (⌘,): General · MCP · Memory · Worktrees · Permissions ·
+//! In-window Settings screen (⌘,): General · MCP · Memory · Worktrees · Permissions ·
 //! Diagnostics. Built on gpui-kit's `Settings` pages; the data-heavy tabs are
 //! custom-rendered items reading [`SettingsModel`] through its global handle.
 
@@ -9,25 +9,22 @@ use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{Root, Sizable, WindowExt};
+use gpui_kit::component::{Sizable, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use grok_config::SandboxProfile;
 use grok_mcp::DoctorStatus;
 
 use crate::models::app::AppModelHandle;
-use crate::theme::Ui;
+use crate::theme::{Layout, Ui};
 pub use model::{SettingsHandle, SettingsModel};
 
-pub struct SettingsWindowHandle(pub Option<WindowHandle<Root>>);
-impl Global for SettingsWindowHandle {}
-
-pub struct SettingsWindow {
+pub struct SettingsView {
     model: Entity<SettingsModel>,
 }
 
-impl SettingsWindow {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+impl SettingsView {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let model = cx.new(|cx| SettingsModel::new(window, cx));
         cx.set_global(SettingsHandle(model.clone()));
         cx.observe(&model, |_, _, cx| cx.notify()).detach();
@@ -38,50 +35,23 @@ impl SettingsWindow {
     }
 }
 
-/// Open the settings window, or bring the existing one forward.
-pub fn open_settings_window(cx: &mut App) {
-    if let Some(existing) = cx.try_global::<SettingsWindowHandle>().and_then(|h| h.0) {
-        if existing.update(cx, |_, window, _| window.activate_window()).is_ok() {
-            return;
-        }
-    }
-    let bounds = Bounds::centered(None, size(px(960.), px(680.)), cx);
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_min_size: Some(size(px(760.), px(520.))),
-        titlebar: Some(TitlebarOptions {
-            title: Some("Settings".into()),
-            appears_transparent: false,
-            traffic_light_position: None,
-        }),
-        window_background: crate::theme::window_background(cx),
-        ..Default::default()
-    };
-    match cx.open_window(options, |window, cx| {
-        let view = cx.new(|cx| SettingsWindow::new(window, cx));
-        cx.new(|cx| Root::new(view, window, cx))
-    }) {
-        Ok(handle) => cx.set_global(SettingsWindowHandle(Some(handle))),
-        Err(e) => tracing::error!(error = %e, "failed to open settings window"),
-    }
-}
-
 fn settings(cx: &App) -> Entity<SettingsModel> {
     cx.global::<SettingsHandle>().0.clone()
 }
 
-impl Render for SettingsWindow {
+impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::theme::follow_system(window, cx);
         self.model.update(cx, |m, cx| m.sync_rule_inputs(window, cx));
         let ui = Ui::of(cx);
         div()
             .size_full()
-            .bg(ui.glass)
             .text_color(ui.text)
             .child(
                 Settings::new("bomb-settings")
-                    .sidebar_width(px(200.))
+                    .sidebar_width(px(Layout::SIDEBAR))
+                    .sidebar_size_range(px(224.)..px(400.))
+                    .sidebar_style(&StyleRefinement::default().bg(gpui_kit::transparent_black()))
                     .pages([
                         general_page(cx),
                         mcp_page(),

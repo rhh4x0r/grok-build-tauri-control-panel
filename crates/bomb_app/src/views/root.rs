@@ -27,6 +27,8 @@ pub struct RootView {
     focus: FocusHandle,
     sidebar_open: bool,
     preview_open: bool,
+    settings: Option<Entity<crate::views::settings::SettingsView>>,
+    settings_open: bool,
 }
 
 impl RootView {
@@ -45,6 +47,8 @@ impl RootView {
             focus: cx.focus_handle(),
             sidebar_open: true,
             preview_open: false,
+            settings: None,
+            settings_open: false,
         }
     }
 
@@ -68,6 +72,7 @@ impl RootView {
             .as_ref()
             .map(|t| t.read(cx).title())
             .unwrap_or_else(|| "New thread".to_string());
+        let title = if self.settings_open { "Settings".to_string() } else { title };
         let project = model
             .active_project
             .as_deref()
@@ -98,12 +103,12 @@ impl RootView {
                 .pl_1()
                 .pr_3()
                 .gap_1()
-                .child(icon_button("toggle-sidebar", Lucide::PanelLeft).on_click(cx.listener(
+                .when(!self.settings_open, |el| el.child(icon_button("toggle-sidebar", Lucide::PanelLeft).on_click(cx.listener(
                     |this, _, _, cx| {
                         this.sidebar_open = !this.sidebar_open;
                         cx.notify();
                     },
-                )))
+                ))))
                 .child(icon_button("new-thread-tb", Lucide::Plus).on_click(cx.listener(
                     |_, _, window, cx| {
                         window.dispatch_action(Box::new(NewThread), cx);
@@ -177,10 +182,12 @@ impl Render for RootView {
                 model.update(cx, |m, cx| m.new_mock_session(cx));
             }))
             .on_action(cx.listener(|this, _: &crate::actions::NewWorkspaceConversation, window, cx| {
+                this.settings_open = false;
                 this.model.update(cx, |m, cx| m.new_workspace_thread(cx));
                 this.thread.update(cx, |t, cx| t.focus_composer(window, cx));
             }))
             .on_action(cx.listener(move |this, _: &NewThread, window, cx| {
+                this.settings_open = false;
                 m2.update(cx, |m, cx| m.new_thread(cx));
                 this.thread.update(cx, |t, cx| t.focus_composer(window, cx));
             }))
@@ -196,8 +203,13 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &StopTurn, _, cx| {
                 this.model.update(cx, |m, cx| m.cancel_selected(cx));
             }))
-            .on_action(cx.listener(|_, _: &OpenSettings, _, cx| {
-                crate::views::settings::open_settings_window(cx);
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                if this.settings.is_none() {
+                    this.settings = Some(cx.new(|cx| crate::views::settings::SettingsView::new(window, cx)));
+                }
+                this.settings_open = true;
+                this.focus.focus(window, cx);
+                cx.notify();
             }))
             .on_action(cx.listener(|this, _: &OpenCommandPalette, window, cx| {
                 crate::views::palette::open_palette(this.model.clone(), window, cx);
@@ -241,6 +253,9 @@ impl Render for RootView {
                 }
             }))
             .on_action(cx.listener(|this, _: &DeleteThread, window, cx| {
+                if this.settings_open {
+                    return;
+                }
                 let sel = this.model.read(cx).selected;
                 if let Some(id) = sel {
                     let m = this.model.clone();
@@ -275,7 +290,30 @@ impl Render for RootView {
             .flex_col()
             .bg(ui.glass)
             .child(self.title_bar(&ui, cx))
-            .child(
+            .when(self.settings_open, |el| {
+                el.child(
+                    div().flex().flex_col().flex_1().min_h_0()
+                        .child(
+                            div().h(px(Layout::HEADER)).flex_shrink_0().flex().items_center()
+                                .px(px(Layout::SPACE_SM)).border_b_1().border_color(ui.border)
+                                .child(
+                                    div().id("settings-back").flex().items_center().gap_2()
+                                        .px_2().py_1().rounded(px(6.)).cursor_pointer()
+                                        .text_sm().text_color(ui.text_muted)
+                                        .hover(move |s| s.bg(ui.hover).text_color(ui.text))
+                                        .child(Icon::from(Lucide::ArrowLeft).size(px(14.)))
+                                        .child("Back")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.settings_open = false;
+                                            this.focus.focus(window, cx);
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .child(div().flex_1().min_h_0().children(self.settings.clone())),
+                )
+            })
+            .when(!self.settings_open, |el| el.child(
                 h_resizable("main-split")
                     .when(self.sidebar_open, |el| {
                         el.child(
@@ -297,7 +335,7 @@ impl Render for RootView {
                                 .child(self.preview.clone()),
                         )
                     }),
-            ),
+            )),
             )
             // Root owns overlay state, but the application view must render it.
             .children(Root::render_sheet_layer(window, cx))

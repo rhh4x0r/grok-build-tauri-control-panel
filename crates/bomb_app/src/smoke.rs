@@ -43,8 +43,8 @@ pub fn maybe_run(model: Entity<AppModel>, cx: &mut App) {
                 None => tracing::error!("smoke: no selected thread"),
             }
         });
-        // Settings window: open it and report what loaded.
-        cx.update(crate::views::settings::open_settings_window);
+        // Settings screen: open it in the main window and report what loaded.
+        cx.update(|cx| cx.dispatch_action(&crate::actions::OpenSettings));
         cx.background_executor().timer(Duration::from_millis(2500)).await;
         cx.update(|cx| {
             match cx.try_global::<crate::views::settings::SettingsHandle>() {

@@ -72,7 +72,6 @@ fn main() {
         let model = cx.new(models::app::AppModel::new);
         runtime::start_bridge(cx, model.downgrade());
         cx.set_global(models::app::AppModelHandle(model.clone()));
-        cx.set_global(views::settings::SettingsWindowHandle(None));
         views::root::open_main_window(model.clone(), cx);
         smoke::maybe_run(model, cx);
         cx.activate(true);
