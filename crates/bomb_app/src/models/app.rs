@@ -113,6 +113,7 @@ pub struct AppModel {
     pub toasts: VecDeque<(ToastKind, String)>,
     /// A prompt is in flight for a not-yet-created thread.
     pub starting: bool,
+    pub start_failure_serial: u64,
     /// Threads hidden from the sidebar (kv "archived_threads"). Nothing is
     /// deleted; the group's Archived shelf lists them.
     pub archived: HashSet<Uuid>,
@@ -156,6 +157,7 @@ impl AppModel {
             last_error: None,
             toasts: VecDeque::new(),
             starting: false,
+            start_failure_serial: 0,
             archived: HashSet::new(),
             login_poll: None,
             dev_poll: None,
@@ -1033,6 +1035,7 @@ impl AppModel {
                             }
                             Err(e) => {
                                 m.starting = false;
+                                m.start_failure_serial += 1;
                                 m.fail(e, cx);
                             }
                         });
@@ -1288,6 +1291,21 @@ impl AppModel {
     }
 
     // ── projects ────────────────────────────────────────────────────────
+
+    pub fn create_project(&mut self, cx: &mut Context<Self>) {
+        let directory=std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(||PathBuf::from("/tmp"));
+        let rx=cx.prompt_for_new_path(&directory,Some("New project"));
+        cx.spawn(async move |weak,cx| {
+            let Ok(Ok(Some(path)))=rx.await else {return;};
+            let _=weak.update(cx,|_,cx| {
+                let target=path.clone();let app=weak.clone();
+                spawn_service(cx,async move {
+                    services::thread_setup::create(&target).await?;
+                    Ok::<_,String>(target)
+                },move |result,cx| {let _=app.update(cx,|m,cx|match result {Ok(path)=>m.add_project(path,cx),Err(e)=>m.fail(e,cx)});});
+            });
+        }).detach();
+    }
 
     pub fn open_project(&mut self, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions {

@@ -35,3 +35,7 @@ Human gates pause for explicit approval of the displayed criteria. Pause lets an
 Import ProjectContract 1.0.0, SkillGraph 0.1.0, or Bomb Code's versioned Foundry envelope. Export creates a new package directory containing the canonical JSON, compiled Markdown, instructions, stage references, limitations and provenance. Existing files are never overwritten. Local library/revisions and run state live in `foundry.db` under the app sessions directory.
 
 This release runs stages sequentially. Provider-folder installation, scheduled/parallel loops, and Word/PDF exports are not included. Templates are generic adaptations of [Prompt Foundry](https://github.com/jedisherpa/prompt-foundry); original provider metadata is preserved separately from Bomb Code refinement attribution.
+
+## Choosing where to send the generated prompt
+
+Submitting a new thread checks the destination before clearing the composer. If setup is missing, choose an existing folder, create a new project with the name/location picker, or use a temporary chat. Initialize Git is available for an existing folder; it creates an empty first commit without committing existing files. Existing uncommitted files must be committed separately before they appear in an isolated branch. After setup, press Send again. A thread-start failure restores the unsent prompt and attachments.

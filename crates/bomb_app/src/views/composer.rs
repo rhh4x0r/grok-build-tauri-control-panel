@@ -44,6 +44,12 @@ pub struct ComposerView {
     model_search: Entity<InputState>,
     provider_filter: Option<String>,
     speed: Entity<super::speed::SpeedSelector>,
+    sent_draft: Option<(String, Vec<Attachment>, u64)>,
+    failed_draft: Option<(String, Vec<Attachment>)>,
+    destination_busy: bool,
+    destination_message: Option<String>,
+    destination_init: Option<String>,
+    destination_ready: Option<(String,String)>,
     foundry_busy: bool,
     foundry_setup: bool,
     foundry_depth: String,
@@ -91,6 +97,12 @@ impl ComposerView {
             slash_dismissed: false,
             model_search: cx.new(|cx| InputState::new(window, cx).placeholder("Search models…")),
             provider_filter: None,
+            sent_draft: None,
+            failed_draft: None,
+            destination_busy: false,
+            destination_message: None,
+            destination_init: None,
+            destination_ready: None,
             foundry_busy: false,
             foundry_setup: false,
             foundry_depth: "fast-draft".into(),
@@ -136,6 +148,32 @@ impl ComposerView {
             });
         });
         cx.notify();
+    }
+
+    fn destination_panel(&self, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
+        let mut panel=div().w_full().mb_2().p_3().rounded_lg().bg(ui.bg).border_1().border_color(ui.border).flex().flex_col().gap_2()
+            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Set up this chat"))
+            .child(div().text_sm().child(self.destination_message.clone().unwrap_or_default()));
+        if let Some(root)=self.destination_init.clone() {
+            panel=panel.child(div().text_xs().text_color(ui.text_muted).child(root.clone()))
+                .child(div().text_xs().text_color(ui.text_muted).child("Initialize Git creates an empty initial commit. Existing files stay uncommitted and won’t appear in the isolated branch until you commit them."))
+                .child(Button::new("destination-init").small().label("Initialize Git").disabled(self.destination_busy).on_click(cx.listener(move |v,_,_,cx| {
+                    v.destination_busy=true;let root=root.clone();let weak=cx.entity().downgrade();
+                    crate::runtime::spawn_service(cx,async move {bomb_core::services::thread_setup::initialize(&root).await},move |result,cx|{let _=weak.update(cx,|v,cx|{
+                        v.destination_busy=false;v.destination_init=None;
+                        v.destination_message=Some(match result {Ok(())=>"Git is ready. Press Send to start your thread.".into(),Err(e)=>e});cx.notify();
+                    });});cx.notify();
+                })));
+        }
+        panel=panel.when(self.failed_draft.is_some(),|el|el.child(Button::new("restore-unsent").ghost().small().label("Restore previous unsent prompt").on_click(cx.listener(|v,_,window,cx| {
+            if let Some((text,images))=v.failed_draft.take() {let current=v.input.read(cx).value().to_string();let current_images=std::mem::replace(&mut v.attachments,images);v.input.update(cx,|s,cx|s.set_value(text,window,cx));if !current.is_empty() || !current_images.is_empty() {v.failed_draft=Some((current,current_images));}}cx.notify();
+        }))));
+        panel.child(div().flex().flex_wrap().gap_2()
+            .child(Button::new("destination-folder").ghost().small().label("Choose existing folder…").disabled(self.destination_busy).on_click(cx.listener(|v,_,_,cx|{v.model.update(cx,|m,cx|m.open_project(cx));v.destination_init=None;v.destination_message=Some("Select your project folder, then press Send.".into());cx.notify();})))
+            .child(Button::new("destination-create").ghost().small().label("Create new project…").disabled(self.destination_busy).on_click(cx.listener(|v,_,_,cx|{v.model.update(cx,|m,cx|m.create_project(cx));v.destination_init=None;v.destination_message=Some("Choose a name and location. A new folder and Git repository will be created, then press Send.".into());cx.notify();})))
+            .child(Button::new("destination-temporary").ghost().small().label("Use temporary chat").disabled(self.destination_busy).on_click(cx.listener(|v,_,_,cx|{v.model.update(cx,|m,cx|m.temporary_chat(cx));v.destination_init=None;v.destination_message=Some("Preparing a private temporary folder. Press Send when it appears below.".into());cx.notify();})))
+            .child(Button::new("destination-dismiss").ghost().small().label("Dismiss").on_click(cx.listener(|v,_,_,cx|{v.destination_message=None;cx.notify();}))))
+            .into_any_element()
     }
 
     fn foundry_choice(&self, field: &'static str, selected: &str, options: &'static [(&'static str, &'static str)], cx: &Context<Self>) -> AnyElement {
@@ -400,6 +438,33 @@ impl ComposerView {
             });
             return;
         }
+        if self.destination_busy || self.model.read(cx).starting { return; }
+        let m=self.model.read(cx);
+        if m.selected_thread().is_none() {
+            let Some(root)=m.active_project.clone() else {
+                self.destination_message=Some("Choose where this chat should work. Your prompt is kept below.".into());
+                self.destination_init=None;cx.notify();return;
+            };
+            if m.prefs.worktree && !m.prefs.temporary && self.destination_ready.as_ref() != Some(&(root.clone(),text.clone())) {
+                self.destination_busy=true;
+                self.destination_message=Some("Checking project folder…".into());
+                let weak=cx.entity().downgrade();
+                crate::runtime::spawn_service(cx,async move {(root.clone(),text, bomb_core::services::thread_setup::check(&root).await)},move |(root,text,result),cx| {
+                    let _=weak.update(cx,|v,cx| {
+                        v.destination_busy=false;
+                        if v.model.read(cx).active_project.as_deref()!=Some(&root) || v.model.read(cx).selected.is_some() {v.destination_message=None;cx.notify();return;}
+                        match result {
+                            Ok(bomb_core::services::thread_setup::Readiness::Ready)=>{v.destination_ready=Some((root,text));v.destination_message=None;v.destination_init=None;}
+                            Ok(bomb_core::services::thread_setup::Readiness::NeedsGit)=>{v.destination_message=Some("This folder needs Git before you can make changes in an isolated thread. Choose a destination below; your prompt is safe.".into());v.destination_init=Some(root);}
+                            Ok(bomb_core::services::thread_setup::Readiness::NeedsCommit)=>{v.destination_message=Some("This repository has no commits yet. Create an empty initial commit to enable isolated threads.".into());v.destination_init=Some(root);}
+                            Err(e)=>{v.destination_message=Some(e);v.destination_init=None;}
+                        }cx.notify();
+                    });
+                });cx.notify();return;
+            }
+        }
+        self.destination_ready=None;self.destination_message=None;self.destination_init=None;
+        if self.model.read(cx).selected.is_none() { self.sent_draft=Some((text.clone(),self.attachments.clone(),self.model.read(cx).start_failure_serial)); }
         let images: Vec<ImageInput> = self
             .attachments
             .drain(..)
@@ -1344,6 +1409,20 @@ impl Render for ComposerView {
             self.foundry_undo = None;
             self.foundry_message = None;
         }
+        if self.sent_draft.as_ref().is_some_and(|(_,_,serial)|*serial!=self.model.read(cx).start_failure_serial) {
+            if let Some((text,images,_))=self.sent_draft.take() { self.failed_draft=Some((text,images)); }
+            self.destination_message=Some("The thread could not start. Your unsent prompt was kept; choose a destination or retry Send.".into());
+        }
+        if self.failed_draft.is_some() && self.input.read(cx).value().is_empty() && self.attachments.is_empty() {
+            if let Some((text,images))=self.failed_draft.take() {self.input.update(cx,|s,cx|s.set_value(text,window,cx));self.attachments=images;}
+        }
+        if self.model.read(cx).selected.is_some() {self.sent_draft=None;}
+        if let Some((root,text))=self.destination_ready.clone() {
+            let current=self.input.read(cx).value().trim().to_string();
+            if self.model.read(cx).selected.is_none() && self.model.read(cx).active_project.as_deref()==Some(&root) && current==text {
+                self.send(window,cx);
+            } else {self.destination_ready=None;}
+        }
         let ui = Ui::of(cx);
         let (busy, starting, branch, worktree_on, has_thread) = {
             let m = self.model.read(cx);
@@ -1435,6 +1514,7 @@ impl Render for ComposerView {
             ui.pill_border()
         };
         let slash_menu = self.slash_menu(&ui, cx);
+        let destination=self.destination_message.as_ref().map(|_|self.destination_panel(&ui,cx));
         let setup = self.foundry_setup.then(||self.foundry_panel(&ui,cx));
         let tray = self.tray(&ui, cx);
         let model_picker = self.model_selector(&ui, cx);
@@ -1454,6 +1534,7 @@ impl Render for ComposerView {
             .items_center()
             .px_6()
             .pb_4()
+            .when_some(destination, |el,panel|el.child(panel))
             .when_some(setup, |el,panel|el.child(panel))
             .child(div().w_full().flex().items_center().flex_wrap().gap_2().pb_1()
                 .child(Button::new("run-foundry").ghost().small()

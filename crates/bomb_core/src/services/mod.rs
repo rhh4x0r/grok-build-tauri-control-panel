@@ -1,6 +1,7 @@
 //! Service layer: every former Tauri command as a plain async fn over `&AppState`.
 
 pub mod project_overview;
+pub mod thread_setup;
 pub mod workspaces;
 
 use std::path::PathBuf;

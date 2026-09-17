@@ -165,7 +165,7 @@ pub async fn load(root: &str) -> Result<ProjectOverview, String> {
 }
 
 /// Distinguish an ordinary folder from Git execution/access failures.
-async fn repository_detected(path: &Path) -> Result<bool, String> {
+pub(super) async fn repository_detected(path: &Path) -> Result<bool, String> {
     if !path.is_absolute() || !path.is_dir() {
         return Err("Choose an existing project folder with an absolute path.".into());
     }

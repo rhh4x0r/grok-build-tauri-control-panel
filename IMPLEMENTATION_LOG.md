@@ -450,3 +450,10 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 - Rendered contracts with readable website-style headings, phases, responsibilities, bullet lists and original request instead of raw JSON section bodies. Source references are included without being fetched. This aligns intake/format, not byte-for-byte output from the website’s deterministic compiler.
 - Validation: 179 workspace tests passed (two existing opt-in tests ignored), workspace check and strict all-target Clippy passed. Added Tetris intake, missing work-type, pinned choice/approval and malformed response coverage. Native visual interaction remains unverified after the earlier Computer Use denial.
 - Development build passed; updated and reopened the dev app with the new intake flow.
+
+## 2026-09-17 — Actionable destination setup before submit
+- Added a read-only project/Git/initial-commit check before clearing or submitting a new-thread draft. Missing setup now presents an inline card with Choose existing folder, Create new project, Use temporary chat, and Initialize Git when appropriate; the generated prompt stays in the composer.
+- New-project creation uses a native name/location picker, creates a new directory without overwriting existing folders, initializes its own Git repository and creates an empty first commit. Initializing an existing folder explicitly leaves staged/untracked files out of the commit; the card explains that existing uncommitted files do not appear in an isolated branch.
+- Setup actions do not send the prompt. The user presses Send again after selecting the destination. If subsequent thread creation fails, the composer restores the unsent draft and attachments; newer edits are preserved with an explicit restore action.
+- Validation: both setup tests passed (staged/untracked preservation and nested new-project isolation/no overwrite), workspace check and strict all-target Clippy passed. Native visual/file-picker interaction remains unverified after the prior Computer Use denial.
+- Development build passed; updated the dev bundle and reopened it for the new setup flow.
