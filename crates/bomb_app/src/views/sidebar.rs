@@ -826,7 +826,6 @@ impl Render for SidebarView {
                             }),
                     ),
             )
-            .child(Button::new("sidebar-foundry").ghost().small().label("Foundry").on_click(|_,window,cx|window.dispatch_action(Box::new(crate::actions::OpenFoundry),cx)))
             .child(self.header(&ui, cx))
             .child(div().flex().gap_1().px(px(Layout::SPACE_SM)).pb(px(Layout::SPACE_SM))
                 .child(Button::new("sidebar-add-project").ghost().small().icon(Lucide::FolderPlus).label("Add project")

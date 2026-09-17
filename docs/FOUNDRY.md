@@ -6,7 +6,7 @@ Click **Enhance Prompt** to create a structured contract with the selected provi
 
 The choices and contract headings follow the website's [intake schema](https://github.com/jedisherpa/prompt-foundry/blob/main/src/lib/schema/project-contract.ts). Bomb Code generates through the selected ACP model; it does not call the website or promise identical wording to its deterministic local compiler. Confirmed target, depth, work type, original request, source roles and approval notes are retained in the generated output.
 
-The sidebar **Foundry** screen remains available for advanced contract, graph and saved-skill editing. You do not need to open it to improve a prompt.
+The review-loop panel’s **Advanced details** action opens Foundry for advanced contract, graph and saved-skill editing. Everyday actions live in the composer; there is no standalone Foundry sidebar button.
 
 ## Run directly from the composer
 

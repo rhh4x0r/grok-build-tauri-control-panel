@@ -498,3 +498,7 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 - Adapted assistant-ui Task card, Tool timeline and Approval card patterns to native GPUI: https://www.assistant-ui.com/elements/task-card, https://www.assistant-ui.com/elements/tool-timeline, https://www.assistant-ui.com/elements/approval-card.
 - All 18 Foundry tests pass. Core suite: 57 passed, two ignored, one usage-cache assertion failed under the full suite and passed in isolation; no usage-cache changes made. Native visual/interaction verification remains unverified after the prior Computer Use denial.
 - Final workspace check, strict all-target Clippy and development build passed; updated and reopened the dev bundle.
+
+## 2026-09-17 — Remove standalone Foundry sidebar entry
+- Removed the out-of-place Foundry sidebar button. Enhance Prompt, Run with review loop, and the loop panel’s Advanced details action remain the entry points.
+- Workspace check, strict all-target Clippy and development build passed; updated and reopened the dev bundle.
