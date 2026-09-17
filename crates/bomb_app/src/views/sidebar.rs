@@ -76,6 +76,7 @@ impl SidebarView {
         let mut v: Vec<(Uuid, Entity<ThreadModel>, String)> = m
             .thread_order
             .iter()
+            .filter(|id| !m.archived.contains(id))
             .filter_map(|id| m.threads.get(id).cloned().map(|t| (*id, t)))
             .filter(|(_, t)| {
                 let t = t.read(cx);
@@ -410,6 +411,7 @@ impl SidebarView {
                     if expanded {
                         for id in &w.threads {
                             if let Ok(id) = Uuid::parse_str(id) {
+                                if self.model.read(cx).archived.contains(&id) { continue; }
                                 if let Some(t) = self.model.read(cx).threads.get(&id).cloned() {
                                     group = group.child(self.thread_row(id, &t, "", self.model.read(cx).selected == Some(id), ui, cx));
                                 }
@@ -422,6 +424,42 @@ impl SidebarView {
         for w in rows.iter().filter(|w| w.inline) {
             for id in &w.threads {
                 if let Ok(id) = Uuid::parse_str(id) {
+                    if self.model.read(cx).archived.contains(&id) { continue; }
+                    if let Some(t) = self.model.read(cx).threads.get(&id).cloned() {
+                        group = group.child(self.thread_row(id, &t, "", self.model.read(cx).selected == Some(id), ui, cx));
+                    }
+                }
+            }
+        }
+        // Archived conversations of this project: a collapsed shelf.
+        let archived_threads: Vec<Uuid> = {
+            let m = self.model.read(cx);
+            g.threads.iter().copied().filter(|id| m.archived.contains(id)).collect()
+        };
+        if !archived_threads.is_empty() {
+            let key = format!("archived-threads:{}", g.root);
+            let open = self.expanded.contains(&key);
+            group = group.child(
+                div()
+                    .id(SharedString::from(key.clone()))
+                    .flex()
+                    .items_center()
+                    .gap(px(Layout::SPACE_XS))
+                    .h(px(24.))
+                    .pl(px(GROUP_INDENT))
+                    .pr(px(Layout::SPACE_SM))
+                    .text_size(px(11.))
+                    .text_color(ui.subline())
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.expanded.remove(&key) { this.expanded.insert(key.clone()); }
+                        cx.notify();
+                    }))
+                    .child(div().size(px(11.)).child(Icon::from(if open { Lucide::ChevronDown } else { Lucide::ChevronRight })))
+                    .child(format!("{} archived", archived_threads.len())),
+            );
+            if open {
+                for id in archived_threads {
                     if let Some(t) = self.model.read(cx).threads.get(&id).cloned() {
                         group = group.child(self.thread_row(id, &t, "", self.model.read(cx).selected == Some(id), ui, cx));
                     }
@@ -470,10 +508,12 @@ impl SidebarView {
         let corner = status_corner(state, &updated, ui);
 
         let has_worktree = tm.meta.worktree.is_some();
+        let is_archived = self.model.read(cx).archived.contains(&id);
         let menu_model = self.model.clone();
         let current_title = title.clone();
         div()
             .id(SharedString::from(format!("thread-{id}")))
+            .when(is_archived, |el| el.opacity(0.6))
             .flex()
             .flex_col()
             .gap(px(2.))
@@ -513,17 +553,17 @@ impl SidebarView {
                 }));
                 menu = menu.separator();
                 let m = menu_model.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(if is_archived { "Unarchive thread" } else { "Archive thread" }).on_click(move |_, _, cx| {
+                        m.update(cx, |a, cx| if is_archived { a.unarchive_thread(id, cx) } else { a.archive_thread(id, cx) });
+                    }),
+                );
+                let m = menu_model.clone();
                 menu.item(PopupMenuItem::new("Delete thread…").on_click(move |_, window, cx| {
                     let m = m.clone();
-                    window.open_alert_dialog(cx, move |dlg, _, _| {
-                        let m = m.clone();
-                        dlg.title("Delete this thread?")
-                            .description("Its transcript is removed. The workspace and files are kept. This cannot be undone.")
-                            .on_ok(move |_, _, cx| {
-                                m.update(cx, |a, cx| a.remove_thread(id, cx));
-                                true
-                            })
-                    });
+                    // The popup menu is still tearing down on this click; a
+                    // dialog opened in the same frame gets dismissed with it.
+                    window.defer(cx, move |window, cx| confirm_delete(m, id, window, cx));
                 }))
             })
             .when(!project.is_empty(), |el| {
@@ -864,6 +904,31 @@ fn usage_bar(backend: &str, ix: usize, w: &bomb_core::usage::UsageWindow, ui: &U
                 .text_color(ui.text_faint)
                 .child(format!("{}%", pct.round() as i64)),
         )
+}
+
+/// Two confirmations before a thread is gone for good: the second one
+/// spells out that it is permanent.
+fn confirm_delete(model: Entity<AppModel>, id: Uuid, window: &mut Window, cx: &mut App) {
+    window.open_alert_dialog(cx, move |dlg, _, _| {
+        let model = model.clone();
+        dlg.title("Delete this thread?")
+            .description("Archiving hides it instead and keeps everything. Deleting removes its transcript; the workspace and files are kept.")
+            .on_ok(move |_, window, cx| {
+                let model = model.clone();
+                window.defer(cx, move |window, cx| {
+                    window.open_alert_dialog(cx, move |dlg, _, _| {
+                        let model = model.clone();
+                        dlg.title("Permanently delete?")
+                            .description("This cannot be undone.")
+                            .on_ok(move |_, _, cx| {
+                                model.update(cx, |a, cx| a.remove_thread(id, cx));
+                                true
+                            })
+                    });
+                });
+                true
+            })
+    });
 }
 
 /// Row corner: time-ago for idle rows (10px medium, subline), otherwise a

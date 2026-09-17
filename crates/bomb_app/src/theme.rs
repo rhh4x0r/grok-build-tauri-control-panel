@@ -111,8 +111,9 @@ pub struct Ui {
     pub dark: bool,
     /// Main content panel (opaque fallback).
     pub bg: Hsla,
-    /// The one tint the whole window paints over the blurred desktop. Dark:
-    /// `surface` at 80% (Zeron's GLASS_ALPHA); light: opaque white.
+    /// The one tint the whole window paints over the background artwork
+    /// (dark) — low enough that the bomb and embers read through; light:
+    /// opaque white.
     pub glass: Hsla,
     pub hover: Hsla,
     pub border: Hsla,
@@ -139,7 +140,7 @@ impl Ui {
             Self {
                 dark,
                 bg: grey(0x06),
-                glass: hsla(0.0, 0.0, 13.0 / 255.0, 0.80),
+                glass: hsla(0.0, 0.0, 13.0 / 255.0, 0.42),
                 hover: hsla(0.0, 0.0, 0.92, 0.11),
                 border: hsla(0.0, 0.0, 1.0, 0.08),
                 text: neutral(0.922),
@@ -249,14 +250,10 @@ impl Ui {
     }
 }
 
-/// How the platform composites behind our paint: blurred desktop in dark
-/// (frosted glass), opaque in light.
-pub fn window_background(cx: &App) -> WindowBackgroundAppearance {
-    if cx.window_appearance().is_dark() {
-        WindowBackgroundAppearance::Blurred
-    } else {
-        WindowBackgroundAppearance::Opaque
-    }
+/// The window paints its own artwork in dark mode and flat white in light,
+/// so the platform never needs to composite anything behind us.
+pub fn window_background(_cx: &App) -> WindowBackgroundAppearance {
+    WindowBackgroundAppearance::Opaque
 }
 
 /// Fuse colors are the one thing that stays the same in both appearances.

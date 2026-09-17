@@ -625,6 +625,15 @@ pub async fn wait_until_idle(state: &AppState, id: &str, timeout: std::time::Dur
     }
 }
 
+/// Small UI preferences persisted in the kv table (e.g. archived threads).
+pub async fn kv_get(state: &AppState, key: &str) -> Result<Option<String>, String> {
+    state.persistence.get_kv(key).map_err(err)
+}
+
+pub async fn kv_set(state: &AppState, key: &str, value: &str) -> Result<(), String> {
+    state.persistence.set_kv(key, value).map_err(err)
+}
+
 /// Account usage limits for every backend that exposes them.
 pub async fn account_usage() -> Vec<crate::usage::AccountUsage> {
     crate::usage::all().await

@@ -1,7 +1,7 @@
 //! Top-level UI state: projects, threads, services, selection, composer
 //! preferences, and every user action that talks to the backend.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -22,6 +22,8 @@ use crate::runtime::{services as svc, spawn_service};
 /// The one `AppModel` entity, reachable from any view.
 pub struct AppModelHandle(pub Entity<AppModel>);
 impl Global for AppModelHandle {}
+
+const ARCHIVED_KEY: &str = "archived_threads";
 
 #[derive(Debug, Clone)]
 pub struct ProjectGroup {
@@ -99,6 +101,9 @@ pub struct AppModel {
     pub toasts: VecDeque<(ToastKind, String)>,
     /// A prompt is in flight for a not-yet-created thread.
     pub starting: bool,
+    /// Threads hidden from the sidebar (kv "archived_threads"). Nothing is
+    /// deleted; the group's Archived shelf lists them.
+    pub archived: HashSet<Uuid>,
     login_poll: Option<Task<()>>,
     dev_poll: Option<Task<()>>,
 }
@@ -129,6 +134,7 @@ impl AppModel {
             last_error: None,
             toasts: VecDeque::new(),
             starting: false,
+            archived: HashSet::new(),
             login_poll: None,
             dev_poll: None,
         };
@@ -269,6 +275,7 @@ impl AppModel {
         self.refresh_projects(cx);
         self.refresh_services(cx);
         self.refresh_usage(cx);
+        self.load_archived(cx);
         self.refresh_backends(cx);
         self.refresh_dev_server(cx);
         self.refresh_mcp_names(cx);
@@ -1018,7 +1025,50 @@ impl AppModel {
         cx.notify();
     }
 
+    pub fn load_archived(&mut self, cx: &mut Context<Self>) {
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(
+            cx,
+            async move { services::kv_get(&state, ARCHIVED_KEY).await },
+            move |res, cx| {
+                let _ = this.update(cx, |m, cx| {
+                    if let Ok(Some(raw)) = res {
+                        m.archived = raw
+                            .split(',')
+                            .filter_map(|s| Uuid::parse_str(s.trim()).ok())
+                            .collect();
+                        cx.notify();
+                    }
+                });
+            },
+        );
+    }
+
+    fn save_archived(&self, cx: &mut Context<Self>) {
+        let state = svc(cx);
+        let raw = self.archived.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(",");
+        spawn_service(cx, async move { services::kv_set(&state, ARCHIVED_KEY, &raw).await }, |_, _| {});
+    }
+
+    /// Hide a thread without deleting anything.
+    pub fn archive_thread(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.archived.insert(id);
+        if self.selected == Some(id) {
+            self.selected = None;
+        }
+        self.save_archived(cx);
+        cx.notify();
+    }
+
+    pub fn unarchive_thread(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.archived.remove(&id);
+        self.save_archived(cx);
+        cx.notify();
+    }
+
     pub fn remove_thread(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.archived.remove(&id);
         let state = svc(cx);
         let this = cx.entity().downgrade();
         spawn_service(

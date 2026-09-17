@@ -22,6 +22,7 @@ impl AssetSource for Assets {
                 "logo.png" => Some(include_bytes!("../assets/logo.png")),
                 "logo-status.png" => Some(include_bytes!("../assets/logo-status.png")),
                 "icon.png" => Some(include_bytes!("../assets/icon.png")),
+                "bg.png" => Some(include_bytes!("../assets/bg.png")),
                 "icons/grok-mark.svg" => Some(include_bytes!("../assets/icons/grok-mark.svg")),
                 "icons/claude-mark.svg" => Some(include_bytes!("../assets/icons/claude-mark.svg")),
                 "icons/openai-mark.svg" => Some(include_bytes!("../assets/icons/openai-mark.svg")),
