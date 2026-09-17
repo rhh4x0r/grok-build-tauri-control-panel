@@ -471,6 +471,12 @@ impl AppModel {
         if !needs {
             return;
         }
+        // A thread that already streamed in this session is the truth; the
+        // saved copy can only be older. Never replace live entries with it.
+        if !entity.read(cx).thread.entries.is_empty() {
+            entity.update(cx, |t, _| t.hydrated = true);
+            return;
+        }
         entity.update(cx, |t, _| t.loading = true);
         let state = svc(cx);
         let weak = entity.downgrade();
@@ -482,7 +488,7 @@ impl AppModel {
                     t.loading = false;
                     t.hydrated = true;
                     if let Ok(rows) = res {
-                        if t.thread.entries.len() <= rows.len() {
+                        if t.thread.entries.is_empty() {
                             t.thread.hydrate(&rows);
                             t.after_hydrate(cx);
                         }

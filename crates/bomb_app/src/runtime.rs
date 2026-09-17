@@ -54,12 +54,16 @@ where
 /// long stream costs one re-render per frame instead of one per chunk.
 pub fn start_bridge(cx: &mut App, model: WeakEntity<AppModel>) {
     let bus = cx.global::<Services>().0.event_bus.clone();
+    let db = cx.global::<Services>().0.persistence.clone();
     let (tx, rx) = async_channel::unbounded::<ControlEvent>();
     cx.global::<Tokio>().0.spawn(async move {
         let mut sub = bus.subscribe();
         loop {
             match sub.recv().await {
                 Ok(ev) => {
+                    // Durable copy first (agent text, tools, plans, images,
+                    // status), so a restart restores the whole thread.
+                    bomb_core::services::persist_control_event(&db, &ev);
                     if tx.send(ev).await.is_err() {
                         break;
                     }
