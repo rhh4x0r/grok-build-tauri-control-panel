@@ -293,16 +293,34 @@ impl AcpClient {
             approval_mode: ApprovalMode::Plan,
             ..Default::default()
         };
+        let bus = Arc::new(EventBus::new());
+        let mut events = bus.subscribe();
         let client = Self::connect_internal(
             config,
             &opts,
-            None,
+            Some(bus),
             Uuid::new_v4(),
             ConnectOpts::default(),
             true,
         )
         .await?;
-        let catalog = client.model_catalog().await;
+        // ACP command notifications may arrive just after session/new. Drain them
+        // in this metadata session as well as in interactive sessions.
+        let event_client = client.clone();
+        let event_task = tokio::spawn(async move { event_client.run_event_loop().await });
+        let commands = tokio::time::timeout(Duration::from_secs(3), async {
+            while let Ok(event) = events.recv().await {
+                if let ControlEvent::Raw { payload, .. } = event {
+                    if payload.get("channel").and_then(Value::as_str) == Some("provider_commands") {
+                        return payload.get("commands").cloned();
+                    }
+                }
+            }
+            None
+        }).await.ok().flatten();
+        event_task.abort();
+        let mut catalog = client.model_catalog().await;
+        catalog.commands = commands.or(catalog.commands);
         client.shutdown().await?;
         Ok(catalog)
     }
@@ -995,7 +1013,10 @@ impl AcpClient {
     /// session/new//load/resume result.
     async fn capture_config_options(&self, result: &Value) {
         if let Some(catalog) = crate::ModelCatalog::from_response(result) {
-            *self.model_catalog.write().await = catalog;
+            let mut current = self.model_catalog.write().await;
+            let commands = current.commands.take();
+            *current = catalog;
+            current.commands = commands;
         }
         let Some(arr) = result.get("configOptions").and_then(|v| v.as_array()) else {
             return;
@@ -2814,6 +2835,7 @@ impl AcpClient {
                 );
             }
             "available_commands_update" | "availablecommandsupdate" => {
+                self.model_catalog.write().await.commands = Some(update.get("availableCommands").or_else(|| update.get("commands")).cloned().unwrap_or(json!([])));
                 bus.emit(ControlEvent::Raw { session_id: Some(sid), payload: json!({
                     "channel":"provider_commands", "backend":self.config.backend_label,
                     "commands":update.get("availableCommands").or_else(||update.get("commands")).cloned().unwrap_or(json!([]))
@@ -3809,6 +3831,26 @@ mod tests {
         assert!(c.respond_approval("7", Some("bogus")).await.is_err());
         // Still answerable with a valid option after the bad attempt.
         c.respond_approval("7", Some("allow")).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn advertised_commands_are_cached_and_survive_model_updates() {
+        let client = AcpClient::mock_for_tests("commands", None);
+        let bus = EventBus::new();
+        let mut events = bus.subscribe();
+        let commands = json!([{"name":"compact","description":"Compact context","input":{"hint":"Optional focus"}}]);
+        client.map_session_update(&bus, Uuid::new_v4(), &json!({"update":{"sessionUpdate":"available_commands_update","availableCommands":commands}})).await;
+        assert_eq!(client.model_catalog().await.commands, Some(commands.clone()));
+        let mut emitted = false;
+        while let Ok(ControlEvent::Raw { payload, .. }) = events.try_recv() {
+            if payload.get("channel").and_then(Value::as_str) == Some("provider_commands") {
+                assert_eq!(payload["commands"], commands);
+                emitted = true;
+            }
+        }
+        assert!(emitted);
+        client.capture_config_options(&json!({"configOptions":[{"id":"model","options":[{"value":"actual-model"}]}]})).await;
+        assert_eq!(client.model_catalog().await.commands, Some(commands));
     }
 
     #[tokio::test]

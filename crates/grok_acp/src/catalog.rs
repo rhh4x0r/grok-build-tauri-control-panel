@@ -5,6 +5,8 @@ use serde_json::Value;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ModelCatalog {
     pub models: Vec<AvailableModel>,
+    #[serde(default)]
+    pub commands: Option<Value>,
     pub current: Option<String>,
     pub config_id: Option<String>,
 }
@@ -31,7 +33,7 @@ impl ModelCatalog {
                     }
                 }
             }
-            return Some(Self { models, current: option.get("currentValue").and_then(Value::as_str).map(Into::into), config_id: option.get("id").and_then(Value::as_str).map(Into::into) });
+            return Some(Self { commands: None, models, current: option.get("currentValue").and_then(Value::as_str).map(Into::into), config_id: option.get("id").and_then(Value::as_str).map(Into::into) });
         }
         let state = value.get("models")?;
         let available = state.get("availableModels").and_then(Value::as_array)?;
@@ -39,7 +41,7 @@ impl ModelCatalog {
             let id = model.get("modelId").and_then(Value::as_str).filter(|s| !s.is_empty())?;
             Some(AvailableModel { id: id.into(), name: model.get("name").and_then(Value::as_str).unwrap_or(id).into(), description: model.get("description").and_then(Value::as_str).map(Into::into) })
         }).collect();
-        Some(Self { models, current: state.get("currentModelId").and_then(Value::as_str).map(Into::into), config_id: None })
+        Some(Self { commands: None, models, current: state.get("currentModelId").and_then(Value::as_str).map(Into::into), config_id: None })
     }
 }
 #[cfg(test)]

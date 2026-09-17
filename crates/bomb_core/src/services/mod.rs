@@ -58,6 +58,7 @@ pub struct BackendInfo {
     pub model_names: std::collections::HashMap<String, String>,
     pub model_descriptions: std::collections::HashMap<String, String>,
     pub model_error: Option<String>,
+    pub commands: Option<serde_json::Value>,
     pub supports_headless: bool,
 }
 

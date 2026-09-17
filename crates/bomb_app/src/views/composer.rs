@@ -90,11 +90,11 @@ impl ComposerView {
             .filter(|t| {
                 let t = t.read(cx);
                 t.meta.backend == m.prefs.backend
-                    && t.meta.model == m.effective_model()
                     && t.provider_commands.get("backend").and_then(|v| v.as_str())
                         == Some(m.prefs.backend.as_str())
             })
             .map(|t| t.read(cx).provider_commands.clone())
+            .or_else(|| m.backend_info(&m.prefs.backend).and_then(|b| b.commands.as_ref()).map(|commands| serde_json::json!({"backend":m.prefs.backend,"commands":commands})))
             .unwrap_or_default()
     }
 
