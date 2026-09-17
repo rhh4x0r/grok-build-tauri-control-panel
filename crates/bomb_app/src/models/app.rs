@@ -165,6 +165,30 @@ impl AppModel {
         cx.notify();
     }
 
+    pub fn initialize_project_git(&mut self, root: String, cx: &mut Context<Self>) {
+        if !self.overview_loading.insert(root.clone()) { return; }
+        let key = root.clone();
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move {
+            services::project_overview::initialize_repository(&root).await?;
+            services::project_overview::load(&root).await
+        }, move |result, cx| {
+            let _ = this.update(cx, |m, cx| {
+                m.overview_loading.remove(&key);
+                match result {
+                    Ok(overview) => {
+                        m.project_overviews.insert(key, Ok(overview));
+                        m.toast(ToastKind::Success, "Git repository ready");
+                        m.refresh_project_status(false, cx);
+                    }
+                    Err(error) => m.fail(error, cx),
+                }
+                cx.notify();
+            });
+        });
+        cx.notify();
+    }
+
     pub fn refresh_project_status(&mut self, fetch: bool, cx: &mut Context<Self>) {
         let state = svc(cx); let this = cx.entity().downgrade();
         spawn_service(cx, async move { services::workspaces::refresh_projects(&state, fetch).await }, move |res, cx| {

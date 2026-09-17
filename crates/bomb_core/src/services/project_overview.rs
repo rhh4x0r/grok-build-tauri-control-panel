@@ -57,6 +57,7 @@ impl PullRequest {
 
 #[derive(Debug, Clone)]
 pub struct ProjectOverview {
+    pub git_detected: bool,
     pub default_branch: String,
     pub branches: Vec<Branch>,
     pub prs: Vec<PullRequest>,
@@ -67,6 +68,15 @@ pub async fn load(root: &str) -> Result<ProjectOverview, String> {
     let path = Path::new(root);
     if !path.is_absolute() {
         return Err("Project path must be absolute".into());
+    }
+    if !repository_detected(path).await? {
+        return Ok(ProjectOverview {
+            git_detected: false,
+            default_branch: String::new(),
+            branches: vec![],
+            prs: vec![],
+            pr_error: None,
+        });
     }
     let base = default_branch(path).await?;
     let raw = run_git(
@@ -146,11 +156,48 @@ pub async fn load(root: &str) -> Result<ProjectOverview, String> {
         (vec![], Some("No origin remote configured".into()))
     };
     Ok(ProjectOverview {
+        git_detected: true,
         default_branch: base,
         branches,
         prs,
         pr_error,
     })
+}
+
+/// Distinguish an ordinary folder from Git execution/access failures.
+async fn repository_detected(path: &Path) -> Result<bool, String> {
+    if !path.is_absolute() || !path.is_dir() {
+        return Err("Choose an existing project folder with an absolute path.".into());
+    }
+    let output = tokio::process::Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .env("LC_ALL", "C")
+        .current_dir(path)
+        .output()
+        .await
+        .map_err(|e| format!("Could not run Git: {e}"))?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    let error = String::from_utf8_lossy(&output.stderr);
+    if error.contains("not a git repository") {
+        Ok(false)
+    } else {
+        Err(format!("Could not inspect repository: {}", error.trim()))
+    }
+}
+
+/// Initialize only on an explicit UI action; never stage files or create a commit.
+pub async fn initialize_repository(root: &str) -> Result<(), String> {
+    let path = Path::new(root);
+    // Also recognizes parent repositories and linked worktrees, avoiding nested repos.
+    if repository_detected(path).await? {
+        return Ok(());
+    }
+    run_git(path, &["init", "--initial-branch=main"])
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 async fn load_prs(path: &Path) -> Result<Vec<PullRequest>, String> {
@@ -199,6 +246,39 @@ mod tests {
         assert_eq!(feature.commits[0].1, "add hello");
         assert!(map.pr_error.is_some());
     }
+    #[tokio::test]
+    async fn initializes_plain_folder_without_staging_or_committing_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_str().unwrap();
+        std::fs::write(temp.path().join("notes.txt"), "keep me").unwrap();
+        assert!(!load(root).await.unwrap().git_detected);
+        initialize_repository(root).await.unwrap();
+        let map = load(root).await.unwrap();
+        assert!(map.git_detected);
+        assert_eq!(map.default_branch, "main");
+        assert!(map.branches.is_empty());
+        assert!(run_git(temp.path(), &["ls-files"])
+            .await
+            .unwrap()
+            .trim()
+            .is_empty());
+        assert!(run_git(temp.path(), &["rev-parse", "--verify", "HEAD"])
+            .await
+            .is_err());
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("notes.txt")).unwrap(),
+            "keep me"
+        );
+        initialize_repository(root).await.unwrap();
+        let nested = temp.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        initialize_repository(nested.to_str().unwrap())
+            .await
+            .unwrap();
+        assert!(!nested.join(".git").exists());
+        assert!(initialize_repository("relative/path").await.is_err());
+    }
+
     #[test]
     fn pr_checks_handle_both_github_check_formats() {
         let mut pr: PullRequest = serde_json::from_value(serde_json::json!({"number":1,"title":"Test","url":"https://github.com/a/b/pull/1","headRefName":"feature","baseRefName":"main","isDraft":false,"reviewDecision":"","mergeable":"UNKNOWN","statusCheckRollup":[{"state":"SUCCESS"},{"conclusion":"SUCCESS"}]})).unwrap();

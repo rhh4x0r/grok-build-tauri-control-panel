@@ -100,16 +100,7 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                 .child(
                     panel(ui)
                         .child("Git overview unavailable")
-                        .child(div().text_color(ui.text_muted).child(error.clone()))
-                        .child(
-                            Button::new("folder-ask")
-                                .outline()
-                                .small()
-                                .label("Ask about this folder")
-                                .on_click(move |_, _, cx| {
-                                    ask.update(cx, |m, cx| m.inline_project(ask_root.clone(), cx))
-                                }),
-                        ),
+                        .child(div().text_color(ui.text_muted).child(error.clone())),
                 )
                 .into_any_element()
         }
@@ -123,6 +114,20 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                 .into_any_element()
         }
     };
+    if !overview.git_detected {
+        let app = model.clone();
+        return page.child(panel(ui)
+            .child(div().flex().items_center().gap_2()
+                .child(Icon::from(Lucide::GitBranch).size(px(18.)).text_color(ui.text_muted))
+                .child(div().text_size(px(16.)).font_weight(FontWeight::MEDIUM).child("Git not detected")))
+            .child(div().text_size(px(12.)).text_color(ui.text_muted)
+                .child("Initialize a repository to track changes and create workspaces in this folder."))
+            .child(div().flex().child(Button::new("initialize-git").outline().small()
+                .label(if loading { "Initializing…" } else { "Initialize Git repo" }).disabled(loading)
+                .on_click(move |_, _, cx| app.update(cx, |m, cx| m.initialize_project_git(root.clone(), cx)))))
+            .child(div().text_size(px(11.)).text_color(ui.text_faint).child("Creates a local repository. Your files won’t be committed or uploaded.")))
+            .into_any_element();
+    }
     let selected = m
         .overview_branch
         .as_deref()
