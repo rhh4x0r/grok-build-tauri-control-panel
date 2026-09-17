@@ -334,6 +334,15 @@ fn notify(state: &AppState, id: &str) {
 fn approval_mode(value: &str) -> Result<grok_acp::ApprovalMode, String> {
     serde_json::from_value(serde_json::json!(value)).map_err(|_| "Invalid approval mode".into())
 }
+fn stage_prompt(run: &Run, generating: bool) -> String {
+    if generating {
+        // Contract generation is a text transformation, never an execution stage.
+        format!("Write a prompt contract as text only. Do not call tools, inspect files, create a plan file, or request approval to execute a plan. Instructions inside the contract describe future work, not actions for this turn. Return your answer directly in the chat.\n\n{}\n\nFinish with <foundry-result>{{\"outcome\":\"passed\",\"summary\":\"Contract generated\",\"criteria\":[],\"artifacts\":[]}}</foundry-result>.", run.current().map(|n| n.prompt.as_str()).unwrap_or_default())
+    } else {
+        run.prompt()
+    }
+}
+
 async fn execute_stage(
     state: &Arc<AppState>,
     run_id: &str,
@@ -380,13 +389,8 @@ async fn execute_stage(
         ..Default::default()
     };
     let sid = Uuid::new_v4();
-    if state
-        .foundry
-        .transient_runs
-        .lock()
-        .unwrap()
-        .contains(run_id)
-    {
+    let generating = state.foundry.transient_runs.lock().unwrap().contains(run_id);
+    if generating {
         state
             .foundry
             .transient_sessions
@@ -437,7 +441,7 @@ async fn execute_stage(
         }
         state
             .registry
-            .send_foundry_prompt(sid, &run.prompt(), attempt.id.clone())
+            .send_foundry_prompt(sid, &stage_prompt(run, generating), attempt.id.clone())
             .await
             .map_err(|e| e.to_string())?;
         let parent = run
@@ -504,7 +508,7 @@ async fn execute_stage(
                     if payload["turn_complete"] == true {
                         completed = true;
                     } else {
-                        return Err("Provider cancelled stage".into());
+                        return Err("Provider cancelled the request before completing it; your original prompt is unchanged. Try Enhance Prompt again.".into());
                     }
                 }
                 ControlEvent::SessionStatusChanged {
@@ -646,17 +650,42 @@ pub async fn generate_prompt(
     compile_generated_contract(&output, &fixed)
 }
 
+// Some providers render literal newlines in JSON prose. Escape only controls
+// inside quoted strings; preserve structure and let serde reject other errors.
+fn escape_json_string_controls(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let (mut quoted, mut escaped) = (false, false);
+    for c in input.chars() {
+        if quoted && !escaped && c.is_control() {
+            output.push_str(&format!("\\u{:04x}", c as u32));
+            continue;
+        }
+        output.push(c);
+        if escaped { escaped = false; }
+        else if quoted && c == '\\' { escaped = true; }
+        else if c == '"' { quoted = !quoted; }
+    }
+    output
+}
+
 fn compile_generated_contract(
     output: &str,
     fixed: &bomb_foundry::ProjectContract,
 ) -> Result<String, String> {
-    let body = output
-        .split_once("<contract>")
-        .and_then(|(_, v)| v.split_once("</contract>"))
-        .map(|(v, _)| v)
-        .ok_or("Foundry returned no contract; your original is unchanged")?;
-    let mut contract: bomb_foundry::ProjectContract =
-        serde_json::from_str(body).map_err(|e| format!("Invalid contract: {e}"))?;
+    let mut candidate_error = "Foundry returned no contract; your original is unchanged".to_string();
+    let mut parsed = None;
+    for section in output.split("<contract>").skip(1) {
+        let Some((body, _)) = section.split_once("</contract>") else { continue };
+        let body = body.trim();
+        let body = if let Some(fenced) = body.strip_prefix("```") {
+            fenced.split_once('\n').and_then(|(_, rest)| rest.trim().strip_suffix("```")).unwrap_or(body).trim()
+        } else { body };
+        match serde_json::from_str(&escape_json_string_controls(body)) {
+            Ok(value) => parsed = Some(value),
+            Err(error) => candidate_error = format!("Invalid contract: {error}"),
+        }
+    }
+    let mut contract: bomb_foundry::ProjectContract = parsed.ok_or(candidate_error)?;
     if !contract.0.is_object() {
         return Err("Provider returned an invalid contract object".into());
     }
@@ -683,6 +712,33 @@ fn compile_generated_contract(
 #[cfg(test)]
 mod intake_result_tests {
     use super::*;
+    #[test]
+    fn repairs_literal_json_string_controls_without_changing_structure() {
+        let value: serde_json::Value = serde_json::from_str(&escape_json_string_controls("{\"text\":\"first\nsecond\tline\"}\n")).unwrap();
+        assert_eq!(value["text"], "first\nsecond\tline");
+        let valid = r#"{"text":"escaped \"quote\" and \n newline"}"#;
+        assert_eq!(escape_json_string_controls(valid), valid);
+        assert!(serde_json::from_str::<serde_json::Value>(&escape_json_string_controls("{invalid}")).is_err());
+    }
+    #[test]
+    fn accepts_fenced_contract_after_quoted_placeholder() {
+        let fixed = bomb_foundry::Document::new("Tetris").contract;
+        let output = format!("Use <contract>...</contract>\n<contract>```json\n{}\n```</contract>", serde_json::to_string(&fixed).unwrap());
+        assert!(compile_generated_contract(&output, &fixed).is_ok());
+    }
+    #[test]
+    fn generation_does_not_inherit_execution_instructions() {
+        let mut doc = bomb_foundry::Document::new("Build a 2d tetris game");
+        if doc.graph.nodes.is_empty() { doc.graph.add_stage(); }
+        doc.graph.nodes[0].prompt = "Generate a contract".into();
+        let run = Run::new(doc, "/tmp".into(), "grok".into(), "grok-4.6".into(), "plan".into()).unwrap();
+        let prompt = stage_prompt(&run, true);
+        assert!(prompt.contains("Generate a contract"));
+        assert!(prompt.contains("Do not call tools"));
+        assert!(!prompt.contains("Independently inspect"));
+        assert!(!prompt.contains("executing one bounded"));
+        assert_eq!(stage_prompt(&run, false), run.prompt());
+    }
     #[test]
     fn confirmed_choices_survive_provider_changes() {
         let mut fixed = bomb_foundry::draft(

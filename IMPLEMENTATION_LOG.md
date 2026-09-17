@@ -477,3 +477,9 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 - Added native multi-file selection and a searchable saved-memory picker using Bomb Code's existing memory service. Only explicitly selected memory entries are included. UTF-8 text files up to 18 KB become bounded source snapshots; binary/larger files are explicitly marked as references for later inspection. Existing source roles/removal remain, duplicate snapshots are ignored, and generation waits for selected files to finish loading.
 - Added a regression test for actual text inclusion and explicit binary/large-file reference behavior. Native visual/picker verification remains pending after the prior Computer Use denial.
 - Validation: source-handling regression test, workspace check, strict all-target Clippy and development build passed. Updated and reopened the dev bundle.
+
+## 2026-09-17 — Grok Enhance Prompt cancellation and response parsing
+- Separated transient contract generation from execution-stage instructions. Enhancement no longer asks the provider to inspect artifacts or perform the requested project; read-only permissions remain enforced.
+- Accept literal JSON string control characters and fenced contract JSON, skipping quoted placeholder tags while retaining contract validation and user-confirmed fields. Cancellation keeps the original draft and now includes a retry explanation.
+- Five intake regression tests passed. Live Grok ACP test successfully enhanced “Build a 2d tetris game” into a validated contract. Added an opt-in full-path probe for future provider checks.
+- Workspace check, strict all-target Clippy and development build passed; updated and reopened the dev bundle.
