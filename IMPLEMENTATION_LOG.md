@@ -296,3 +296,8 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 ## 2026-09-16 — Remove sidebar Questions category
 - Removed the confusing repeated Questions label and the extra header row for conversations nested beneath projects. Provider logo, title, and time/status now share one row.
 - Workspace check, strict all-target Clippy, and development build passed. Relaunched Bomb Code Dev and visually verified the labels are absent.
+
+## 2026-09-17 — Restore thread deletion confirmation
+- Fixed invisible delete confirmations: the main application view now renders GPUI Root's dialog layer, plus its sheet and notification layers. Root stores their state but does not render them automatically.
+- Added Cancel buttons to the sidebar's two delete confirmations and the Delete Thread action confirmation.
+- Validation: workspace check, strict all-target Clippy, development build, and the existing workspace deletion/restart persistence test passed. Live click verification was unavailable because Computer Use denied access to Bomb Code Dev.

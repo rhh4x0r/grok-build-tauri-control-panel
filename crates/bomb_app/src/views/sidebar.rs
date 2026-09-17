@@ -913,7 +913,7 @@ fn confirm_delete(model: Entity<AppModel>, id: Uuid, window: &mut Window, cx: &m
     tracing::info!(%id, "delete: opening first confirmation");
     window.open_alert_dialog(cx, move |dlg, _, _| {
         let model = model.clone();
-        dlg.title("Delete this thread?")
+        dlg.confirm().title("Delete this thread?")
             .description("Archiving hides it instead and keeps everything. Deleting removes its transcript; the workspace and files are kept.")
             .on_ok(move |_, window, cx| {
                 tracing::info!(%id, "delete: first confirmation accepted");
@@ -922,7 +922,7 @@ fn confirm_delete(model: Entity<AppModel>, id: Uuid, window: &mut Window, cx: &m
                     tracing::info!(%id, "delete: opening second confirmation");
                     window.open_alert_dialog(cx, move |dlg, _, _| {
                         let model = model.clone();
-                        dlg.title("Permanently delete?")
+                        dlg.confirm().title("Permanently delete?")
                             .description("This cannot be undone.")
                             .on_ok(move |_, _, cx| {
                                 tracing::info!(%id, "delete: second confirmation accepted");

@@ -246,7 +246,7 @@ impl Render for RootView {
                     let m = this.model.clone();
                     window.open_alert_dialog(cx, move |dlg, _, _| {
                         let m = m.clone();
-                        dlg.title("Delete this thread?")
+                        dlg.confirm().title("Delete this thread?")
                             .description("Its transcript is removed. The workspace and files are kept. This cannot be undone.")
                             .on_ok(move |_, _, cx| {
                                 m.update(cx, |a, cx| a.remove_thread(id, cx));
@@ -299,6 +299,10 @@ impl Render for RootView {
                     }),
             ),
             )
+            // Root owns overlay state, but the application view must render it.
+            .children(Root::render_sheet_layer(window, cx))
+            .children(Root::render_dialog_layer(window, cx))
+            .children(Root::render_notification_layer(window, cx))
     }
 }
 
