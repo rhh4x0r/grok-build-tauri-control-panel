@@ -431,14 +431,22 @@ impl TranscriptView {
             .when(!collapsed, |el| {
                 el.child(
                     div()
+                        .relative()
                         .flex()
                         .flex_col()
-                        .gap_1()
-                        .pl_2()
+                        .pl(px(22.))
                         .pt_1()
-                        .border_l_1()
-                        .border_color(ui.border)
-                        .ml(px(3.))
+                        .ml(px(6.))
+                        .child(
+                            // the rail: one hairline the ticks branch off
+                            div()
+                                .absolute()
+                                .left_0()
+                                .top_0()
+                                .bottom(px(13.))
+                                .w(px(1.))
+                                .bg(ui.border),
+                        )
                         .children(chips),
                 )
             })
@@ -461,20 +469,22 @@ impl TranscriptView {
             .child(
                 div()
                     .id(("thought", id))
+                    .relative()
                     .flex()
                     .items_center()
                     .gap_2()
                     .h(px(26.))
-                    .px_2()
+                    .px_1()
                     .rounded(px(6.))
                     .cursor_pointer()
                     .hover(move |s| s.bg(hover))
                     .on_click(move |_, _, cx| thread.update(cx, |t, cx| t.toggle_expanded(id, cx)))
+                    .child(rail_tick(ui))
                     .child(
                         div()
                             .size(px(14.))
                             .text_color(ui.text_faint)
-                            .child(Icon::from(Lucide::Brain)),
+                            .child(Icon::from(Lucide::MessageSquare)),
                     )
                     .child(
                         div()
@@ -518,19 +528,21 @@ impl TranscriptView {
         let first_line = r.args.lines().next().unwrap_or("").trim().to_string();
         let head = div()
             .id(("chip", id))
+            .relative()
             .flex()
             .items_center()
             .gap_2()
             .h(px(26.))
-            .px_2()
+            .px_1()
             .rounded(px(6.))
             .cursor_pointer()
             .hover(move |s| s.bg(hover))
             .on_click(move |_, _, cx| thread.update(cx, |t, cx| t.toggle_expanded(id, cx)))
+            .child(rail_tick(ui))
             .child(glyph)
             .child(
                 div()
-                    .text_sm()
+                    .text_size(px(13.))
                     .text_color(if failed { ui.danger } else { ui.text_muted })
                     .child(tool_label(&r.name)),
             )
@@ -538,13 +550,12 @@ impl TranscriptView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_xs()
-                    .font_family(mono.clone())
+                    .text_size(px(13.))
                     .text_color(ui.text_faint)
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .child(first_line),
+                    .child(strip_arg_prefix(&first_line)),
             )
             .when(failed, |el| {
                 el.child(div().text_xs().text_color(ui.danger).child(r.status.clone()))
@@ -882,6 +893,29 @@ fn open_link(href: &str, cwd: &std::path::Path, cx: &mut App) {
     } else {
         cx.open_url(href);
     }
+}
+
+/// "cmd: cargo test" → "cargo test": the verb already says what it is.
+fn strip_arg_prefix(line: &str) -> String {
+    let l = line.trim();
+    for pre in ["cmd:", "command:", "path:", "file:", "pattern:", "query:", "url:"] {
+        if let Some(rest) = l.strip_prefix(pre) {
+            return rest.trim().to_string();
+        }
+    }
+    l.to_string()
+}
+
+/// Horizontal tick from the group rail into a row.
+fn rail_tick(ui: &Ui) -> AnyElement {
+    div()
+        .absolute()
+        .left(px(-22.))
+        .top(px(13.))
+        .w(px(16.))
+        .h(px(1.))
+        .bg(ui.border)
+        .into_any_element()
 }
 
 fn mono_block(text: &str, mono: &SharedString, color: Hsla, ui: &Ui) -> AnyElement {
