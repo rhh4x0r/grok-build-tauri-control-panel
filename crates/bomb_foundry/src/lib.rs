@@ -201,6 +201,29 @@ mod acceptance_tests {
         assert_eq!(r.status, RunStatus::Completed);
     }
     #[test]
+    fn composer_review_loop_revises_build_then_waits_for_approval() {
+        let mut r = new_run();
+        r.document.graph = template("plan-build-review");
+        let mut visited = Vec::new();
+        let mut revision = false;
+        while r.current().is_some_and(|n| n.kind != "gate") {
+            let a = r.prepare().unwrap().unwrap();
+            visited.push(a.node_id.clone());
+            let mut result = pass();
+            if a.node_id == "stage-2" && !revision {
+                assert_eq!(r.current().unwrap().role, "independent-review");
+                result.outcome = "needs_revision".into();
+                revision = true;
+            }
+            r.finish(&a.id, Ok(result)).unwrap();
+        }
+        assert_eq!(visited, ["stage-0", "stage-1", "stage-2", "stage-1", "stage-2"]);
+        r.prepare().unwrap();
+        assert_eq!(r.status, RunStatus::WaitingGate);
+        r.approve_gate(&r.gate_token()).unwrap();
+        assert_eq!(r.status, RunStatus::Completed);
+    }
+    #[test]
     fn pause_does_not_dispatch_and_stop_discards_completion() {
         let mut r = new_run();
         let a = r.prepare().unwrap().unwrap();

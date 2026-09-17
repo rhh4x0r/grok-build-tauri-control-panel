@@ -244,6 +244,7 @@ impl SkillGraph {
     }
 }
 pub const TEMPLATES: &[&str] = &[
+    "plan-build-review",
     "research-review-revise",
     "inspect-lock-slice",
     "source-truth-classify",
@@ -252,6 +253,11 @@ pub const TEMPLATES: &[&str] = &[
 ];
 pub fn template(name: &str) -> SkillGraph {
     let (titles, roles, loops): (&[&str], &[&str], &[(usize, usize)]) = match name {
+        "plan-build-review" => (
+            &["Plan", "Build and verify", "Independent review", "Approve result"],
+            &["research", "draft", "independent-review", "other"],
+            &[(2, 1)],
+        ),
         "inspect-lock-slice" => (
             &[
                 "Recapture baseline",

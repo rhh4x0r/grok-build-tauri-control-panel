@@ -554,7 +554,7 @@ impl AppModel {
         }));
     }
 
-    fn set_threads(&mut self, list: Vec<ThreadDto>, cx: &mut Context<Self>) {
+    pub(crate) fn set_threads(&mut self, list: Vec<ThreadDto>, cx: &mut Context<Self>) {
         let mut order = Vec::with_capacity(list.len());
         for dto in list {
             let Ok(id) = Uuid::parse_str(&dto.id) else {

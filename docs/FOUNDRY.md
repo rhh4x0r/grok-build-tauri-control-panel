@@ -8,6 +8,12 @@ The choices and contract headings follow the website's [intake schema](https://g
 
 The sidebar **Foundry** screen remains available for advanced contract, graph and saved-skill editing. You do not need to open it to improve a prompt.
 
+## Run directly from the composer
+
+**Run with review loop**, beside Enhance Prompt, uses the current draft as the request and starts Plan → Build and verify → Independent review → Approve result. Review findings return to Build and verify within the existing retry limits. The selected provider/model and approval mode are preserved; Plan mode remains read-only. Planning and independent review sessions are read-only regardless of the selected mode.
+
+The action uses the current thread, creates an isolated thread for a selected project, or creates a temporary chat when no project is selected. Open **Stages & controls** in the thread to inspect, pause, stop, or approve the run. Startup errors preserve the draft. Image attachments are not passed to loop stages; the UI asks you to send them in a normal chat or include file paths instead. Explicit Foundry sources and approval notes are included.
+
 ## Author a contract
 
 Enter a request and choose Fast Draft or Full Project. The local compiler works without a provider call. Choose the operating mode, edit individual sections, and Apply changes. Structured sections (sources, assumptions, roles and phases) use JSON; ordinary lists use one item per line. Source entries preserve their upstream roles and metadata; adding a source does not fetch or verify it.
@@ -18,7 +24,7 @@ Optional provider refinement uses the selected provider/model in a fresh, read-o
 
 ## Build a skill loop
 
-Use the five adapted templates or seed stages from contract phases. The canvas supports dragging, panning and zooming; the ordered view provides a keyboard-accessible alternative. Moving a card changes only its position. Reorder controls change execution order.
+Use the built-in templates or seed stages from contract phases. The canvas supports dragging, panning and zooming; the ordered view provides a keyboard-accessible alternative. Moving a card changes only its position. Reorder controls change execution order.
 
 Select a stage to edit its instructions and exit criteria, change its kind/role, choose a provider/model override, and add dependencies or explicit return edges. Models come from the app's discovered provider catalog. If a stage has several return edges, select which one `needs_revision` should follow. Advanced bindings, links and limits can also be edited as JSON.
 

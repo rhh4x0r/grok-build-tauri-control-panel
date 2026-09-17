@@ -362,7 +362,7 @@ async fn execute_stage(
         .and_then(|id| state.persistence.workspace_for_session(id).ok().flatten())
         .is_some_and(|w| w.inline);
     let read_only = question_thread
-        || node.role == "independent-review"
+        || ["independent-review", "research"].contains(&node.role.as_str())
         || [
             "research-only",
             "repository-audit",

@@ -483,3 +483,10 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 - Accept literal JSON string control characters and fenced contract JSON, skipping quoted placeholder tags while retaining contract validation and user-confirmed fields. Cancellation keeps the original draft and now includes a retry explanation.
 - Five intake regression tests passed. Live Grok ACP test successfully enhanced “Build a 2d tetris game” into a validated contract. Added an opt-in full-path probe for future provider checks.
 - Workspace check, strict all-target Clippy and development build passed; updated and reopened the dev bundle.
+
+## 2026-09-17 — Composer Run with review loop
+- Added a native repeat-icon action next to Enhance Prompt. It starts a bounded Plan → Build and verify → Independent review → Approve result workflow from the current draft, provider/model and approval mode.
+- Review failures return to build; existing return/attempt limits and human approval remain. Planning and independent review use read-only sessions. Current thread/project or temporary-chat fallback uses the existing Foundry orchestration and thread controls.
+- Prevented duplicate startup, kept drafts on failure, hydrated the new thread before selecting it, and only cleared an unchanged submitted draft. Image attachments receive an explicit unsupported-source message rather than being dropped.
+- All 15 Foundry tests, workspace check and strict all-target Clippy passed, including a new regression covering build/review revision and final human approval. Native visual verification remains pending.
+- Development build passed; updated and reopened the dev bundle.

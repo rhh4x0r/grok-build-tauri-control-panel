@@ -50,6 +50,8 @@ pub struct ComposerView {
     destination_message: Option<String>,
     destination_init: Option<String>,
     destination_ready: Option<(String,String)>,
+    review_loop_busy: bool,
+    review_loop_result: Option<(String, uuid::Uuid)>,
     foundry_busy: bool,
     foundry_setup: bool,
     foundry_more: bool,
@@ -112,6 +114,8 @@ impl ComposerView {
             destination_message: None,
             destination_init: None,
             destination_ready: None,
+            review_loop_busy: false,
+            review_loop_result: None,
             foundry_busy: false,
             foundry_setup: false,
             foundry_more: false,
@@ -491,6 +495,58 @@ impl ComposerView {
         )
     }
 
+    fn run_review_loop(&mut self, cx: &mut Context<Self>) {
+        if self.review_loop_busy || self.foundry_busy { return; }
+        if !self.attachments.is_empty() {
+            self.foundry_message=Some("Review loops use text instructions. Add file paths to your prompt, or send image attachments in a normal chat first.".into());
+            cx.notify(); return;
+        }
+        let request=self.input.read(cx).value().to_string();
+        if request.trim().is_empty() { return; }
+        let m=self.model.read(cx);
+        if m.starting || !m.model_ready() {return;}
+        let thread=m.selected_thread();
+        if thread.as_ref().is_some_and(|t|t.read(cx).thread.presence.turn_active()) {return;}
+        let parent=thread.as_ref().map(|t|t.read(cx).meta.id.clone());
+        let cwd=thread.map(|t|t.read(cx).meta.cwd.clone()).or_else(||m.active_project.clone());
+        let backend=m.prefs.backend.clone();
+        let model=m.effective_model();
+        let approval=m.prefs.mode.clone();
+        let origin=m.selected;
+        let target=match backend.as_str(){"grok"=>"grok-build","claude"=>"claude-code","codex"=>"openai-codex",_=>"general-assistant"};
+        let options=bomb_foundry::PromptOptions{depth:"full-project".into(),target:target.into(),work_type:"implementation-plus-verification".into(),autonomy:self.foundry_autonomy.read(cx).value().to_string(),sources:self.foundry_sources.iter().map(|(input,role)|bomb_foundry::PromptSource{value:input.read(cx).value().to_string(),role:role.clone()}).collect()};
+        let mut document=match options.document(&request){Ok(d)=>d,Err(e)=>{self.foundry_message=Some(e);cx.notify();return;}};
+        document.graph=bomb_foundry::template("plan-build-review");
+        let state=crate::runtime::services(cx);
+        let weak=cx.entity().downgrade();
+        self.review_loop_busy=true;self.foundry_setup=false;
+        self.foundry_message=Some("Starting review loop · Plan → Build → Review".into());
+        crate::runtime::spawn_service(cx,async move {
+            let cwd=match cwd {Some(cwd)=>cwd,None=>{
+                let home=std::env::var_os("HOME").ok_or("Home directory unavailable")?;
+                bomb_core::services::scratch::create(&std::path::PathBuf::from(home).join(".bombcode/chats")).await?.to_string_lossy().into_owned()
+            }};
+            let run=bomb_core::foundry::FoundryService::start(state.clone(),document,cwd,backend,model,approval,parent).await?;
+            let threads=bomb_core::services::list_threads(&state).await.ok();
+            Ok::<_,String>((run,threads))
+        },move |result,cx|{let _=weak.update(cx,|v,cx|{
+            v.review_loop_busy=false;
+            match result {
+                Ok((run,threads))=>{
+                    v.foundry_message=Some("Review loop started · Open Stages & controls to follow progress.".into());
+                    if v.model.read(cx).selected==origin {
+                        if let Some(id)=run.parent_thread.and_then(|id|uuid::Uuid::parse_str(&id).ok()) {
+                            v.review_loop_result=Some((request,id));
+                            v.model.update(cx,|m,cx|{if let Some(threads)=threads {m.set_threads(threads,cx);}m.refresh_threads(cx);m.select(Some(id),cx);});
+                        }
+                    }
+                }
+                Err(error)=>v.foundry_message=Some(format!("Couldn’t start review loop: {error}. Your draft is unchanged.")),
+            }
+            cx.notify();
+        });});cx.notify();
+    }
+
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value().to_string();
         let text = text.trim().to_string();
@@ -523,7 +579,7 @@ impl ComposerView {
             });
             return;
         }
-        if self.destination_busy || self.model.read(cx).starting { return; }
+        if self.destination_busy || self.review_loop_busy || self.model.read(cx).starting { return; }
         let m=self.model.read(cx);
         if m.selected_thread().is_none() {
             let Some(root)=m.active_project.clone() else {
@@ -1481,6 +1537,11 @@ fn mode_presentation(mode: &str) -> (&'static str, Lucide, &'static str) {
 
 impl Render for ComposerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some((request,thread))=self.review_loop_result.take() {
+            if self.model.read(cx).selected==Some(thread) && self.input.read(cx).value().as_ref()==request {
+                self.input.update(cx,|s,cx|s.set_value("",window,cx));
+            }
+        }
         if let Some((original, prompt, thread)) = self.foundry_result.take() {
             if self.model.read(cx).selected == thread && self.input.read(cx).value().as_ref() == original {
                 self.input.update(cx, |s,cx| s.set_value(prompt.clone(), window, cx));
@@ -1749,11 +1810,16 @@ impl Render for ComposerView {
                                             )
                 .child(Button::new("run-foundry").ghost().small().icon(Lucide::Sparkles).rounded_full().selected(self.foundry_setup)
                     .label(if self.foundry_busy { "Enhancing…" } else { "Enhance Prompt" })
-                    .disabled(self.foundry_busy || busy || starting || self.input.read(cx).value().trim().is_empty() || !self.model.read(cx).model_ready())
+                    .disabled(self.review_loop_busy || self.foundry_busy || busy || starting || self.input.read(cx).value().trim().is_empty() || !self.model.read(cx).model_ready())
                     .on_click(cx.listener(|v,_,_,cx| {
                         if v.foundry_target.is_empty() { v.foundry_target = match v.model.read(cx).prefs.backend.as_str() { "grok"=>"grok-build", "codex"=>"openai-codex", "claude"=>"claude-code", _=>"general-assistant" }.into(); }
                         v.foundry_setup = !v.foundry_setup;v.foundry_message=None;cx.notify();
                     })))
+                .child(Button::new("run-review-loop").ghost().small().icon(Lucide::Repeat).rounded_full()
+                    .label(if self.review_loop_busy {"Starting loop…"} else {"Run with review loop"})
+                    .disabled(self.review_loop_busy || self.foundry_busy || self.foundry_source_loading || busy || starting || self.input.read(cx).value().trim().is_empty() || !self.model.read(cx).model_ready())
+                    .tooltip("Plan, build, independently review, and revise. Uses your current approval mode; pauses for final approval.")
+                    .on_click(cx.listener(|v,_,_,cx|v.run_review_loop(cx))))
                                             .child(div().w(px(6.)))
                                             .child(send_button),
                                     ),
