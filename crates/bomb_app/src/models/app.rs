@@ -199,6 +199,14 @@ impl AppModel {
         cx.notify();
     }
 
+    /// An intent choice for a new conversation, not a Git-mode switch.
+    pub fn set_new_intent(&mut self, questions: bool, cx: &mut Context<Self>) {
+        self.prefs.temporary = questions;
+        self.prefs.worktree = !questions;
+        if questions { self.prefs.mode = "plan".into(); }
+        cx.notify();
+    }
+
     pub fn inline_project(&mut self, root: String, cx: &mut Context<Self>) {
         if let Some(w) = self.workspaces.iter().find(|w| w.project_root == root && w.inline) {
             self.open_workspace(w.id.clone(), cx);
@@ -561,6 +569,10 @@ impl AppModel {
         self.selected = id;
         self.review = None;
         self.active_workspace = id.and_then(|id| self.workspaces.iter().find(|w| w.threads.contains(&id.to_string())).map(|w| w.id.clone()));
+        if let Some(w) = self.active_workspace.as_deref().and_then(|id| self.workspaces.iter().find(|w| w.id == id)) {
+            self.prefs.temporary = w.inline;
+            self.prefs.worktree = !w.inline;
+        }
         self.refresh_review(cx);
         if let Some(id) = id {
             if let Some(t) = self.threads.get(&id) {
@@ -933,7 +945,7 @@ impl AppModel {
 
     pub fn set_mode(&mut self, mode: &str, cx: &mut Context<Self>) {
         if mode != "plan" && (self.prefs.temporary || self.active_workspace.as_deref().is_some_and(|id| self.workspaces.iter().any(|w| w.id == id && w.inline))) {
-            self.toast(ToastKind::Info, "Inline is read-only. Choose Create workspace to edit.");
+            self.toast(ToastKind::Info, "This conversation is for questions. Choose Make changes to continue in a workspace.");
             cx.notify(); return;
         }
         self.prefs.mode = mode.to_string();

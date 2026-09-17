@@ -283,3 +283,12 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 - Visually checked the native development app: migrated project/workspace sidebar and project overview. Corrected non-Git folder labels and header wrapping.
 - Real remote push/PR creation was not exercised; no user repository was pushed or merged during verification.
 - Final gates: `cargo test --workspace` passed (122 tests, 2 existing opt-in tests ignored); `cargo check --workspace`, strict all-target Clippy, and development app build passed. Final UI-only layout edits were rechecked with check/Clippy/build.
+
+## 2026-09-16 — Workspace UX and saved image follow-up
+- Restored provider logos on workspace rows and project overview cards; workspace tooltips list the models represented by their conversations.
+- Replaced the repeated empty Inline/read-only rows with actual question conversations. Added paired Ask a question / Make changes actions and a new-conversation intent picker; existing workspace conversations retain their workspace context.
+- Updated question-to-workspace wording and synchronized intent when selecting conversations.
+- Fixed persistence role mapping for generated images: image rows now reach the image hydration renderer after reopening. Existing image files need no migration or regeneration.
+- Added a regression test through image-event persistence, database reopen, and transcript hydration, checking the preserved bytes and attachment metadata.
+- Validation: workspace check and strict all-target Clippy passed; full workspace tests passed (123 passed, 2 existing opt-in tests ignored). The first run timed out in the existing workspace lifecycle test; a full rerun passed. Development build passed.
+- Relaunched Bomb Code Dev and verified provider logos, model tooltip, the paired intent controls, and the restored potato image in the saved conversation. The screenshot capture still clips the right side of the conversation, so this does not establish full-width visual layout correctness.

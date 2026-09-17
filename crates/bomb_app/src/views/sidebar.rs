@@ -179,7 +179,7 @@ impl SidebarView {
                 .child(Button::new(SharedString::from(format!("new-{}", g.root))).ghost().xsmall().label("+").on_click(move |_, _, cx| add.update(cx, |m, cx| { m.set_active_project(add_root.clone(), cx); m.new_thread(cx); })))
         );
         if let Some(status) = self.model.read(cx).project_status.get(&g.root) {
-            group = group.child(div().px_4().text_xs().text_color(ui.text_faint).child(if status.error.is_some() { "Folder · read-only questions".into() } else { format!("{} · ↑{} ↓{}{}", status.branch, status.ahead, status.behind, if status.dirty { " · uncommitted" } else { "" }) }));
+            group = group.child(div().px_4().text_xs().text_color(ui.text_faint).child(if status.error.is_some() { "Folder".into() } else { format!("{} · ↑{} ↓{}{}", status.branch, status.ahead, status.behind, if status.dirty { " · uncommitted" } else { "" }) }));
         }
         if collapsed { return group; }
         for archived in [false, true] {
@@ -197,14 +197,28 @@ impl SidebarView {
                 let title = w.name.clone(); let menu_model = self.model.clone(); let menu_id = wid.clone();
                 let count = w.threads.len(); let expanded = self.expanded.contains(&wid);
                 let status = w.threads.iter().filter_map(|t| Uuid::parse_str(t).ok()).filter_map(|t| self.model.read(cx).threads.get(&t)).map(|t| t.read(cx).meta.status.clone()).find(|s| matches!(s.as_str(), "running" | "waiting_approval" | "failed")).unwrap_or_else(|| "idle".into());
+                let mut providers: Vec<String> = Vec::new();
+                let mut models: Vec<String> = Vec::new();
+                for tid in &w.threads {
+                    if let Some(t) = Uuid::parse_str(tid).ok().and_then(|id| self.model.read(cx).threads.get(&id)) {
+                        let meta = &t.read(cx).meta;
+                        if !providers.contains(&meta.backend) { providers.push(meta.backend.clone()); }
+                        if !models.contains(&meta.model) { models.push(meta.model.clone()); }
+                    }
+                }
+                let model_label = models.join(" · ");
                 let dot = match status.as_str() { "running" => ui.accent, "waiting_approval" => ui.warning, "failed" => ui.danger, _ => ui.text_faint };
                 group = group.child(div().id(SharedString::from(format!("workspace-{wid}"))).mx_2().px_3().py_2().rounded(px(8.)).cursor_pointer().when(active, |el| el.bg(ui.active)).hover(|s| s.bg(ui.hover))
                     .on_click(move |_, _, cx| app.update(cx, |m, cx| m.open_workspace(wid.clone(), cx)))
+                    .tooltip(move |window, cx| Tooltip::new(model_label.clone()).build(window, cx))
                     .context_menu(move |menu, _, _| {
                         let app = menu_model.clone(); let wid = menu_id.clone(); let name = title.clone();
                         menu.item(PopupMenuItem::new("Rename workspace…").on_click(move |_, window, cx| crate::views::workspaces::text_action(app.clone(), wid.clone(), "rename", "Workspace name", name.clone(), window, cx)))
                     })
-                    .child(div().flex().gap_2().items_center().child(div().size(px(6.)).rounded_full().bg(dot)).child(div().text_sm().child(w.name.clone())))
+                    .child(div().flex().gap_2().items_center()
+                        .children(providers.iter().map(|provider| crate::views::brand::brand_mark(provider, 14., true, ui)))
+                        .child(div().flex_1().min_w_0().text_sm().overflow_hidden().text_ellipsis().whitespace_nowrap().child(w.name.clone()))
+                        .child(div().size(px(6.)).rounded_full().bg(dot)))
                     .child(div().text_xs().text_color(ui.text_faint).child(w.branch.clone())));
                 if count > 1 {
                     let wid = w.id.clone();
@@ -223,8 +237,16 @@ impl SidebarView {
                 }
             }
         }
-        let app = self.model.clone(); let root = g.root.clone();
-        group.child(Button::new(SharedString::from(format!("inline-{root}"))).ghost().small().label("Inline · read-only").on_click(move |_, _, cx| app.update(cx, |m, cx| m.inline_project(root.clone(), cx))))
+        for w in rows.iter().filter(|w| w.inline) {
+            for id in &w.threads {
+                if let Ok(id) = Uuid::parse_str(id) {
+                    if let Some(t) = self.model.read(cx).threads.get(&id).cloned() {
+                        group = group.child(self.thread_row(id, &t, "Questions", self.model.read(cx).selected == Some(id), ui, cx));
+                    }
+                }
+            }
+        }
+        group
     }
 
     fn thread_row(

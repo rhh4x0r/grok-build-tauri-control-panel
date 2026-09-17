@@ -544,6 +544,7 @@ fn kind_to_role(kind: &str) -> String {
         // Raw ACP protocol lines — hidden by default in the UI, revealed by
         // the View toggle.
         "term" => "term".into(),
+        "image" => "image".into(),
         // Permission requests render as (inert, post-restart) approval cards.
         "approval" => "approval".into(),
         _ => "system".into(),

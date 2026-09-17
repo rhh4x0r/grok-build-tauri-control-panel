@@ -87,6 +87,7 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
     let m2 = model.clone();
     let m3 = model.clone();
     let inline_root = root.clone();
+    let changes_model = model.clone();
     let status = m.project_status.get(&root).cloned().unwrap_or_default();
     let pull_model = model.clone();
     let pull_root = root.clone();
@@ -95,9 +96,13 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
         .child(div().text_sm().text_color(ui.text_faint).child(root))
         .child(div().flex().gap_2()
             .child(Button::new("project-fetch").outline().small().label("Fetch latest").disabled(!status.remote).on_click(move |_, _, cx| m1.update(cx, |m, cx| m.fetch_project(cx))))
-            .child(Button::new("project-reveal").ghost().small().label("Reveal folder").on_click(move |_, _, cx| m2.update(cx, |m, cx| m.reveal_project(cx))))
-            .child(Button::new("project-inline").ghost().small().label("Ask about this project").on_click(move |_, _, cx| m3.update(cx, |m, cx| m.inline_project(inline_root.clone(), cx)))))
-        .child(div().text_sm().text_color(ui.text_muted).child(if status.error.is_some() { "This folder is not a Git repository. Inline questions are available; initialize Git to create workspaces.".into() } else { format!("Main branch · {} · ↑{} ↓{}{}", status.branch, status.ahead, status.behind, if status.dirty { " · uncommitted changes" } else { " · clean" }) }))
+            .child(Button::new("project-reveal").ghost().small().label("Reveal folder").on_click(move |_, _, cx| m2.update(cx, |m, cx| m.reveal_project(cx)))))
+        .child(div().flex().flex_col().gap_2()
+            .child(div().flex().gap_2()
+                .child(Button::new("project-inline").outline().label("Ask a question").on_click(move |_, _, cx| m3.update(cx, |m, cx| m.inline_project(inline_root.clone(), cx))))
+                .child(Button::new("project-make-changes").outline().label("Make changes").disabled(status.error.is_some()).on_click(move |_, _, cx| changes_model.update(cx, |m, cx| { m.new_thread(cx); m.set_new_intent(false, cx); }))))
+            .child(div().text_xs().text_color(ui.text_faint).child("Ask to understand the project. Make changes starts a separate workspace with restore points.")))
+        .child(div().text_sm().text_color(ui.text_muted).child(if status.error.is_some() { "You can ask questions about this folder. To make changes in a workspace, initialize Git first.".into() } else { format!("Main branch · {} · ↑{} ↓{}{}", status.branch, status.ahead, status.behind, if status.dirty { " · uncommitted changes" } else { " · clean" }) }))
         .when(status.remote, |el| el.child(Button::new("project-pull").outline().small().label("Pull latest into main…").on_click(move |_, window, cx| {
             let app = pull_model.clone(); let root = pull_root.clone();
             window.open_alert_dialog(cx, move |d, _, _| {
@@ -110,11 +115,18 @@ Only runs when the checkout is clean and on its default branch.").on_ok(move |_,
         .when(active.is_empty(), |el| el.child(div().text_color(ui.text_faint).child("No workspaces yet. Describe a change below to get started.")))
         .children(active.into_iter().map(|w| {
             let app = model.clone(); let id = w.id.clone();
+            let mut providers = Vec::new();
+            for tid in &w.threads {
+                if let Some(t) = uuid::Uuid::parse_str(tid).ok().and_then(|id| m.threads.get(&id)) {
+                    let backend = t.read(cx).meta.backend.clone();
+                    if !providers.contains(&backend) { providers.push(backend); }
+                }
+            }
             let status = w.threads.iter().filter_map(|id| uuid::Uuid::parse_str(id).ok()).filter_map(|id| m.threads.get(&id)).find_map(|t| {
                 let t = t.read(cx); if t.thread.presence.turn_active() { Some("Working") } else { None }
             }).unwrap_or("Ready");
             div().id(SharedString::from(w.id)).p_4().rounded(px(12.)).border_1().border_color(ui.border).flex().flex_col().gap_2()
-                .child(div().flex().justify_between().child(div().text_size(px(16.)).child(w.name)).child(div().text_xs().text_color(ui.text_muted).child(status)))
+                .child(div().flex().justify_between().child(div().flex().gap_2().items_center().children(providers.iter().map(|p| crate::views::brand::brand_mark(p, 16., true, ui))).child(div().text_size(px(16.)).child(w.name))).child(div().text_xs().text_color(ui.text_muted).child(status)))
                 .child(div().text_xs().text_color(ui.text_faint).child(format!("{} · {} conversations · checkpoints on", w.branch, w.threads.len())))
                 .child(Button::new(SharedString::from(format!("open-{id}"))).outline().small().label("Open workspace").on_click(move |_, _, cx| app.update(cx, |m, cx| m.open_workspace(id.clone(), cx))))
         }))

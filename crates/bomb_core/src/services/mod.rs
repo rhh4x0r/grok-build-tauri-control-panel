@@ -2450,3 +2450,36 @@ fn enforce_inline(opts: &mut SpawnOptions) {
     opts.include_auto_mcp = false;
     opts.permission_deny.push("*".into());
 }
+
+#[cfg(test)]
+mod image_restore_tests {
+    use super::*;
+
+    #[test]
+    fn generated_image_survives_database_reopen_and_transcript_hydration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.db");
+        let id = Uuid::new_v4();
+        let data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
+        {
+            let db = grok_persistence::Persistence::open(&path).unwrap();
+            persist_control_event(&db, &ControlEvent::Raw {
+                session_id: Some(id),
+                payload: serde_json::json!({"channel":"image", "mimeType":"image/png", "data":data}),
+            });
+        }
+        let db = grok_persistence::Persistence::open(path).unwrap();
+        let rows = db.transcript_entries(id).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].role, "image");
+        let mut thread = crate::transcript::Thread::new();
+        thread.hydrate(&rows);
+        assert_eq!(thread.entries.len(), 1);
+        assert!(matches!(thread.entries[0].role, crate::transcript::Role::Agent));
+        let images = &thread.entries[0].images;
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime_type, "image/png");
+        assert_eq!(images[0].data, data);
+        assert!(std::path::Path::new(images[0].name.as_deref().unwrap()).is_file());
+    }
+}

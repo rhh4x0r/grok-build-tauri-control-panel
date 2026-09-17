@@ -194,7 +194,7 @@ impl ThreadView {
                     .items_center()
                     .gap_2()
                     .child(div().size(px(22.)).text_color(ui.text_muted).child(Icon::from(Lucide::Bomb)))
-                    .child(div().text_size(px(22.)).font_weight(FontWeight::MEDIUM).text_color(ui.text).child(self.model.read(cx).active_workspace.as_deref().and_then(|id| self.model.read(cx).workspaces.iter().find(|w| w.id == id)).map(|w| format!("New conversation in {}", w.name)).unwrap_or_else(|| "How can I help?".into())))
+                    .child(div().text_size(px(22.)).font_weight(FontWeight::MEDIUM).text_color(ui.text).child(self.model.read(cx).active_workspace.as_deref().and_then(|id| self.model.read(cx).workspaces.iter().find(|w| w.id == id)).map(|w| if w.inline { "Ask about this project".into() } else { format!("New conversation in {}", w.name) }).unwrap_or_else(|| "How can I help?".into())))
                     .child(self.project_row(project, ui, cx)),
             ))
             .child(
@@ -272,23 +272,8 @@ impl ThreadView {
                     }),
             )
             .child("·")
-            .child(
-                div()
-                    .id("temporary-chat")
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .cursor_pointer()
-                    .text_color(if temporary { ui.text } else { ui.text_faint })
-                    .on_click(move |_, _, cx| {
-                        app2.update(cx, |m, cx| {
-                            m.prefs.temporary = !m.prefs.temporary;
-                            cx.notify();
-                        })
-                    })
-                    .child(div().size(px(12.)).child(Icon::from(if temporary { Lucide::SquareCheck } else { Lucide::Square })))
-                    .child("Inline · read-only"),
-            )
+            .child(div().text_xs().child(if temporary { "Ask questions · your files stay unchanged" } else { "Make changes · saved in a workspace" }))
+            .when(temporary, |el| el.child(Button::new("question-make-changes").outline().small().label("Make changes…").on_click(move |_, _, cx| app2.update(cx, |m, cx| m.workspace_from_inline(cx)))))
     }
 
     fn header(&self, thread: &Entity<ThreadModel>, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
@@ -349,7 +334,7 @@ impl ThreadView {
             .child(chip("new-workspace-thread", "+ Conversation".into(), ui).on_click({
                 let app = app.clone(); move |_, _, cx| app.update(cx, |m, cx| m.new_workspace_thread(cx))
             }))
-            .when(!has_worktree, |el| el.child(chip("inline-convert", "Read-only · Create workspace to edit".into(), ui).on_click({
+            .when(!has_worktree, |el| el.child(chip("inline-convert", "Make changes…".into(), ui).on_click({
                 let app = app.clone(); move |_, _, cx| app.update(cx, |m, cx| m.workspace_from_inline(cx))
             })))
             .when(has_worktree, |el| {

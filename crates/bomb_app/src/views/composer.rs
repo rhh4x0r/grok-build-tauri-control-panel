@@ -574,8 +574,10 @@ impl Render for ComposerView {
                     .and_then(|w| std::path::Path::new(w).file_name())
                     .map(|s| s.to_string_lossy().to_string())
             });
-            (busy, m.starting, branch, m.prefs.worktree, t.is_some())
+            (busy, m.starting, branch, m.prefs.worktree && !m.prefs.temporary, t.is_some())
         };
+        let new_target = self.model.read(cx).active_workspace.is_none();
+        let location_label = self.model.read(cx).active_workspace.as_deref().and_then(|id| self.model.read(cx).workspaces.iter().find(|w| w.id == id)).map(|w| if w.inline { "Questions · files unchanged".into() } else { w.name.clone() }).unwrap_or_else(|| "New conversation".into());
         let has_text = !self.input.read(cx).value().trim().is_empty() || !self.attachments.is_empty();
         let app = self.model.clone();
         let (solid, on_solid, danger) = (ui.solid, ui.on_solid, ui.danger);
@@ -729,7 +731,7 @@ impl Render for ComposerView {
                                     .items_center()
                                     .gap_1()
                                     .child(div().size(px(11.)).child(Icon::from(Lucide::Folder)))
-                                    .child(if has_thread { "Local checkout" } else { "New thread" }),
+                                    .child(location_label),
                             )
                             .when_some(branch, |el, b| {
                                 el.child(
@@ -741,23 +743,17 @@ impl Render for ComposerView {
                                         .child(b),
                                 )
                             })
-                            .when(!has_thread, |el| {
+                            .when(!has_thread && new_target, |el| {
                                 el.child(
-                                    div()
-                                        .id("worktree-toggle")
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .cursor_pointer()
-                                        .text_color(if worktree_on { ui.text_muted } else { ui.text_faint })
-                                        .on_click(move |_, _, cx| {
-                                            app.update(cx, |m, cx| {
-                                                m.prefs.worktree = !m.prefs.worktree;
-                                                cx.notify();
-                                            })
+                                    Button::new("conversation-intent")
+                                        .ghost().small().compact()
+                                        .label(if worktree_on { "Make changes" } else { "Ask a question" })
+                                        .dropdown_caret(true)
+                                        .dropdown_menu(move |menu, _, _| {
+                                            let questions = app.clone(); let changes = app.clone();
+                                            menu.item(PopupMenuItem::new("Ask a question — leave files unchanged").on_click(move |_, _, cx| questions.update(cx, |m, cx| m.set_new_intent(true, cx))))
+                                                .item(PopupMenuItem::new("Make changes — start a workspace").on_click(move |_, _, cx| changes.update(cx, |m, cx| m.set_new_intent(false, cx))))
                                         })
-                                        .child(div().size(px(11.)).child(Icon::from(Lucide::GitBranch)))
-                                        .child(if worktree_on { "new workspace" } else { "Inline · read-only" }),
                                 )
                             })
                             .child(div().flex_1())
