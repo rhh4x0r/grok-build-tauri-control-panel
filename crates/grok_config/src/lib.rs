@@ -458,7 +458,7 @@ max_concurrent_sessions = 10
     fn model_for_fallback_chain() {
         let mut cfg = GrokConfig::default();
         // Built-in descriptor defaults when nothing configured.
-        assert_eq!(cfg.model_for(Backend::Claude), "claude-fable-5");
+        assert_eq!(cfg.model_for(Backend::Claude), "claude-fable-5-1");
         assert_eq!(cfg.model_for(Backend::Codex), "gpt-5.6-terra");
         // Grok falls back to legacy top-level default_model.
         cfg.default_model = "grok-code-fast-1".into();

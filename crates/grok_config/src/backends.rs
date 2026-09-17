@@ -111,9 +111,11 @@ const CLAUDE: BackendDescriptor = BackendDescriptor {
     env_passthrough: &["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR"],
     auth_preference: &["claude-login", "anthropic-api-key"],
     skip_auth_when_unadvertised: true,
-    default_model: "claude-fable-5",
+    default_model: "claude-fable-5-1",
     model_catalog: &[
+        "claude-fable-5-1",
         "claude-fable-5",
+        "claude-opus-5",
         "claude-opus-4-8",
         "claude-sonnet-5",
         "claude-haiku-4-5",
@@ -133,6 +135,7 @@ const CODEX: BackendDescriptor = BackendDescriptor {
     skip_auth_when_unadvertised: true,
     default_model: "gpt-5.6-terra",
     model_catalog: &[
+        "gpt-6-astra",
         "gpt-5.6-sol",
         "gpt-5.6-terra",
         "gpt-5.6-luna",
@@ -252,7 +255,7 @@ mod tests {
     #[test]
     fn descriptor_lookup() {
         assert_eq!(descriptor(Backend::Grok).display_name, "Grok");
-        assert_eq!(descriptor(Backend::Claude).default_model, "claude-fable-5");
+        assert_eq!(descriptor(Backend::Claude).default_model, "claude-fable-5-1");
         assert_eq!(
             descriptor(Backend::Codex).npx_packages[0],
             "@agentclientprotocol/codex-acp"
