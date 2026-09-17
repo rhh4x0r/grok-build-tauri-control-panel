@@ -411,34 +411,6 @@ impl ComposerView {
         )
     }
 
-    /// Reasoning effort, only for backends that take it (Grok today).
-    fn effort_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let m = self.model.read(cx);
-        if m.prefs.backend != "grok" {
-            return None;
-        }
-        let effort = m.prefs.effort.clone();
-        let app = self.model.clone();
-        Some(
-            Button::new("effort-picker")
-                .ghost()
-                .small()
-                .compact()
-                .label(effort)
-                .dropdown_menu(move |mut menu, _, _| {
-                    menu = menu.label("Reasoning effort (new threads)");
-                    for e in ["low", "medium", "high"] {
-                        let app = app.clone();
-                        menu = menu.item(PopupMenuItem::new(e).on_click(move |_, _, cx| {
-                            app.update(cx, |a, cx| a.set_effort(e, cx));
-                        }));
-                    }
-                    menu
-                })
-                .into_any_element(),
-        )
-    }
-
     fn mode_picker(&self, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
         let mode = self.model.read(cx).prefs.mode.clone();
         let app = self.model.clone();
