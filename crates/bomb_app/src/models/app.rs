@@ -1068,6 +1068,7 @@ impl AppModel {
     }
 
     pub fn remove_thread(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        tracing::info!(%id, "delete: removing thread");
         self.archived.remove(&id);
         let state = svc(cx);
         let this = cx.entity().downgrade();
@@ -1078,6 +1079,7 @@ impl AppModel {
                 let _ = this.update(cx, |m, cx| {
                     match res {
                         Ok(()) => {
+                            tracing::info!(%id, "delete: removed");
                             if m.selected == Some(id) {
                                 m.selected = None;
                             }

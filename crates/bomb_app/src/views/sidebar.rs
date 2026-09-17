@@ -561,9 +561,10 @@ impl SidebarView {
                 let m = menu_model.clone();
                 menu.item(PopupMenuItem::new("Delete thread…").on_click(move |_, window, cx| {
                     let m = m.clone();
+                    tracing::info!(%id, "delete: menu item clicked");
                     // The popup menu is still tearing down on this click; a
-                    // dialog opened in the same frame gets dismissed with it.
-                    window.defer(cx, move |window, cx| confirm_delete(m, id, window, cx));
+                    // dialog opened before it is gone gets dismissed with it.
+                    after_layers_settle(window, cx, move |window, cx| confirm_delete(m, id, window, cx));
                 }))
             })
             .when(!project.is_empty(), |el| {
@@ -909,18 +910,22 @@ fn usage_bar(backend: &str, ix: usize, w: &bomb_core::usage::UsageWindow, ui: &U
 /// Two confirmations before a thread is gone for good: the second one
 /// spells out that it is permanent.
 fn confirm_delete(model: Entity<AppModel>, id: Uuid, window: &mut Window, cx: &mut App) {
+    tracing::info!(%id, "delete: opening first confirmation");
     window.open_alert_dialog(cx, move |dlg, _, _| {
         let model = model.clone();
         dlg.title("Delete this thread?")
             .description("Archiving hides it instead and keeps everything. Deleting removes its transcript; the workspace and files are kept.")
             .on_ok(move |_, window, cx| {
+                tracing::info!(%id, "delete: first confirmation accepted");
                 let model = model.clone();
-                window.defer(cx, move |window, cx| {
+                after_layers_settle(window, cx, move |window, cx| {
+                    tracing::info!(%id, "delete: opening second confirmation");
                     window.open_alert_dialog(cx, move |dlg, _, _| {
                         let model = model.clone();
                         dlg.title("Permanently delete?")
                             .description("This cannot be undone.")
                             .on_ok(move |_, _, cx| {
+                                tracing::info!(%id, "delete: second confirmation accepted");
                                 model.update(cx, |a, cx| a.remove_thread(id, cx));
                                 true
                             })
@@ -929,6 +934,17 @@ fn confirm_delete(model: Entity<AppModel>, id: Uuid, window: &mut Window, cx: &m
                 true
             })
     });
+}
+
+/// Run `f` once the current popup/dialog layer has finished closing (its
+/// close is animated), so a dialog opened next is not popped with it.
+fn after_layers_settle(window: &mut Window, cx: &mut App, f: impl FnOnce(&mut Window, &mut App) + 'static) {
+    window
+        .spawn(cx, async move |cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(260)).await;
+            let _ = cx.update(|window, cx| f(window, cx));
+        })
+        .detach();
 }
 
 /// Row corner: time-ago for idle rows (10px medium, subline), otherwise a
