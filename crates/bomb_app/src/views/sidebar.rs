@@ -230,13 +230,7 @@ impl SidebarView {
                     .flex()
                     .items_center()
                     .gap_1p5()
-                    .child(
-                        div()
-                            .size(px(7.))
-                            .rounded_full()
-                            .flex_shrink_0()
-                            .bg(ui.backend(&backend)),
-                    )
+                    .child(crate::views::brand::brand_mark(&backend, 14., true, ui))
                     .child(
                         div()
                             .flex_1()
@@ -267,24 +261,27 @@ impl SidebarView {
         let backend = a.backend.clone();
         let logged_in = a.logged_in;
         let runnable = a.runnable;
-        let dot = if a.logged_in {
+        let dot = if logged_in {
             ui.success
-        } else if a.runnable {
+        } else if runnable {
             ui.text_faint
         } else {
             ui.danger
         };
-        let detail = if a.logged_in {
+        let detail = if logged_in {
             a.account
                 .clone()
                 .or_else(|| a.plan.clone())
                 .unwrap_or_else(|| "signed in".into())
-        } else if a.runnable {
+        } else if runnable {
             "click to sign in".into()
         } else {
             "not installed".into()
         };
         let hover = ui.hover;
+        let display = a.display_name.clone();
+        let menu_model = model.clone();
+        let menu_backend = backend.clone();
         div()
             .id(SharedString::from(format!("svc-{}", a.backend)))
             .flex()
@@ -294,24 +291,20 @@ impl SidebarView {
             .px_2()
             .py_1()
             .rounded(px(6.))
-            .cursor_pointer()
-            .hover(move |s| s.bg(hover))
-            .on_click(move |_, window, cx| {
-                if logged_in {
-                    model.update(cx, |m, cx| m.sign_out(&backend, cx));
-                } else if backend == "grok" {
-                    crate::views::login_dialog::open_login_dialog(model.clone(), window, cx);
-                } else if runnable {
-                    model.update(cx, |m, cx| m.sign_in(&backend, cx));
-                }
+            .when(!logged_in && runnable, |el| {
+                el.cursor_pointer()
+                    .hover(move |s| s.bg(hover))
+                    .on_click(move |_, window, cx| {
+                        if backend == "grok" {
+                            crate::views::login_dialog::open_login_dialog(model.clone(), window, cx);
+                        } else {
+                            model.update(cx, |m, cx| m.sign_in(&backend, cx));
+                        }
+                    })
             })
-            .child(div().size(px(7.)).rounded_full().bg(dot))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(ui.text)
-                    .child(a.display_name.clone()),
-            )
+            .child(crate::views::brand::brand_mark(&a.backend, 14., logged_in, ui))
+            .child(div().text_sm().text_color(ui.text).child(display.clone()))
+            .child(div().size(px(6.)).rounded_full().bg(dot))
             .child(
                 div()
                     .flex_1()
@@ -322,6 +315,35 @@ impl SidebarView {
                     .whitespace_nowrap()
                     .child(detail),
             )
+            .when(logged_in, |el| {
+                el.child(
+                    Button::new(SharedString::from(format!("svc-menu-{}", a.backend)))
+                        .ghost()
+                        .xsmall()
+                        .compact()
+                        .label("…")
+                        .dropdown_menu(move |menu, _, _| {
+                            let m = menu_model.clone();
+                            let b = menu_backend.clone();
+                            let name = display.clone();
+                            menu.item(PopupMenuItem::new(format!("Sign out of {name}…")).on_click(move |_, window, cx| {
+                                let m = m.clone();
+                                let b = b.clone();
+                                let name = name.clone();
+                                window.open_alert_dialog(cx, move |dlg, _, _| {
+                                    let m = m.clone();
+                                    let b = b.clone();
+                                    dlg.title(format!("Sign out of {name}?"))
+                                        .description("Threads on this backend cannot run until you sign in again.")
+                                        .on_ok(move |_, _, cx| {
+                                            m.update(cx, |a, cx| a.sign_out(&b, cx));
+                                            true
+                                        })
+                                })
+                            }))
+                        }),
+                )
+            })
     }
 }
 

@@ -336,6 +336,20 @@ impl SessionRegistry {
 
                     let mut client_cfg = AcpClientConfig::new(&resolved.program, cwd_path);
                     client_cfg.args = resolved.args.clone();
+                    // `grok agent --reasoning-effort <e> stdio`: the flag belongs
+                    // to `agent`, so it goes before the `stdio` subcommand.
+                    if backend == Backend::Grok {
+                        if let Some(effort) = opts.effort.as_deref().filter(|e| !e.is_empty()) {
+                            let at = client_cfg
+                                .args
+                                .iter()
+                                .position(|a| a == "stdio")
+                                .unwrap_or(client_cfg.args.len());
+                            client_cfg
+                                .args
+                                .splice(at..at, ["--reasoning-effort".to_string(), effort.to_string()]);
+                        }
+                    }
                     client_cfg.env = env;
                     client_cfg.auth_preference = desc
                         .auth_preference

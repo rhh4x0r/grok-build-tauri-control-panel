@@ -21,9 +21,10 @@ use grok_cli_wrapper::GrokCli;
 use grok_config::GrokConfig;
 use grok_events::{ControlEvent, EventBus};
 
-/// Cheapest known fast model (verified against `grok models`); config can
-/// override via `explainer_model`.
-const DEFAULT_EXPLAINER_MODEL: &str = "grok-composer-2.5-fast";
+/// Empty means "the CLI's default model": pinned ids rot (grok-composer-2.5-fast
+/// and grok-4 both vanished from `grok models`). Config can override via
+/// `explainer_model`; a rejected override falls back here.
+const DEFAULT_EXPLAINER_MODEL: &str = "";
 const TICK_SECS: u64 = 5;
 const ERROR_BACKOFF_SECS: u64 = 60;
 const MAX_BUFFER_LINES: usize = 60;
@@ -324,18 +325,12 @@ impl ExplainerService {
             Ok(out) => out,
             // Stale/invalid model id: self-heal onto the known fast model
             // instead of parking the narrator on an error card.
-            Err(e)
-                if backend == "grok"
-                    && model != DEFAULT_EXPLAINER_MODEL
-                    && (e.contains("unknown model id") || e.contains("Couldn't set model")) =>
-            {
-                warn!(%model, "narrator model rejected; falling back to {DEFAULT_EXPLAINER_MODEL}");
+            Err(e) if backend == "grok" && !model.is_empty() => {
+                warn!(%model, error = %e, "narrator model failed; falling back to the CLI default model");
                 *self.model.write().await = DEFAULT_EXPLAINER_MODEL.to_string();
                 self.emit(
                     sid,
-                    &format!(
-                        "(model '{model}' isn't available on this grok CLI — narrator switched to {DEFAULT_EXPLAINER_MODEL})"
-                    ),
+                    &format!("(model '{model}' failed on this grok CLI — narrator switched to the default model)"),
                     "error",
                     None,
                 );
@@ -426,23 +421,27 @@ impl ExplainerService {
                     ));
                 }
                 let cli = GrokCli::new(&resolved.program);
-                let args: Vec<&str> = match backend {
-                    "claude" => vec![
-                        "-p", prompt, "--model", model, "--output-format", "text",
-                        "--max-turns", "1",
-                    ],
-                    _ => vec!["exec", "-m", model, prompt],
+                let mut args: Vec<&str> = match backend {
+                    "claude" => vec!["-p", prompt, "--output-format", "text", "--max-turns", "1"],
+                    _ => vec!["exec", prompt],
                 };
+                if !model.is_empty() {
+                    let flag = if backend == "claude" { "--model" } else { "-m" };
+                    args.splice(1..1, [flag, model]);
+                }
                 cli.run_args_timeout(&args, None, CALL_TIMEOUT)
                     .await
                     .map_err(|e| e.to_string())
             }
             _ => {
-                let args: Vec<&str> = vec![
-                    "-p", prompt, "-m", model, "--output-format", "plain",
+                let mut args: Vec<&str> = vec![
+                    "-p", prompt, "--output-format", "plain",
                     "--max-turns", "1", "--disable-web-search", "--no-subagents",
                     "--no-memory", "--tools", "",
                 ];
+                if !model.is_empty() {
+                    args.extend(["-m", model]);
+                }
                 self.grok_cli
                     .run_args_timeout(&args, None, CALL_TIMEOUT)
                     .await

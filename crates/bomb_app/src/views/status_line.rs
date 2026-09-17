@@ -141,7 +141,8 @@ pub fn status_line(
                 .child(sprite(mood, active, ui))
                 .child(div().flex().items_center().gap_2().children(bits))
                 .child(div().flex_1())
-                .when(props.has_explanations || props.explain_pending, |el| {
+                .when(true, |el| {
+                    let _ = props.has_explanations;
                     el.child(
                         div()
                             .id("explain-toggle")
@@ -173,10 +174,9 @@ pub fn status_line(
                     .child(if props.explain_pending && props.explain_text.is_none() {
                         "thinking…".to_string()
                     } else {
-                        props
-                            .explain_text
-                            .clone()
-                            .unwrap_or_else(|| "Waiting for activity in this thread.".into())
+                        props.explain_text.clone().unwrap_or_else(|| {
+                            "No narration yet. The narrator explains this thread's activity every few seconds while the agent works (Settings → General → Explainer).".into()
+                        })
                     }),
             )
         })

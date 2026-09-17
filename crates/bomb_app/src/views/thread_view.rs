@@ -147,8 +147,8 @@ impl ThreadView {
                     .gap_1()
                     .text_xs()
                     .text_color(ui.text_faint)
-                    .child(div().size(px(7.)).rounded_full().bg(ui.backend(&backend)))
-                    .child(if model.is_empty() { backend } else { model })
+                    .child(crate::views::brand::brand_mark(&backend, 13., true, ui))
+                    .child(if model.is_empty() { backend.clone() } else { model })
                     .child("·")
                     .child(if live { brain.unwrap_or_else(|| "live".into()) } else { "saved".into() }),
             )
@@ -177,23 +177,19 @@ impl ThreadView {
                     }
                 }))
             })
-            .child({
-                let app = app.clone();
+            .child(
                 chip(
-                    "dev-toggle",
-                    if dev_running { "Stop dev server".into() } else { "Dev server".into() },
+                    "dev-preview",
+                    if dev_running { "Preview".into() } else { "Dev server".into() },
                     ui,
                 )
-                .child(div().size(px(12.)).child(Icon::from(if dev_running { Lucide::Square } else { Lucide::Play })))
-                .on_click(move |_, _, cx| app.update(cx, |m, cx| m.dev_server_toggle(cx)))
-            })
+                .child(div().size(px(12.)).child(Icon::from(if dev_running { Lucide::AppWindow } else { Lucide::Play })))
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(Box::new(crate::actions::ToggleDevPreview), cx)
+                }),
+            )
             .when_some(dev_url.filter(|_| dev_running), |el, url| {
-                let app = app.clone();
-                el.child(
-                    chip("dev-open", url, ui)
-                        .text_color(ui.accent)
-                        .on_click(move |_, _, cx| app.update(cx, |m, cx| m.dev_server_open(cx))),
-                )
+                el.child(div().text_xs().font_family(ui.mono.clone()).text_color(ui.text_faint).child(url))
             })
     }
 }

@@ -778,6 +778,7 @@ async fn resume_saved_session(
         } else {
             grok_control_core::AgentMode::Acp
         },
+        effort: Some(state.config.read().await.default_effort.clone()),
         ..SpawnOptions::default()
     };
     let recorded_backend = extract_backend_from_meta(&rec.metadata_json);
@@ -1900,6 +1901,15 @@ async fn persist_session(state: &AppState, id: Uuid) {
 }
 
 fn build_thread_list(state: &AppState) -> Vec<ThreadDto> {
+    let show_mock = std::env::var("BOMB_SMOKE").ok().as_deref() == Some("1");
+    let mut out = build_thread_list_all(state);
+    if !show_mock {
+        out.retain(|t| !t.model.eq_ignore_ascii_case("mock"));
+    }
+    out
+}
+
+fn build_thread_list_all(state: &AppState) -> Vec<ThreadDto> {
     let live = state.registry.list_sessions();
     let mut live_ids = std::collections::HashSet::new();
     let mut out: Vec<ThreadDto> = Vec::new();

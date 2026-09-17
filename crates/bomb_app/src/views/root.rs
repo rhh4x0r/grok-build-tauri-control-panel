@@ -9,8 +9,9 @@ use gpui_kit::*;
 
 use crate::actions::{
     CycleApprovalMode, DeleteThread, LandThread, NewMockSession, NewThread, OpenProject, OpenSettings,
-    RevealProject, StopTurn, SyncThread, ToggleExplainer,
+    RevealProject, StopTurn, SyncThread, ToggleDevPreview, ToggleExplainer,
 };
+use crate::views::preview::PreviewPanel;
 use crate::models::app::{project_name, AppModel, ToastKind};
 use crate::theme::{Layout, Ui};
 use crate::views::sidebar::SidebarView;
@@ -20,8 +21,10 @@ pub struct RootView {
     model: Entity<AppModel>,
     sidebar: Entity<SidebarView>,
     thread: Entity<ThreadView>,
+    preview: Entity<PreviewPanel>,
     focus: FocusHandle,
     sidebar_open: bool,
+    preview_open: bool,
 }
 
 impl RootView {
@@ -29,12 +32,15 @@ impl RootView {
         cx.observe(&model, |_, _, cx| cx.notify()).detach();
         let sidebar = cx.new(|cx| SidebarView::new(model.clone(), cx));
         let thread = cx.new(|cx| ThreadView::new(model.clone(), window, cx));
+        let preview = cx.new(|cx| PreviewPanel::new(model.clone(), cx));
         Self {
             model,
             sidebar,
             thread,
+            preview,
             focus: cx.focus_handle(),
             sidebar_open: true,
+            preview_open: false,
         }
     }
 
@@ -169,6 +175,18 @@ impl Render for RootView {
             .on_action(cx.listener(|_, _: &OpenSettings, _, cx| {
                 crate::views::settings::open_settings_window(cx);
             }))
+            .on_action(cx.listener(|this, _: &ToggleDevPreview, _, cx| {
+                let running = this.model.read(cx).dev_server.as_ref().map(|s| s.running).unwrap_or(false);
+                if !this.preview_open {
+                    this.preview_open = true;
+                    if !running {
+                        this.model.update(cx, |m, cx| m.dev_server_toggle(cx));
+                    }
+                } else {
+                    this.preview_open = false;
+                }
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &ToggleExplainer, _, cx| {
                 if let Some(t) = this.model.read(cx).selected_thread() {
                     t.update(cx, |t, cx| {
@@ -220,7 +238,15 @@ impl Render for RootView {
                                 .child(self.sidebar.clone()),
                         )
                     })
-                    .child(resizable_panel().child(self.thread.clone())),
+                    .child(resizable_panel().child(self.thread.clone()))
+                    .when(self.preview_open, |el| {
+                        el.child(
+                            resizable_panel()
+                                .size(px(520.))
+                                .size_range(px(360.)..px(1100.))
+                                .child(self.preview.clone()),
+                        )
+                    }),
             )
     }
 }

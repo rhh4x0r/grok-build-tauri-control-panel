@@ -243,7 +243,7 @@ impl ComposerView {
         let backends = m.backends.clone();
         let app = self.model.clone();
         let label = if model.is_empty() { backend.clone() } else { model };
-        let dot = ui.backend(&backend);
+        let mark = crate::views::brand::brand_mark(&backend, 14., true, ui);
         Button::new("model-picker")
             .ghost()
             .small()
@@ -282,7 +282,7 @@ impl ComposerView {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .child(div().size(px(7.)).rounded_full().bg(dot))
+                    .child(mark)
                     .child(el)
                     .into_any_element()
             })
@@ -311,6 +311,34 @@ impl ComposerView {
                         let on = chosen.contains(n);
                         menu = menu.item(PopupMenuItem::new(n.clone()).checked(on).on_click(move |_, _, cx| {
                             app.update(cx, |a, cx| a.toggle_mcp_pref(&name, cx));
+                        }));
+                    }
+                    menu
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// Reasoning effort, only for backends that take it (Grok today).
+    fn effort_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let m = self.model.read(cx);
+        if m.prefs.backend != "grok" {
+            return None;
+        }
+        let effort = m.prefs.effort.clone();
+        let app = self.model.clone();
+        Some(
+            Button::new("effort-picker")
+                .ghost()
+                .small()
+                .compact()
+                .label(effort)
+                .dropdown_menu(move |mut menu, _, _| {
+                    menu = menu.label("Reasoning effort (new threads)");
+                    for e in ["low", "medium", "high"] {
+                        let app = app.clone();
+                        menu = menu.item(PopupMenuItem::new(e).on_click(move |_, _, cx| {
+                            app.update(cx, |a, cx| a.set_effort(e, cx));
                         }));
                     }
                     menu
@@ -416,6 +444,7 @@ impl Render for ComposerView {
         let model_picker = self.model_picker(&ui, cx);
         let mode_picker = self.mode_picker(&ui, cx);
         let mcp_picker = self.mcp_picker(cx);
+        let effort_picker = self.effort_picker(cx);
         let hover = ui.hover;
         let _ = danger;
 
@@ -488,6 +517,7 @@ impl Render for ComposerView {
                                             .gap_0p5()
                                             .pb_0p5()
                                             .child(model_picker)
+                                            .children(effort_picker)
                                             .child(mode_picker)
                                             .children(mcp_picker)
                                             .child(

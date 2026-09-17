@@ -16,7 +16,7 @@ use gpui_kit::*;
 
 use crate::models::thread::ThreadModel;
 use crate::runtime::{services as svc, spawn_service};
-use crate::theme::{Fuse, Layout, Ui};
+use crate::theme::{Layout, Ui};
 use crate::views::motion::{breathe, fade_in};
 
 const TAIL_SLACK: f32 = 120.0;
@@ -56,6 +56,8 @@ enum Row {
         streaming: bool,
         last: bool,
         at: String,
+        /// Local image files the reply refers to, resolved against the cwd.
+        images: Vec<std::path::PathBuf>,
     },
     Activity {
         first_id: u64,
@@ -92,6 +94,8 @@ impl TranscriptView {
     fn build_rows(&self, cx: &mut Context<Self>) -> Vec<Row> {
         self.thread.update(cx, |t, cx| {
             let entries: Vec<Entry> = t.thread.entries.clone();
+            let cwd = std::path::PathBuf::from(&t.meta.cwd);
+            let project_root = t.meta.project_root.clone().map(std::path::PathBuf::from);
             let last_agent = entries
                 .iter()
                 .rposition(|e| e.role == Role::Agent)
@@ -146,11 +150,13 @@ impl TranscriptView {
                 match (&e.role, &e.body) {
                     (Role::Agent, Body::Text(s)) => {
                         let state = t.markdown_state(e.id, s, cx);
+                        let images = if e.streaming { Vec::new() } else { local_images(s, &cwd, project_root.as_deref()) };
                         rows.push(Row::Agent {
                             id: e.id,
                             state,
                             raw: s.clone(),
                             streaming: e.streaming,
+                            images,
                             last: last_agent == Some(e.id),
                             at: e.at.with_timezone(&chrono::Local).format("%b %-d, %-I:%M %p").to_string(),
                         });
@@ -246,9 +252,12 @@ impl TranscriptView {
         streaming: bool,
         last: bool,
         at: &str,
+        images: &[std::path::PathBuf],
         ui: &Ui,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
+        let cwd = std::path::PathBuf::from(&self.thread.read(cx).meta.cwd);
+        let link_cwd = cwd.clone();
         let body = div()
             .flex()
             .flex_col()
@@ -256,7 +265,24 @@ impl TranscriptView {
             .py_1()
             .text_size(px(Layout::BODY_SIZE))
             .line_height(px(Layout::BODY_LINE))
-            .child(TextView::new(state).selectable(true))
+            .child(TextView::new(state).selectable(true).on_link_click(move |href, _, _, cx| {
+                open_link(href, &link_cwd, cx);
+            }))
+            .when(!images.is_empty(), |el| {
+                el.child(div().flex().flex_wrap().gap_2().py_2().children(images.iter().enumerate().map(|(ix, p)| {
+                    let path = p.clone();
+                    div()
+                        .id(("gen-img", id * 64 + ix as u64))
+                        .max_w(px(420.))
+                        .rounded(px(10.))
+                        .overflow_hidden()
+                        .border_1()
+                        .border_color(ui.border)
+                        .cursor_pointer()
+                        .on_click(move |_, _, _| open_path(&path))
+                        .child(img(p.clone()).max_w(px(420.)).max_h(px(420.)).object_fit(ObjectFit::Contain))
+                })))
+            })
             .when(streaming, |el| {
                 el.child(breathe(
                     ("caret", id),
@@ -364,14 +390,7 @@ impl TranscriptView {
             )
             .child(div().text_sm().text_color(color).child(summary));
         if running {
-            header = header.child(breathe(
-                ("act-dot", first_id),
-                0.3,
-                div()
-                    .size(px(6.))
-                    .rounded_full()
-                    .bg(crate::theme::c(Fuse::HOT)),
-            ));
+            header = header.child(div().text_xs().text_color(ui.text_faint).child("working…"));
         }
         // Un-collapsing a collapsed-by-default group needs the header click to
         // land in `expanded`; fix the toggle so a collapsed group opens.
@@ -485,23 +504,17 @@ impl TranscriptView {
         let failed = r.status.contains("fail") || r.status.contains("denied");
         let hover = ui.hover;
         let icon = tool_icon(&r.name);
-        let glyph: AnyElement = if !terminal {
-            breathe(
-                ("chip-dot", id),
-                0.3,
-                div()
-                    .size(px(14.))
-                    .text_color(crate::theme::c(Fuse::HOT))
-                    .child(Icon::from(icon)),
-            )
-            .into_any_element()
-        } else {
-            div()
-                .size(px(14.))
-                .text_color(if failed { ui.danger } else { ui.text_faint })
-                .child(Icon::from(icon))
-                .into_any_element()
-        };
+        let glyph: AnyElement = div()
+            .size(px(14.))
+            .text_color(if failed {
+                ui.danger
+            } else if terminal {
+                ui.text_faint
+            } else {
+                ui.text_muted
+            })
+            .child(Icon::from(icon))
+            .into_any_element();
         let first_line = r.args.lines().next().unwrap_or("").trim().to_string();
         let head = div()
             .id(("chip", id))
@@ -727,8 +740,8 @@ impl Render for TranscriptView {
             .iter()
             .map(|row| match row {
                 Row::User { id, text, images } => self.user_row(*id, text, images, &ui),
-                Row::Agent { id, state, raw, streaming, last, at } => {
-                    self.agent_row(*id, state, raw, *streaming, *last, at, &ui, cx)
+                Row::Agent { id, state, raw, streaming, last, at, images } => {
+                    self.agent_row(*id, state, raw, *streaming, *last, at, images, &ui, cx)
                 }
                 Row::Activity { first_id, items, collapsed } => {
                     self.activity_row(*first_id, items, *collapsed, &ui, cx)
@@ -798,6 +811,77 @@ fn diff_block(id: impl Into<ElementId>, text: &str) -> AnyElement {
         .overflow_hidden()
         .child(TextView::markdown(id, md).selectable(true))
         .into_any_element()
+}
+
+const IMAGE_EXTS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "webp", "bmp"];
+
+fn is_image_path(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    IMAGE_EXTS.iter().any(|e| lower.ends_with(&format!(".{e}")))
+}
+
+/// Resolve a path the agent mentioned against the thread cwd (then the
+/// project root); only existing files count.
+fn resolve_local(raw: &str, cwd: &std::path::Path, root: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    let raw = raw.trim().trim_start_matches("file://");
+    let p = std::path::Path::new(raw);
+    let candidates = if p.is_absolute() {
+        vec![p.to_path_buf()]
+    } else {
+        let mut v = vec![cwd.join(p)];
+        if let Some(r) = root {
+            v.push(r.join(p));
+        }
+        v
+    };
+    candidates.into_iter().find(|c| c.is_file())
+}
+
+/// Image files referenced in a reply: markdown images/links and bare paths.
+fn local_images(text: &str, cwd: &std::path::Path, root: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    let mut push = |cand: &str| {
+        let cand = cand.trim_matches(|c: char| matches!(c, '`' | '*' | '"' | '\'' | '(' | ')' | '<' | '>' | ',' | '.' | ':' | ';'));
+        if !is_image_path(cand) || cand.starts_with("http") {
+            return;
+        }
+        if let Some(p) = resolve_local(cand, cwd, root) {
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    };
+    // markdown targets: ![alt](path) and [text](path)
+    let mut rest = text;
+    while let Some(i) = rest.find("](") {
+        let after = &rest[i + 2..];
+        if let Some(j) = after.find(')') {
+            push(&after[..j]);
+            rest = &after[j + 1..];
+        } else {
+            break;
+        }
+    }
+    for token in text.split_whitespace() {
+        push(token);
+    }
+    out
+}
+
+fn open_path(path: &std::path::Path) {
+    let _ = std::process::Command::new("open").arg(path).spawn();
+}
+
+/// Links in replies: web links open in the browser; relative paths open the
+/// local file (Finder's -50 came from treating `images/1.jpg` as a URL).
+fn open_link(href: &str, cwd: &std::path::Path, cx: &mut App) {
+    if href.starts_with("http://") || href.starts_with("https://") || href.starts_with("mailto:") {
+        cx.open_url(href);
+    } else if let Some(p) = resolve_local(href, cwd, None) {
+        open_path(&p);
+    } else {
+        cx.open_url(href);
+    }
 }
 
 fn mono_block(text: &str, mono: &SharedString, color: Hsla, ui: &Ui) -> AnyElement {

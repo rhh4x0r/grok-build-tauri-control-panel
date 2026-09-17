@@ -46,6 +46,9 @@ pub struct SpawnOptions {
     pub isolate_worktree: bool,
     /// The real project folder (thread cwd may be a worktree derived from it).
     pub project_root: Option<String>,
+    /// Reasoning effort (low | medium | high) for backends that take one;
+    /// Grok passes it as `--reasoning-effort` to `grok agent stdio`.
+    pub effort: Option<String>,
 }
 
 impl Default for SpawnOptions {
@@ -72,6 +75,7 @@ impl Default for SpawnOptions {
             trust_repo: false,
             isolate_worktree: true,
             project_root: None,
+            effort: None,
         }
     }
 }

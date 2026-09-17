@@ -12,6 +12,8 @@ async-channel = "2"
 base64 = "0.22"
 bomb_core = { path = "../bomb_core" }
 chrono.workspace = true
+gpui-wry = "=0.6.1"
+wry = { package = "lb-wry", version = "=0.53.3" }
 gpui-kit = { version = "=0.6.1", features = ["tree-sitter-diff", "tree-sitter-rust", "tree-sitter-typescript", "tree-sitter-tsx", "tree-sitter-javascript", "tree-sitter-bash", "tree-sitter-markdown", "tree-sitter-markdown-inline", "tree-sitter-toml", "tree-sitter-python", "tree-sitter-yaml"] }
 grok_cli_wrapper = { path = "../grok_cli_wrapper" }
 grok_config = { path = "../grok_config" }

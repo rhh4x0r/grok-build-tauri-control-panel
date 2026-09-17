@@ -47,6 +47,8 @@ pub struct ComposerPrefs {
     pub mode: String,
     pub worktree: bool,
     pub mcp_servers: Vec<String>,
+    /// low | medium | high (Grok only today).
+    pub effort: String,
 }
 
 impl Default for ComposerPrefs {
@@ -57,6 +59,7 @@ impl Default for ComposerPrefs {
             mode: "plan".into(),
             worktree: true,
             mcp_servers: Vec::new(),
+            effort: "high".into(),
         }
     }
 }
@@ -567,6 +570,7 @@ impl AppModel {
                     isolate_worktree: prefs.worktree,
                     project_root: Some(cwd.clone()),
                     mcp_server_names: prefs.mcp_servers.clone(),
+                    effort: Some(prefs.effort.clone()),
                     ..Default::default()
                 };
                 spawn_service(
@@ -679,6 +683,11 @@ impl AppModel {
         } else {
             self.prefs.mcp_servers.push(name.to_string());
         }
+        cx.notify();
+    }
+
+    pub fn set_effort(&mut self, effort: &str, cx: &mut Context<Self>) {
+        self.prefs.effort = effort.to_string();
         cx.notify();
     }
 
