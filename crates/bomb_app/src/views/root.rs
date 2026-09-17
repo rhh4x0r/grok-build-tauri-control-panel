@@ -29,6 +29,8 @@ pub struct RootView {
     preview_open: bool,
     settings: Option<Entity<crate::views::settings::SettingsView>>,
     settings_open: bool,
+    foundry: Option<Entity<crate::views::foundry::FoundryView>>,
+    foundry_open: bool,
     _mode_shortcut: Subscription,
 }
 
@@ -41,6 +43,8 @@ impl RootView {
                 this.model.update(cx, |m, _| m.review_open = false);
                 this.preview.update(cx, |panel, cx| panel.reveal_file(path, cx));
             }
+            let close = this.model.update(cx, |m,_| std::mem::take(&mut m.foundry_close));
+            if close { this.foundry_open = false; }
             cx.notify();
         }).detach();
         let sidebar = cx.new(|cx| SidebarView::new(model.clone(), window, cx));
@@ -79,6 +83,8 @@ impl RootView {
             preview_open: false,
             settings: None,
             settings_open: false,
+            foundry: None,
+            foundry_open: false,
         }
     }
 
@@ -183,6 +189,10 @@ impl Render for RootView {
         crate::theme::follow_system(window, cx);
         self.drain_toasts(window, cx);
         let ui = Ui::of(cx);
+        if let Some(text) = self.model.update(cx, |m,_| m.foundry_insert.take()) {
+            self.foundry_open = false;
+            self.thread.update(cx, |t,cx|t.set_foundry_prompt(text,window,cx));
+        }
         let model = self.model.clone();
         let m2 = self.model.clone();
         let m3 = self.model.clone();
@@ -196,11 +206,13 @@ impl Render for RootView {
             }))
             .on_action(cx.listener(|this, _: &crate::actions::NewWorkspaceConversation, window, cx| {
                 this.settings_open = false;
+                this.foundry_open = false;
                 this.model.update(cx, |m, cx| m.new_workspace_thread(cx));
                 this.thread.update(cx, |t, cx| t.focus_composer(window, cx));
             }))
             .on_action(cx.listener(|this, _: &crate::actions::OpenHome, window, cx| {
                 this.settings_open = false;
+                this.foundry_open = false;
                 this.preview_open = false;
                 this.model.update(cx, |m, cx| m.open_home(cx));
                 this.thread.update(cx, |t, cx| t.focus_composer(window, cx));
@@ -208,6 +220,7 @@ impl Render for RootView {
             }))
             .on_action(cx.listener(move |this, _: &NewThread, window, cx| {
                 this.settings_open = false;
+                this.foundry_open = false;
                 m2.update(cx, |m, cx| m.new_thread(cx));
                 this.thread.update(cx, |t, cx| t.focus_composer(window, cx));
             }))
@@ -222,6 +235,16 @@ impl Render for RootView {
             }))
             .on_action(cx.listener(|this, _: &StopTurn, _, cx| {
                 this.model.update(cx, |m, cx| m.cancel_selected(cx));
+            }))
+            .on_action(cx.listener(|this, _: &crate::actions::OpenFoundry, window, cx| {
+                if this.foundry.is_none() { this.foundry = Some(cx.new(|cx| crate::views::foundry::FoundryView::new(this.model.clone(), window, cx))); }
+                if let Some(text) = this.model.update(cx, |m,_|m.foundry_request.take()) {
+                    if let Some(v)=&this.foundry {v.update(cx,|v,cx|v.seed(text,window,cx));}
+                }
+                if this.model.update(cx, |m,_| std::mem::take(&mut m.foundry_show_runs)) {
+                    if let Some(v)=&this.foundry {v.update(cx,|v,cx|v.show_runs(cx));}
+                }
+                this.foundry_open = true; this.settings_open = false; cx.notify();
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 if this.settings.is_none() {
@@ -335,7 +358,7 @@ impl Render for RootView {
                                 .child(self.sidebar.clone()),
                         )
                     })
-                    .child(resizable_panel().child(self.thread.clone()))
+                    .child(resizable_panel().child(if self.foundry_open { self.foundry.clone().unwrap().into_any_element() } else { self.thread.clone().into_any_element() }))
                     .when(self.model.read(cx).review_open, |el| {
                         el.child(resizable_panel().size(px(480.)).size_range(px(320.)..px(1000.)).child(self.review.clone()))
                     })

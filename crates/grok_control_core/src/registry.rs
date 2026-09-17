@@ -549,6 +549,13 @@ impl SessionRegistry {
         Ok(())
     }
 
+    pub async fn send_foundry_prompt(&self, id: Uuid, prompt: &str, attempt: String) -> Result<()> {
+        let client = self.sessions.get(&id).ok_or(CoreError::SessionNotFound(id))?.acp_client.clone().ok_or(CoreError::NotAcp)?;
+        self.event_bus.emit_status(id, SessionStatus::Running).await;
+        client.send_prompt_correlated(prompt, &[], Some(attempt)).await?;
+        Ok(())
+    }
+
     pub async fn cancel_session(&self, id: Uuid) -> Result<()> {
         let (acp, has_child) = {
             let mut entry = self

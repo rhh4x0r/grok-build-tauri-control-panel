@@ -7,6 +7,7 @@ description = "Bomb Code — GPUI desktop control panel for ACP coding agents"
 default-run = "bomb_app"
 
 [dependencies]
+bomb_foundry = { path = "../bomb_foundry" }
 anyhow.workspace = true
 async-channel = "2"
 base64 = "0.22"

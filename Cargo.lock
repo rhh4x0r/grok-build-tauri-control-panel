@@ -726,6 +726,7 @@ dependencies = [
  "async-channel",
  "base64 0.22.1",
  "bomb_core",
+ "bomb_foundry",
  "chrono",
  "gpui-kit",
  "gpui-wry",
@@ -754,6 +755,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "bomb_foundry",
  "chrono",
  "grok_acp",
  "grok_cli_wrapper",
@@ -777,6 +779,18 @@ dependencies = [
  "tracing",
  "uuid",
  "vt100",
+]
+
+[[package]]
+name = "bomb_foundry"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]

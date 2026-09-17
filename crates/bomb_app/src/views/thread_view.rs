@@ -85,6 +85,10 @@ impl ThreadView {
         cx.notify();
     }
 
+    pub fn set_foundry_prompt(&self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer.update(cx, |c,cx| c.set_text(&text,window,cx));
+    }
+
     pub fn focus_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.composer.update(cx, |c, cx| c.focus(window, cx));
     }
@@ -635,6 +639,11 @@ impl Render for ThreadView {
             .flex()
             .flex_col()
             .child(self.header(&thread, &ui, cx))
+            .when_some(crate::runtime::services(cx).foundry.for_thread(&tid), |el,run| {
+                el.child(div().flex().items_center().gap_2().px_4().py_2().border_b_1().border_color(ui.border)
+                    .child(div().flex_1().text_sm().child(format!("Foundry · {:?} · {} / {} · {}",run.status,(run.cursor+1).min(run.document.graph.nodes.len()),run.document.graph.nodes.len(),run.current().map(|n|n.title.as_str()).unwrap_or("Finished"))))
+                    .child(Button::new("open-foundry-run").ghost().small().label("Stages & controls").on_click(cx.listener(|v,_,window,cx| { v.model.update(cx, |m,_| m.foundry_show_runs = true); window.dispatch_action(Box::new(crate::actions::OpenFoundry),cx); }))))
+            })
             .when(self.search_open, |el| el.child(self.find_bar(&ui, cx)))
             .child(fade_in(
                 SharedString::from(format!("transcript-{tid}")),

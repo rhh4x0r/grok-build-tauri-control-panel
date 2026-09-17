@@ -6,6 +6,7 @@ license.workspace = true
 description = "Bomb Code — framework-free application core (state, services, transcript reducer)"
 
 [dependencies]
+bomb_foundry = { path = "../bomb_foundry" }
 anyhow.workspace = true
 base64 = "0.22"
 chrono.workspace = true

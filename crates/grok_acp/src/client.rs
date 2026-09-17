@@ -1279,6 +1279,10 @@ impl AcpClient {
         prompt: &str,
         images: &[PromptImage],
     ) -> Result<()> {
+        self.send_prompt_correlated(prompt, images, None).await
+    }
+
+    pub async fn send_prompt_correlated(&self, prompt: &str, images: &[PromptImage], correlation: Option<String>) -> Result<()> {
         let sid = self
             .session_id
             .read()
@@ -1509,6 +1513,8 @@ impl AcpClient {
                                     "stream": "acp",
                                     "line": format!("← session/prompt complete · stopReason={stop}"),
                                     "turn_complete": stop != "cancelled",
+                                    "correlation": correlation,
+                                    "stop_reason": stop,
                                 }),
                             });
                             bus.emit_status(control_id, SessionStatus::Idle).await;

@@ -24,3 +24,5 @@ pub mod image_actions;
 pub mod speed;
 
 mod terminal;
+
+pub mod foundry;

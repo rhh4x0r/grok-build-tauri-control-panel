@@ -55,6 +55,7 @@ where
 pub fn start_bridge(cx: &mut App, model: WeakEntity<AppModel>) {
     let bus = cx.global::<Services>().0.event_bus.clone();
     let db = cx.global::<Services>().0.persistence.clone();
+    let foundry = cx.global::<Services>().0.foundry.clone();
     let (tx, rx) = async_channel::unbounded::<ControlEvent>();
     cx.global::<Tokio>().0.spawn(async move {
         let mut sub = bus.subscribe();
@@ -63,7 +64,10 @@ pub fn start_bridge(cx: &mut App, model: WeakEntity<AppModel>) {
                 Ok(ev) => {
                     // Durable copy first (agent text, tools, plans, images,
                     // status), so a restart restores the whole thread.
-                    bomb_core::services::persist_control_event(&db, &ev);
+                    let transient = serde_json::to_value(&ev).ok().and_then(|v|v.get("session_id").and_then(|v|v.as_str()).map(|s|foundry.transient_child(s))).unwrap_or(false);
+                    if !transient { bomb_core::services::persist_control_event(&db, &ev); }
+                    let internal = serde_json::to_value(&ev).ok().and_then(|v|v.get("session_id").and_then(|v|v.as_str()).map(|s|foundry.child(s))).unwrap_or(false);
+                    if internal { continue; }
                     if tx.send(ev).await.is_err() {
                         break;
                     }

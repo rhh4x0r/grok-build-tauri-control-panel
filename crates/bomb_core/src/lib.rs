@@ -18,3 +18,5 @@ pub use grok_events::{ControlEvent, EventBus};
 pub use state::AppState;
 
 pub mod terminal;
+
+pub mod foundry;

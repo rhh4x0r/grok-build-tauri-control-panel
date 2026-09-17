@@ -91,6 +91,10 @@ pub struct AppModel {
     pub threads: HashMap<Uuid, Entity<ThreadModel>>,
     pub selected: Option<Uuid>,
     pub new_thread_open: bool,
+    pub foundry_request: Option<String>,
+    pub foundry_insert: Option<String>,
+    pub foundry_close: bool,
+    pub foundry_show_runs: bool,
     pub file_reveal_request: Option<std::path::PathBuf>,
     pub auth: Vec<BackendAuth>,
     /// Account usage limits (5h / weekly) per backend, refreshed slowly.
@@ -135,6 +139,10 @@ impl AppModel {
             threads: HashMap::new(),
             selected: None,
             new_thread_open: false,
+            foundry_request: None,
+            foundry_insert: None,
+            foundry_close: false,
+            foundry_show_runs: false,
             file_reveal_request: None,
             auth: Vec::new(),
             usage: Vec::new(),
@@ -799,7 +807,7 @@ impl AppModel {
                 }
                 ControlEvent::McpChanged { .. } => self.refresh_mcp_names(cx),
                 ControlEvent::Raw { payload, .. }
-                    if payload.get("channel").and_then(|c| c.as_str()) == Some("provider_commands") =>
+                    if matches!(payload.get("channel").and_then(|c| c.as_str()), Some("provider_commands" | "foundry")) =>
                 {
                     // The composer observes AppModel; refresh its advertised command menu.
                     cx.notify();

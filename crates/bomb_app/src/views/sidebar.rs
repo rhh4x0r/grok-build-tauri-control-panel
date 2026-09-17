@@ -763,7 +763,7 @@ impl SidebarView {
 }
 
 impl Render for SidebarView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = Ui::of(cx);
         let groups = self.model.read(cx).groups(cx);
         let auth = self.model.read(cx).auth.clone();
@@ -823,6 +823,7 @@ impl Render for SidebarView {
                             }),
                     ),
             )
+            .child(Button::new("sidebar-foundry").ghost().small().label("Foundry").on_click(|_,window,cx|window.dispatch_action(Box::new(crate::actions::OpenFoundry),cx)))
             .child(self.header(&ui, cx))
             .child(div().flex().gap_1().px(px(Layout::SPACE_SM)).pb(px(Layout::SPACE_SM))
                 .child(Button::new("sidebar-add-project").ghost().small().icon(Lucide::FolderPlus).label("Add project")
@@ -833,6 +834,7 @@ impl Render for SidebarView {
             .child(
                 div()
                     .id("thread-list")
+                    .min_h_0()
                     .flex_1()
                     .overflow_y_scroll()
                     .flex()
@@ -860,6 +862,10 @@ impl Render for SidebarView {
             )
             .child(
                 div()
+                    .id("services-scroll")
+                    .flex_shrink_0()
+                    .max_h(window.viewport_size().height * 0.45)
+                    .overflow_y_scroll()
                     .border_t_1()
                     .border_color(ui.border)
                     .py_2()

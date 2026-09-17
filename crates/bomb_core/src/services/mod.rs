@@ -682,7 +682,13 @@ pub async fn send_prompt(
     effort: Option<String>,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
+    if state.foundry.for_thread(&id.to_string()).is_some_and(|r| !matches!(r.status, bomb_foundry::RunStatus::Completed | bomb_foundry::RunStatus::Stopped)) {
+        return Err("This thread has a Foundry run. Stop the run before sending a separate prompt.".into());
+    }
     let _gate = state.workspace_gate.lock().await;
+    let cwd = state.registry.get_snapshot(id).ok().map(|s|s.metadata.cwd)
+        .or_else(||state.persistence.get_session(id).ok().map(|s|s.cwd));
+    if cwd.as_deref().is_some_and(|cwd|state.foundry.owns_cwd(cwd)) { return Err("A Foundry run owns this folder. Stop it before sending another prompt.".into()); }
     let workspace = state.persistence.workspace_for_session(id).map_err(err)?;
     if let Some(w) = &workspace {
         if w.archived_at.is_some() {
@@ -1183,6 +1189,7 @@ fn build_transcript_context(state: &AppState, id: Uuid) -> Option<String> {
 }
 
 pub async fn cancel_session(state: &AppState, id: String) -> Result<(), String> {
+    if let Some(child)=state.foundry.stop_thread(&id)? { state.registry.cancel_session(child).await.map_err(err)?; }
     let id = Uuid::parse_str(&id).map_err(err)?;
     state.registry.cancel_session(id).await.map_err(err)?;
     persist_session(state, id).await;
@@ -1195,6 +1202,7 @@ pub async fn remove_session(
     remove_worktree: Option<bool>,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
+    if let Some(child)=state.foundry.stop_thread(&id.to_string())? { state.registry.cancel_session(child).await.map_err(err)?; }
     // Capture worktree context before the records disappear.
     let wt_ctx = if remove_worktree.unwrap_or(false)
         && state
@@ -1398,6 +1406,7 @@ pub async fn respond_approval(
     option_id: Option<String>,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
+    let id = state.foundry.approval_session(id);
     state
         .registry
         .respond_approval(id, &request_id, option_id.as_deref())
@@ -2219,6 +2228,7 @@ fn build_thread_list_all(state: &AppState) -> Vec<ThreadDto> {
         }
     }
 
+    out.retain(|t| !state.foundry.child(&t.id));
     out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     out
 }

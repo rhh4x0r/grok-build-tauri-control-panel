@@ -14,6 +14,7 @@ members = [
     "crates/grok_scheduler",
     "crates/grok_persistence",
     "crates/grok_diff",
+    "crates/bomb_foundry",
     "crates/bomb_core",
     "crates/bomb_app",
 ]

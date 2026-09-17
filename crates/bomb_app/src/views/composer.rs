@@ -1334,6 +1334,13 @@ impl Render for ComposerView {
             .items_center()
             .px_6()
             .pb_4()
+            .child(div().flex().gap_2()
+                .child(Button::new("improve-prompt").ghost().small().label("Improve prompt").on_click(cx.listener(|this,_,window,cx| {
+                    let text=this.input.read(cx).value().to_string();
+                    this.model.update(cx,|m,_|m.foundry_request=Some(text));
+                    window.dispatch_action(Box::new(crate::actions::OpenFoundry),cx);
+                })))
+                .child(Button::new("use-foundry-skill").ghost().small().label("Use skill").on_click(|_,window,cx|window.dispatch_action(Box::new(crate::actions::OpenFoundry),cx))))
             .on_action(cx.listener(|this, _: &CycleApprovalMode, _, cx| {
                 this.model.update(cx, |m, cx| m.cycle_mode(cx));
                 cx.stop_propagation();
