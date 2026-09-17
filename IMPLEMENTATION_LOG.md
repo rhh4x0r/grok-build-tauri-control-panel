@@ -313,3 +313,9 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 - Moved the Bomb Code wordmark from the title bar to a clickable row above the sidebar's selected project folder.
 - Clicking the wordmark returns to the welcome screen, deselecting the active project/conversation and closing review/preview panels without removing saved content.
 - Validation: workspace check, strict all-target Clippy, development build, and diff whitespace checks passed. Live UI verification remains unavailable after the earlier Computer Use access denial.
+
+## 2026-09-17 — Simplify conversation toolbar
+- Unified toolbar actions with 12px labels, 28px controls, and compact icons. Removed redundant saved/live text, the inline branch/commit counters, and the dev URL from the conversation header.
+- Renamed Conversation to New chat and Review / Ship to Changes, with a nonzero file count and branch details in a tooltip. Moved Update into the overflow menu with an explicit default-branch merge label.
+- Renamed the preview control to Dev sidebar with a right-panel icon. Opening it now only toggles the panel; Start server / Stop server lives inside the panel, and its empty-state instructions match.
+- Validation: workspace check, strict all-target Clippy, development build, and diff whitespace checks passed. Live visual verification remains unavailable following the earlier Computer Use access denial.

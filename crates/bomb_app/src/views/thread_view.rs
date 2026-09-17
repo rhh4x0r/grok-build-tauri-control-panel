@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::{Icon, Sizable};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -288,94 +289,95 @@ impl ThreadView {
             .as_deref()
             .and_then(|w| std::path::Path::new(w).file_name())
             .map(|s| s.to_string_lossy().to_string());
-        let live = t.meta.live;
-        let brain = t.meta.brain_mode.clone();
-        let dev = self.model.read(cx).dev_server.clone();
-        let dev_running = dev.as_ref().map(|d| d.running).unwrap_or(false);
-        let dev_url = dev.as_ref().and_then(|d| d.url.clone());
         let app = self.model.clone();
-        let hover = ui.hover;
-
-        let chip = |id: &'static str, label: String, ui: &Ui| {
-            div()
-                .id(id)
-                .flex()
-                .items_center()
-                .gap_1()
-                .h(px(24.))
-                .px_2()
-                .rounded(px(6.))
-                .text_xs()
+        let review = self.model.read(cx).review.as_ref();
+        let changes_label = review
+            .filter(|r| !r.files.is_empty())
+            .map(|r| format!("Changes · {}", r.files.len()))
+            .unwrap_or_else(|| "Changes".into());
+        let changes_hint = review
+            .map(|r| format!("View file changes · {} · {} commits ahead, {} behind", r.branch, r.ahead, r.behind))
+            .unwrap_or_else(|| format!("View file changes in {}", branch.unwrap_or_else(|| "this workspace".into())));
+        let action = |id: &'static str, label: &str, icon: Lucide| {
+            Button::new(id)
+                .ghost()
+                .compact()
+                .small()
+                .h(px(28.))
+                .text_size(px(12.))
+                .font_weight(FontWeight::NORMAL)
                 .text_color(ui.text_muted)
-                .cursor_pointer()
-                .hover(move |s| s.bg(hover))
-                .child(label)
+                .icon(Icon::from(icon).size(px(14.)))
+                .accessibility_label(if label.is_empty() { "More workspace actions" } else { label })
+                .when(!label.is_empty(), |button| button.child(
+                    div().text_size(px(12.)).font_weight(FontWeight::NORMAL).child(label.to_string()),
+                ))
         };
 
         div()
             .flex()
             .items_center()
-            .gap_2()
-            .flex_wrap().min_h(px(Layout::HEADER)).py_1()
+            .gap_1()
+            .flex_wrap()
+            .min_h(px(Layout::HEADER))
+            .py_1()
             .px_4()
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_1()
-                    .text_xs()
+                    .gap_1p5()
+                    .text_size(px(12.))
                     .text_color(ui.text_faint)
                     .child(crate::views::brand::brand_mark(&backend, 13., true, ui))
-                    .child(if model.is_empty() { backend.clone() } else { model })
-                    .child("·")
-                    .child(if live { brain.unwrap_or_else(|| "live".into()) } else { "saved".into() }),
+                    .child(if model.is_empty() { backend } else { model }),
             )
             .child(div().flex_1())
-            .child(chip("new-workspace-thread", "+ Conversation".into(), ui).on_click({
-                let app = app.clone(); move |_, _, cx| app.update(cx, |m, cx| m.new_workspace_thread(cx))
-            }))
-            .when(!has_worktree, |el| el.child(chip("inline-convert", "Make changes…".into(), ui).on_click({
-                let app = app.clone(); move |_, _, cx| app.update(cx, |m, cx| m.workspace_from_inline(cx))
-            })))
-            .when(has_worktree, |el| {
-                let app_land = app.clone();
-                let app_sync = app.clone();
-                el.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .text_xs()
-                        .text_color(ui.text_faint)
-                        .child(div().size(px(11.)).child(Icon::from(Lucide::GitBranch)))
-                        .max_w(px(280.)).overflow_hidden().text_ellipsis().whitespace_nowrap()
-                        .child(self.model.read(cx).review.as_ref().map(|r| format!("{} · ↑{} ↓{} · {} files", r.branch, r.ahead, r.behind, r.files.len())).unwrap_or_else(|| branch.clone().unwrap_or_default())),
-                )
-                .child(Button::new("workspace-update").ghost().small().label("Update").on_click(move |_, _, cx| {
-                    if let Some(id) = id {
-                        app_sync.update(cx, |m, cx| m.sync_thread(id, cx));
-                    }
+            .child(action("new-workspace-thread", "New chat", Lucide::Plus)
+                .tooltip("Start a new conversation in this workspace")
+                .on_click({
+                    let app = app.clone();
+                    move |_, _, cx| app.update(cx, |m, cx| m.new_workspace_thread(cx))
                 }))
-                .child(Button::new("workspace-review").ghost().small().label("Review / Ship").on_click(move |_, _, cx| {
-                    if let Some(id) = id {
-                        app_land.update(cx, |m, cx| m.land_thread(id, cx));
-                    }
-                }))
-            })
-            .child(
-                chip(
-                    "dev-preview",
-                    if dev_running { "Preview".into() } else { "Dev server".into() },
-                    ui,
-                )
-                .child(div().size(px(12.)).child(Icon::from(if dev_running { Lucide::AppWindow } else { Lucide::Play })))
+            .when(!has_worktree, |el| el.child(
+                action("inline-convert", "Make changes", Lucide::GitBranch)
+                    .tooltip("Create a workspace to make changes to this project")
+                    .on_click({
+                        let app = app.clone();
+                        move |_, _, cx| app.update(cx, |m, cx| m.workspace_from_inline(cx))
+                    }),
+            ))
+            .when(has_worktree, |el| el.child(
+                action("workspace-review", &changes_label, Lucide::GitBranch)
+                    .tooltip(changes_hint)
+                    .on_click({
+                        let app = app.clone();
+                        move |_, _, cx| {
+                            if let Some(id) = id {
+                                app.update(cx, |m, cx| m.land_thread(id, cx));
+                            }
+                        }
+                    }),
+            ))
+            .child(div().w(px(1.)).h(px(14.)).mx_1().bg(ui.border))
+            .child(action("dev-preview", "Dev sidebar", Lucide::PanelRight)
+                .tooltip("Show or hide the development preview and server controls")
                 .on_click(|_, window, cx| {
                     window.dispatch_action(Box::new(crate::actions::ToggleDevPreview), cx)
-                }),
-            )
-            .when_some(dev_url.filter(|_| dev_running), |el, url| {
-                el.child(div().text_xs().font_family(ui.mono.clone()).text_color(ui.text_faint).child(url))
-            })
+                }))
+            .when(has_worktree, |el| el.child(
+                action("workspace-more", "", Lucide::Ellipsis)
+                    .tooltip("More workspace actions")
+                    .dropdown_menu(move |menu, _, _| {
+                        let app = app.clone();
+                        menu.item(PopupMenuItem::new("Merge latest default branch into workspace")
+                            .on_click(move |_, _, cx| {
+                                if let Some(id) = id {
+                                    app.update(cx, |m, cx| m.sync_thread(id, cx));
+                                }
+                            }))
+                    }),
+            ))
     }
 }
 

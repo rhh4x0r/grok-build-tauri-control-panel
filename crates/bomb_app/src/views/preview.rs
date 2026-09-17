@@ -9,7 +9,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::actions::ToggleDevPreview;
-use crate::models::app::{AppModel, ToastKind};
+use crate::models::app::AppModel;
 use crate::theme::Ui;
 
 pub struct PreviewPanel {
@@ -128,19 +128,12 @@ impl Render for PreviewPanel {
                         let app = app.clone();
                         move |_, _, cx| app.update(cx, |m, cx| m.dev_server_open(cx))
                     }))
-                    .child(icon_button("preview-stop", Lucide::Square, ui.text_muted).on_click({
-                        let app = app.clone();
-                        move |_, _, cx| {
-                            app.update(cx, |m, cx| {
-                                if m.dev_server.as_ref().map(|s| s.running).unwrap_or(false) {
-                                    m.dev_server_toggle(cx);
-                                } else {
-                                    m.toast(ToastKind::Info, "Dev server is not running");
-                                    cx.notify();
-                                }
-                            })
-                        }
-                    }))
+                    .child(Button::new("preview-server-toggle").ghost().small()
+                        .label(if running { "Stop server" } else { "Start server" })
+                        .on_click({
+                            let app = app.clone();
+                            move |_, _, cx| app.update(cx, |m, cx| m.dev_server_toggle(cx))
+                        }))
                     .child(icon_button("preview-close", Lucide::X, ui.text_muted).on_click(
                         |_, window, cx| window.dispatch_action(Box::new(ToggleDevPreview), cx),
                     )),
@@ -162,7 +155,7 @@ impl Render for PreviewPanel {
                                     Some(e) => format!("Could not create the preview: {e}"),
                                     None if running => "Waiting for the server to report its URL…".into(),
                                     None => if message.is_empty() {
-                                        "Start the dev server from the thread header to preview it here.".into()
+                                        "Click Start server above to preview your app here.".into()
                                     } else {
                                         message
                                     },

@@ -211,15 +211,7 @@ impl Render for RootView {
                 let from_review = this.model.read(cx).review_open;
                 this.model.update(cx, |m, cx| { m.review_open = false; cx.notify(); });
                 if from_review { this.preview_open = false; }
-                let running = this.model.read(cx).dev_server.as_ref().map(|s| s.running).unwrap_or(false);
-                if !this.preview_open {
-                    this.preview_open = true;
-                    if !running {
-                        this.model.update(cx, |m, cx| m.dev_server_toggle(cx));
-                    }
-                } else {
-                    this.preview_open = false;
-                }
+                this.preview_open = !this.preview_open;
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleExplainer, _, cx| {
