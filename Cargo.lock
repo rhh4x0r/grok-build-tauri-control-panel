@@ -705,6 +705,7 @@ dependencies = [
  "bomb_core",
  "chrono",
  "gpui-kit",
+ "grok_cli_wrapper",
  "grok_config",
  "grok_control_core",
  "grok_events",

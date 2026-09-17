@@ -13,6 +13,7 @@ base64 = "0.22"
 bomb_core = { path = "../bomb_core" }
 chrono.workspace = true
 gpui-kit = { version = "=0.6.1", features = ["tree-sitter-diff", "tree-sitter-rust", "tree-sitter-typescript", "tree-sitter-tsx", "tree-sitter-javascript", "tree-sitter-bash", "tree-sitter-markdown", "tree-sitter-markdown-inline", "tree-sitter-toml", "tree-sitter-python", "tree-sitter-yaml"] }
+grok_cli_wrapper = { path = "../grok_cli_wrapper" }
 grok_config = { path = "../grok_config" }
 grok_control_core = { path = "../grok_control_core" }
 grok_events = { path = "../grok_events" }
