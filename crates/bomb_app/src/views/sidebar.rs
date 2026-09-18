@@ -108,66 +108,6 @@ impl SidebarView {
         }
     }
 
-    /// Selected project folder and switcher; labeled create actions sit below.
-    fn header(&self, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
-        let projects = self.model.read(cx).projects.clone();
-        let model = self.model.clone();
-        let project = self
-            .model
-            .read(cx)
-            .active_project
-            .as_deref()
-            .map(project_name)
-            .unwrap_or_else(|| "All projects".into());
-        div()
-            .flex()
-            .items_center()
-            .gap(px(Layout::SPACE_XS))
-            .px(px(Layout::SPACE_SM))
-            .pt(px(Layout::SPACE_SM))
-            .pb(px(Layout::SPACE_XS))
-            .child(
-                Button::new("project-menu")
-                    .ghost()
-                    .compact()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(Layout::SPACE_SM))
-                            .h(px(29.))
-                            .child(div().size(px(16.)).text_color(ui.text_muted).child(Icon::from(Lucide::Folder)))
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .text_size(px(13.))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(ui.text)
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .whitespace_nowrap()
-                                    .child(project),
-                            )
-                            .child(div().size(px(14.)).text_color(Ui::alpha(ui.text_muted, 0.6)).child(Icon::from(Lucide::ChevronDown))),
-                    )
-                    .dropdown_menu(move |mut menu, _, _| {
-                        for p in &projects {
-                            let m = model.clone();
-                            let root = p.clone();
-                            menu = menu.item(PopupMenuItem::new(project_name(p)).on_click(move |_, _, cx| {
-                                m.update(cx, |a, cx| a.set_active_project(root.clone(), cx));
-                            }));
-                        }
-                        menu = menu.separator();
-                        let m = model.clone();
-                        menu.item(PopupMenuItem::new("Open project…").on_click(move |_, _, cx| {
-                            m.update(cx, |a, cx| a.open_project(cx));
-                        }))
-                    }),
-            )
-
-    }
-
     /// A project section: disclosure header (folder mark, name, hairline,
     /// `+`, chevron) at 28px, then its workspace and conversation rows 2px
     /// apart. Git state shows as one 11px subline only when it says something.
@@ -826,7 +766,6 @@ impl Render for SidebarView {
                             }),
                     ),
             )
-            .child(self.header(&ui, cx))
             .child(div().flex().gap_1().px(px(Layout::SPACE_SM)).pb(px(Layout::SPACE_SM))
                 .child(Button::new("sidebar-add-project").ghost().small().icon(Lucide::FolderPlus).label("Add project")
                     .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::actions::OpenProject), cx)))

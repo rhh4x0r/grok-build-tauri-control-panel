@@ -512,3 +512,7 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 - Local merge now works with remotes and remains separate from pushing the default branch. Dynamic default-branch names and no-force pushes are used. Added Git-action progress and periodic local review refresh while Changes is open.
 - Validation: selected-file commit test (including unselected staged changes), workspace integration tests covering direct checkout permissions, existing branches without switching main, archive protection, merge with a local bare remote and separate push; persistence migration tests; Foundry regression suite. Native visual verification remains pending after the prior Computer Use denial.
 - Final workspace check, strict all-target Clippy and development build passed. Updated and reopened the dev bundle.
+
+## 2026-09-17 — Remove redundant sidebar project selector
+- Removed the selected-project dropdown beneath the Bomb Code logo. Project groups, search, Add project and New chat remain available.
+- Workspace check, strict all-target Clippy and development build passed. Native visual verification remains pending.
