@@ -212,7 +212,7 @@ impl ThreadView {
                     .map(|(cur, _)| cur == &id)
                     .unwrap_or(false);
                 if !same {
-                    let view = cx.new(|cx| {let mut view=TranscriptView::new(t.clone(), cx);view.review_loop=Some(self.review_loop.clone());view});
+                    let view = cx.new(|cx| TranscriptView::new(t.clone(), cx));
                     cx.observe(&t, |_, _, cx| cx.notify()).detach();
                     self.transcript = Some((id, view));
                 } else if let Some((_, view)) = &self.transcript {
@@ -536,6 +536,13 @@ impl ThreadView {
                     action("thread-more", "", Lucide::Ellipsis)
                         .tooltip("More thread actions")
                         .dropdown_menu(move |mut menu, _, cx| {
+                            if crate::runtime::services(cx).foundry.for_thread(&thread_id.to_string()).is_some() {
+                                let app = app.clone();
+                                menu = menu.item(PopupMenuItem::new("Review loop results…").on_click(move |_, window, cx| {
+                                    app.update(cx, |m, _| m.foundry_show_runs = true);
+                                    window.dispatch_action(Box::new(crate::actions::OpenFoundry), cx);
+                                }));
+                            }
                             if has_worktree {
                                 let app = app.clone();
                                 menu = menu.item(

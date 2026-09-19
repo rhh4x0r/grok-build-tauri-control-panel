@@ -63,9 +63,17 @@ async fn connect_and_fill(
             }
             let acp_session_id = client.session_id().await;
             let brain_mode = client.brain_mode().await;
+            let selected_model = client.model_catalog().await.current;
             // Never hold a DashMap guard across an await.
             if let Some(mut entry) = sessions.get_mut(&id) {
                 entry.metadata.acp_session_id = acp_session_id;
+                if let Some(model) = selected_model {
+                    if entry.metadata.backend == Backend::Claude
+                        && entry.metadata.model.strip_suffix("[1m]") == Some(model.as_str())
+                    {
+                        entry.metadata.model = model;
+                    }
+                }
                 entry.metadata.brain_mode = brain_mode;
                 entry.metadata.status = SessionStatus::Idle;
                 entry.acp_client = Some(client);

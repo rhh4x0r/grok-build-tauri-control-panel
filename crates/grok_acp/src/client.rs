@@ -1190,17 +1190,16 @@ impl AcpClient {
         };
         let catalog = self.model_catalog().await;
         if !catalog.models.is_empty() {
-            let selected = catalog
-                .models
-                .iter()
-                .find(|m| m.id.eq_ignore_ascii_case(model))
+            let selected = catalog.selection(model, &self.config.backend_label)
                 .ok_or_else(|| {
                     AcpError::Protocol(format!(
                         "The agent does not offer model {model}; refresh the provider model list"
                     ))
                 })?;
-            if let Some(config_id) = catalog.config_id {
-                self.set_config_option(&config_id, &selected.id).await?;
+            if let Some(config_id) = catalog.config_id.as_deref() {
+                self.set_config_option(config_id, &selected.id).await?;
+                let applied = self.config_current.read().await.get(config_id).cloned();
+                self.model_catalog.write().await.current = applied;
             } else if catalog.current.as_deref() != Some(&selected.id) {
                 let sid = self.session_id().await.ok_or(AcpError::SessionNotReady)?;
                 self.request_timeout(
@@ -1208,6 +1207,7 @@ impl AcpClient {
                     Some(json!({"sessionId":sid,"modelId":selected.id})),
                 )
                 .await?;
+                self.model_catalog.write().await.current = Some(selected.id.clone());
             }
         }
         Ok(())

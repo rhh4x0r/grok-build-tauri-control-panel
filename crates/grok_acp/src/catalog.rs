@@ -17,6 +17,17 @@ pub struct AvailableModel {
     pub description: Option<String>,
 }
 impl ModelCatalog {
+    /// Claude can omit its explicit 1M variant when resuming a saved session.
+    /// Only accept the exact same concrete model, never a family/version alias.
+    pub fn selection(&self, requested: &str, backend: &str) -> Option<&AvailableModel> {
+        self.models.iter().find(|m| m.id.eq_ignore_ascii_case(requested)).or_else(|| {
+            if backend != "claude" { return None; }
+            let base = requested.strip_suffix("[1m]")?;
+            if !base.starts_with("claude-") { return None; }
+            self.models.iter().find(|m| m.id.eq_ignore_ascii_case(base))
+        })
+    }
+
     pub fn from_response(value: &Value) -> Option<Self> {
         let config = value.get("configOptions").and_then(Value::as_array).and_then(|options| options.iter().find(|option| {
             option.get("id").and_then(Value::as_str) == Some("model") || option.get("category").and_then(Value::as_str) == Some("model")
@@ -48,6 +59,19 @@ impl ModelCatalog {
 mod tests {
     use super::ModelCatalog;
     use serde_json::json;
+    #[test]
+    fn claude_context_variant_requires_same_concrete_model() {
+        let catalog = ModelCatalog::from_response(&json!({"configOptions":[{"id":"model","options":[
+            {"value":"claude-fable-5-1"},{"value":"opus[1m]"}
+        ]}]})).unwrap();
+        assert_eq!(catalog.selection("claude-fable-5-1[1m]", "claude").unwrap().id, "claude-fable-5-1");
+        assert!(catalog.selection("claude-fable-5-2[1m]", "claude").is_none());
+        assert!(catalog.selection("claude-fable-5-1[1m]", "codex").is_none());
+        assert!(catalog.selection("opus", "claude").is_none());
+        let exact = ModelCatalog::from_response(&json!({"models":{"availableModels":[{"modelId":"claude-fable-5-1[1m]"},{"modelId":"claude-fable-5-1"}]}})).unwrap();
+        assert_eq!(exact.selection("claude-fable-5-1[1m]", "claude").unwrap().id, "claude-fable-5-1[1m]");
+    }
+
     #[test]
     fn reads_exact_aliases_and_names_from_grouped_options_over_legacy_models() {
         let result = ModelCatalog::from_response(&json!({"models":{"availableModels":[{"modelId":"stale"}]},"configOptions":[{"id":"model","currentValue":"opus","options":[{"name":"Claude","options":[{"value":"opus","name":"Claude Opus (available)"},{"value":"sonnet","name":"Claude Sonnet"}]}]}]})).unwrap();

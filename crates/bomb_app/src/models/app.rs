@@ -837,6 +837,9 @@ impl AppModel {
                     if payload.get("channel").and_then(|c| c.as_str()) == Some("thread") =>
                 {
                     if self.selected == Some(*id) && payload.get("kind").and_then(|v| v.as_str()) == Some("model_switch") {
+                        if payload.get("backend").and_then(|v|v.as_str()) == Some(self.prefs.backend.as_str()) {
+                            if let Some(model) = payload.get("model").and_then(|v|v.as_str()) { self.prefs.model = Some(model.to_owned()); }
+                        }
                         if let Some(effort)=payload.get("effort").and_then(|v|v.as_str()) {
                             self.prefs.effort=effort.to_owned();
                             cx.notify();

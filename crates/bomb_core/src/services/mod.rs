@@ -725,6 +725,7 @@ pub async fn send_prompt(
         !t.is_empty()
     });
 
+    let requested_model = want_model.clone();
     let mut switch_notice = None;
     // Switching backend/model mid-thread: restart the thread under the new
     // agent. Cross-agent session/load can't work, so the resume ladder lands
@@ -824,6 +825,12 @@ pub async fn send_prompt(
         state.registry.set_effort(id, effort).await.map_err(err)
     } else { Ok(false) };
     let actual_effort = state.registry.current_effort(id).await;
+    let active = state.registry.get_snapshot(id).map_err(err)?.metadata;
+    let variant_note = requested_model.as_ref().filter(|wanted| active.backend == grok_config::Backend::Claude && wanted.strip_suffix("[1m]").is_some_and(|base| base.eq_ignore_ascii_case(&active.model)))
+        .map(|wanted| format!("Requested {wanted}; this session offers {}. Using its advertised model variant.", active.model));
+    if switch_notice.is_none() && variant_note.is_some() {
+        switch_notice = Some(format!("Switched model: {} · {} → {} · {}.", active.backend.key(), requested_model.as_deref().unwrap_or_default(), active.backend.key(), active.model));
+    }
     if let Some(line) = switch_notice {
         let reasoning = if effort_result.is_err() {
             format!("Reasoning selection could not be applied; current effort: {}. Prompt not sent.", actual_effort.as_deref().unwrap_or("not reported"))
@@ -834,11 +841,11 @@ pub async fn send_prompt(
             (None, Some(requested)) => format!("Reasoning: not reported by this agent (requested {requested})."),
             (None, None) => "Reasoning: not reported by this agent.".into(),
         }};
-        let line = format!("{line} {reasoning}");
+        let line = format!("{line} {} {reasoning}", variant_note.unwrap_or_default());
         state.persistence.append_message(id, "system", &line, Utc::now()).map_err(err)?;
         state.event_bus.emit(ControlEvent::Raw {
             session_id: Some(id),
-            payload: serde_json::json!({"channel":"thread", "kind":"model_switch", "line":line, "effort":actual_effort}),
+            payload: serde_json::json!({"channel":"thread", "kind":"model_switch", "line":line, "effort":actual_effort, "backend":active.backend.key(), "model":active.model}),
         });
     }
     effort_result?;
