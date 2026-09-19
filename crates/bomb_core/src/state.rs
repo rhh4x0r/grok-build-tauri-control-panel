@@ -123,6 +123,14 @@ impl AppState {
         let persistence =
             Arc::new(Persistence::open(persistence_path).context("persistence open")?);
 
+        // One-time compatibility migration; ordinary evaluations read SQLite only.
+        let routing = config.read().await.model_suggestions.clone();
+        if routing.enabled {
+            if let Err(error) = crate::services::model_suggestions::migrate_legacy_key(persistence.clone(), routing.connection).await {
+                warn!(%error, "routing credential migration incomplete");
+            }
+        }
+
         let scheduler = Scheduler::new(event_bus.clone());
         let registry_for_jobs = registry.clone();
         let persistence_for_jobs = persistence.clone();

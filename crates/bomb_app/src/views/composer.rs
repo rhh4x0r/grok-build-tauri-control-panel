@@ -34,6 +34,12 @@ pub struct Attachment {
 }
 
 pub struct ComposerView {
+    routing_serial: u64,
+    routing_pending: Option<String>,
+    routing_result: Option<(String, Result<bomb_core::services::model_suggestions::Evaluation, String>)>,
+    routing_suggestion: Option<(String, bomb_core::services::model_suggestions::Suggestion)>,
+    routing_feedback: Option<(Option<uuid::Uuid>, String)>,
+    routing_bypass: bool,
     model: Entity<AppModel>,
     input: Entity<TextareaState>,
     attachments: Vec<Attachment>,
@@ -100,6 +106,12 @@ impl ComposerView {
         let speed = cx.new(|cx| super::speed::SpeedSelector::new(model.clone(), cx));
         let location=cx.new(|cx|super::work_location::WorkLocation::new(model.clone(),cx));
         Self {
+            routing_serial: 0,
+            routing_pending: None,
+            routing_result: None,
+            routing_suggestion: None,
+            routing_feedback: None,
+            routing_bypass: false,
             location,
             speed,
             model,
@@ -615,6 +627,8 @@ impl ComposerView {
                 });cx.notify();return;
             }
         }
+        if !std::mem::take(&mut self.routing_bypass) && self.check_model_suggestion(&text, cx) { return; }
+        self.routing_suggestion=None;
         self.destination_ready=None;self.destination_message=None;self.destination_init=None;
         if self.model.read(cx).selected.is_none() { self.sent_draft=Some((text.clone(),self.attachments.clone(),self.model.read(cx).start_failure_serial)); }
         let images: Vec<ImageInput> = self
@@ -1548,6 +1562,7 @@ fn mode_presentation(mode: &str) -> (&'static str, Lucide, &'static str) {
 
 impl Render for ComposerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.apply_routing_result(window, cx);
         if let Some((request,thread))=self.review_loop_result.take() {
             if self.model.read(cx).selected==Some(thread) && self.input.read(cx).value().as_ref()==request {
                 self.input.update(cx,|s,cx|s.set_value("",window,cx));
@@ -1675,6 +1690,7 @@ impl Render for ComposerView {
         let setup = self.foundry_setup.then(||self.foundry_panel(&ui,cx));
         let tray = self.tray(&ui, cx);
         let model_picker = self.model_selector(&ui, cx);
+        let routing_card = self.routing_card(cx);
         let mode_picker = self.mode_picker(&ui, cx);
         let mcp_picker = self.mcp_picker(&ui, cx);
         let context_ring = self.context_ring(&ui, cx);
@@ -1744,6 +1760,7 @@ impl Render for ComposerView {
                     .flex()
                     .flex_col()
                     .when_some(slash_menu, |el, menu| el.child(menu))
+                    .child(routing_card)
                     .child(
                         div()
                             .id("composer-frame")
@@ -2072,3 +2089,6 @@ mod slash_tests {
         assert!(slash_matches("/", &serde_json::Value::Null).is_empty());
     }
 }
+
+#[path = "model_suggestions.rs"]
+mod model_suggestions;

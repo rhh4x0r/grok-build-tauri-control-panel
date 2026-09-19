@@ -54,6 +54,7 @@ impl Render for SettingsView {
                     .sidebar_style(&StyleRefinement::default().bg(gpui_kit::transparent_black()))
                     .pages([
                         general_page(cx),
+                        routing_page(),
                         mcp_page(),
                         memory_page(),
                         worktrees_page(),
@@ -787,4 +788,44 @@ fn render_protocol_log(cx: &mut App) -> AnyElement {
         .when(lines.is_empty(), |el| el.child("Select a thread in the main window to see its protocol log."))
         .children(lines.into_iter().rev().map(|l| div().child(l)))
         .into_any_element()
+}
+
+fn routing_page() -> SettingPage {
+    SettingPage::new("Model suggestions")
+        .description("JEV can suggest a different connected model before sending. Switching always needs your click. Enabling sends your prompt and a short recent conversation excerpt to the selected routing provider; evaluation calls are billed by that provider.")
+        .group(SettingGroup::new().title("JEV routing")
+            .item(SettingItem::new("Suggest models with JEV", SettingField::switch(
+                |cx|settings(cx).read(cx).config.as_ref().is_some_and(|c|c.model_suggestions.enabled),
+                |v,cx|settings(cx).update(cx,|m,cx|m.edit_config(|c|c.model_suggestions.enabled=v,cx)))))
+            .item(SettingItem::new("Connection",SettingField::dropdown(
+                vec![("typesafe".into(),"JEV direct · TypeSafe".into()),("vercel".into(),"Vercel AI Gateway".into())],
+                |cx|settings(cx).read(cx).config.as_ref().map(|c|c.model_suggestions.connection.clone()).unwrap_or_else(||"typesafe".into()).into(),
+                |v,cx|settings(cx).update(cx,|m,cx|{m.routing_status.clear();m.edit_config(|c|c.model_suggestions.connection=v.to_string(),cx)}))))
+            .item(SettingItem::render(|_,_,cx| {
+                let model=settings(cx);let m=model.read(cx);let input=m.routing_key.clone();let status=m.routing_status.clone();
+                div().w_full().flex().flex_col().gap_2().child(Input::new(&input))
+                    .child(div().flex().gap_2()
+                        .child(Button::new("routing-save-key").label("Save key").on_click({let model=model.clone();move |_,w,cx|model.update(cx,|m,cx|m.save_routing_key(false,w,cx))}))
+                        .child(Button::new("routing-remove-key").ghost().label("Remove saved key").on_click(move |_,w,cx|model.update(cx,|m,cx|m.save_routing_key(true,w,cx)))))
+
+                    .child(div().text_xs().child(status)).into_any_element()
+            })))
+        .group(SettingGroup::new().title("Test connection")
+            .description("After saving your key, verify access to JEV. This sends a small billed test request without project context.")
+            .item(SettingItem::render(|_,_,cx| {
+                let status=settings(cx).read(cx).routing_status.clone();
+                div().w_full().flex().flex_col().gap_2()
+                    .child(Button::new("routing-test").outline().label("Test connection").on_click(|_,_,cx|settings(cx).update(cx,|m,cx|m.test_routing_connection(cx))))
+                    .child(div().text_sm().whitespace_normal().child(status)).into_any_element()
+            })))
+        .group(SettingGroup::new().title("Model preferences")
+            .description("Editable starter preferences. Only signed-in providers and their discovered models are considered. Specific task preferences take priority over staying with the current model. Uncertain or failed evaluations use the current model.")
+            .item(SettingItem::render(|_,_,cx| {
+                let model=settings(cx);let input=model.read(cx).routing_guidelines.clone();
+                div().flex().flex_col().gap_2().child(Textarea::new(&input))
+                    .child(Button::new("routing-save-preferences").label("Save preferences").on_click(move |_,_,cx|model.update(cx,|m,cx| {
+                        let text=m.routing_guidelines.read(cx).value().to_string();
+                        m.edit_config(|c|c.model_suggestions.guidelines=text,cx);
+                    }))).into_any_element()
+            })))
 }

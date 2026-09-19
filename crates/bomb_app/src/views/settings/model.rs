@@ -42,6 +42,9 @@ pub struct SettingsModel {
     pub allow_rules: Entity<TextareaState>,
     pub deny_rules: Entity<TextareaState>,
     rules_loaded: bool,
+    pub routing_key: Entity<InputState>,
+    pub routing_guidelines: Entity<TextareaState>,
+    pub routing_status: String,
 }
 
 impl SettingsModel {
@@ -73,6 +76,9 @@ impl SettingsModel {
             allow_rules: cx.new(|cx| TextareaState::new(window, cx).placeholder("one pattern per line, e.g. Bash(cargo test *)").auto_grow(3, 8)),
             deny_rules: cx.new(|cx| TextareaState::new(window, cx).placeholder("one pattern per line, e.g. Bash(rm -rf *)").auto_grow(3, 8)),
             rules_loaded: false,
+            routing_key: cx.new(|cx| InputState::new(window,cx).masked(true).placeholder("Paste API key")),
+            routing_guidelines: cx.new(|cx| TextareaState::new(window,cx).placeholder("Which models should handle which tasks?").auto_grow(3,8)),
+            routing_status: String::new(),
         };
         // Any edit in an input repaints the window.
         for e in [&this.mem_search, &this.mem_add, &this.mem_tags, &this.cred_key, &this.cred_value, &this.wt_name] {
@@ -129,7 +135,35 @@ impl SettingsModel {
         let deny = cfg.permissions.deny.join("\n");
         self.allow_rules.update(cx, |s, cx| s.set_value(allow, window, cx));
         self.deny_rules.update(cx, |s, cx| s.set_value(deny, window, cx));
+        self.routing_guidelines.update(cx, |s,cx| s.set_value(cfg.model_suggestions.guidelines.clone(),window,cx));
         self.rules_loaded = true;
+    }
+
+    pub fn save_routing_key(&mut self, remove: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let connection = self.config.as_ref().map(|c|c.model_suggestions.connection.clone()).unwrap_or_default();
+        let db=svc(cx).persistence.clone();
+        let key = self.routing_key.read(cx).value().to_string();
+        self.routing_key.update(cx,|s,cx|s.set_value("",window,cx));
+        self.routing_status = "Updating saved key…".into();
+        let weak=cx.entity().downgrade();
+        spawn_service(cx,async move {
+            if remove { services::model_suggestions::remove_key(db,connection).await }
+            else { services::model_suggestions::save_key(db,connection,key).await }
+        },move |result,cx| {let _=weak.update(cx,|m,cx| {
+            m.routing_status=match result {Ok(())=>if remove {"Saved key removed.".into()}else{"API key saved in the settings database.".into()},Err(e)=>e};cx.notify();
+        });});cx.notify();
+    }
+
+    pub fn test_routing_connection(&mut self, cx: &mut Context<Self>) {
+        let connection=self.config.as_ref().map(|c|c.model_suggestions.connection.clone()).unwrap_or_default();
+        let db=svc(cx).persistence.clone();
+        self.routing_status="Testing saved key…".into();
+        let weak=cx.entity().downgrade();
+        spawn_service(cx,async move {services::model_suggestions::test_connection(db,connection.clone()).await.map(|()|connection)},move |result,cx| {
+            let _=weak.update(cx,|m,cx| {
+                m.routing_status=match result {Ok(provider)=>format!("Connected to {provider}."),Err(e)=>e};cx.notify();
+            });
+        });cx.notify();
     }
 
     pub fn mark_rules_dirty(&mut self) {

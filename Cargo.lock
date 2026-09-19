@@ -772,6 +772,7 @@ dependencies = [
  "grok_worktree",
  "portable-pty",
  "regex",
+ "security-framework",
  "serde",
  "serde_json",
  "tempfile",

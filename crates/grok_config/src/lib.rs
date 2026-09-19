@@ -47,6 +47,7 @@ pub type Result<T> = std::result::Result<T, ConfigError>;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct GrokConfig {
+    pub model_suggestions: ModelSuggestionsConfig,
     pub default_model: String,
     pub default_effort: String,
     pub default_backend: Backend,
@@ -78,9 +79,24 @@ pub struct GrokConfig {
     pub env: HashMap<String, String>,
 }
 
+/// Optional advisory routing; secrets are stored separately in the OS keychain.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ModelSuggestionsConfig {
+    pub enabled: bool,
+    pub connection: String,
+    pub guidelines: String,
+}
+impl Default for ModelSuggestionsConfig {
+    fn default() -> Self {
+        Self { enabled: false, connection: "typesafe".into(), guidelines: "Prefer Astra for backend logic, Rust, databases, and debugging when available. Prefer Fable 5.1 for frontend work and visual polish when available. Otherwise use provider model descriptions. Keep small follow-ups with the current model only when no task-specific model preference applies. Suggest a switch when another model better matches the requested work.".into() }
+    }
+}
+
 impl Default for GrokConfig {
     fn default() -> Self {
         Self {
+            model_suggestions: ModelSuggestionsConfig::default(),
             default_model: "grok-4".to_string(),
             default_effort: "high".to_string(),
             default_backend: Backend::Grok,
@@ -218,6 +234,7 @@ impl GrokConfig {
     /// defaults; maps extend. An overlay file that omits a key must never
     /// reset the user's global value (scalars used to be copied blindly).
     pub fn merge_overlay(mut self, overlay: GrokConfig) -> Self {
+        // Routing opt-in and preferences are global-only: a repository cannot enable external evaluation.
         let defaults = Self::default();
         if overlay.default_model != defaults.default_model {
             self.default_model = overlay.default_model;
@@ -386,6 +403,21 @@ pub fn grok_cli_config_path() -> Result<PathBuf> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn model_suggestions_require_global_opt_in_and_roundtrip() {
+        let mut project = GrokConfig::default();
+        project.model_suggestions.enabled = true;
+        assert!(!GrokConfig::default().merge_overlay(project).model_suggestions.enabled);
+        let mut global = GrokConfig::default();
+        global.model_suggestions.enabled = true;
+        global.model_suggestions.connection = "vercel".into();
+        let encoded = toml::to_string(&global).unwrap();
+        let decoded: GrokConfig = toml::from_str(&encoded).unwrap();
+        assert_eq!(decoded.model_suggestions, global.model_suggestions);
+        assert!(decoded.merge_overlay(GrokConfig::default()).model_suggestions.enabled);
+        assert!(!toml::from_str::<GrokConfig>("").unwrap().model_suggestions.enabled);
+    }
 
     #[test]
     fn default_config_roundtrip() {

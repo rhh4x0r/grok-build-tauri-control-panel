@@ -2674,3 +2674,5 @@ mod speed_selection_tests {
 }
 
 pub mod model_catalog;
+
+pub mod model_suggestions;
