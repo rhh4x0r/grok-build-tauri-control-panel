@@ -491,6 +491,15 @@ impl SessionRegistry {
         self.sessions.get(&id).is_some_and(|entry| entry.metadata.mode != AgentMode::Acp || entry.acp_client.is_some())
     }
 
+    /// A failed handshake leaves metadata for the thread but no usable client.
+    /// Do not confuse it with a running handshake or a failed turn on a live client.
+    pub fn connection_failed(&self, id: Uuid) -> bool {
+        self.sessions.get(&id).is_some_and(|entry|
+            entry.metadata.mode == AgentMode::Acp
+                && entry.metadata.status == SessionStatus::Failed
+                && entry.acp_client.is_none())
+    }
+
     pub fn is_live(&self, id: Uuid) -> bool {
         self.sessions.contains_key(&id)
     }
@@ -780,6 +789,24 @@ mod tests {
         let cfg = Arc::new(tokio::sync::RwLock::new(GrokConfig::default()));
         let cli = Arc::new(GrokCli::new(PathBuf::from("/bin/true")));
         SessionRegistry::new(bus, cfg, cli)
+    }
+
+    #[tokio::test]
+    async fn failed_handshake_needs_reconnection_but_live_turn_failure_does_not() {
+        let reg = test_registry();
+        let id = reg.spawn_mock("/tmp").await.unwrap();
+        reg.sessions.get_mut(&id).unwrap().metadata.status = SessionStatus::Failed;
+        assert!(!reg.connection_failed(id));
+        let client = reg.sessions.get_mut(&id).unwrap().acp_client.take();
+        assert!(reg.is_live(id));
+        assert!(reg.connection_failed(id));
+        reg.sessions.get_mut(&id).unwrap().metadata.status = SessionStatus::Starting;
+        assert!(!reg.connection_failed(id));
+        reg.sessions.get_mut(&id).unwrap().metadata.status = SessionStatus::Failed;
+        reg.retire_session(id).await.unwrap();
+        assert!(!reg.is_live(id));
+        assert!(!reg.connection_failed(id));
+        if let Some(client) = client { client.shutdown().await.unwrap(); }
     }
 
     #[tokio::test]

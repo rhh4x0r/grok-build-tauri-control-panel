@@ -467,13 +467,20 @@ impl ComposerView {
         self.focus(window, cx);
     }
 
-    pub fn can_retry(&self, cx: &App) -> bool {
-        self.input.read(cx).value().trim().is_empty() && self.attachments.is_empty()
-            && !self.model.read(cx).starting
+    pub fn can_retry(&self, text: &str, cx: &App) -> bool {
+        let draft = self.input.read(cx).value();
+        (draft.trim().is_empty() || draft.trim() == text.trim()) && self.attachments.is_empty()
+            && !self.model.read(cx).starting && !self.destination_busy && !self.review_loop_busy
     }
 
     pub fn retry_prompt(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.can_retry(cx) { return; }
+        if !self.can_retry(text, cx) {
+            self.model.update(cx, |m, cx| {
+                m.toast(ToastKind::Warning, "Retry keeps your current draft safe. Clear it or send it first.");
+                cx.notify();
+            });
+            return;
+        }
         self.set_text(text, window, cx);
         self.send(window, cx);
     }

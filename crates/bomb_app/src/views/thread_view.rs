@@ -40,6 +40,7 @@ impl ThreadView {
         })
         .detach();
         let composer = cx.new(|cx| ComposerView::new(model.clone(), window, cx));
+        cx.observe(&composer, |_, _, cx| cx.notify()).detach();
         let review_loop = cx.new(|cx|super::review_loop::ReviewLoopView::new(model.clone(),window,cx));
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find in conversation"));
         cx.subscribe(&search, |this, _, ev: &InputEvent, cx| match ev {
@@ -701,9 +702,9 @@ impl Render for ThreadView {
                                     &ui,
                                 ))
                                 .when_some(retry_prompt, |el, prompt| {
-                                    el.child(Button::new("retry-failed-turn").ghost().small().icon(Lucide::RotateCcw).label("Retry")
-                                        .disabled(!self.composer.read(cx).can_retry(cx))
-                                        .tooltip("Retry the last prompt. Clear your current draft first if you have one.")
+                                    el.child(Button::new("retry-failed-turn").ghost().small().icon(Lucide::RotateCcw).label("Retry last prompt")
+                                        .disabled(!self.composer.read(cx).can_retry(&prompt, cx))
+                                        .tooltip("Resend the last failed prompt with your selected model. Reconnects if startup failed. Clear a different draft first.")
                                         .on_click({let composer=self.composer.clone();move|_,window,cx|composer.update(cx,|v,cx|v.retry_prompt(&prompt,window,cx))}))
                                 })
                                 .child(div().pb_2().child(meter_bar("meter", meter, &ui)))

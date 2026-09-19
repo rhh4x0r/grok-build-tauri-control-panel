@@ -738,11 +738,15 @@ pub async fn send_prompt(
             .as_deref()
             .is_some_and(|m| !m.eq_ignore_ascii_case(&cur.model) && cur.model != "mock");
         let needs_read_only = workspace.as_ref().is_some_and(|w| w.inline || w.read_only) && !cur.read_only;
-        if needs_read_only
+        let connection_failed = state.registry.connection_failed(id);
+        if connection_failed
+            || needs_read_only
             || backend_changed
             || (model_changed && cur.mode == grok_control_core::AgentMode::Acp)
         {
-            persist_session(state, id).await;
+            // A failed placeholder has no newly confirmed ACP session to save.
+            // Preserve the last durable session ID/history for the resume ladder.
+            if !connection_failed { persist_session(state, id).await; }
             state.registry.retire_session(id).await.map_err(err)?;
             switch_notice = resume_saved_session(
                 state,
