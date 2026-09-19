@@ -2,6 +2,8 @@
 
 Status: proposed plan for Max's review, 2026-09-19. This document does not authorize implementation, automatic task execution, or merging.
 
+Updated direction: [Lightweight project workflow](project_workflow_lightweight.md) refines this proposal using Multi-Agent Max and current Prompt Foundry. In particular, it replaces contract-first startup with immediate independent work using explicit provisional assumptions, and defines portable repository documents alongside local runtime state.
+
 ## Product outcome
 
 Capture ideas against a repository without interrupting active work. Turn an idea into a feature, split it into bounded tasks when useful, and run independent tasks concurrently with the same or different models. Show what needs attention and what is ready to integrate. Keep final integration understandable and reviewable.
@@ -42,11 +44,11 @@ Task states: Draft, Ready, Queued, Running, Needs input, Blocked, Review, Accept
 ## Concrete example: leaderboard feature
 
 1. Capture “Add a leaderboard with saved scores.”
-2. Define the shared contract first: endpoint, request/response schema, sorting, errors, and empty/loading behavior. A small contract task produces the shared interface and fixtures if code changes are needed.
-3. Once that contract revision is accepted, launch these independent tasks:
+2. Start UI exploration with provisional mock data while the backend task proposes storage and the API. Agree on the shared interface before real API wiring, rather than blocking all UI work.
+3. Launch independent tasks as soon as their own required inputs are available:
    - Frontend: Fable, selected effort. Leaderboard view, interactions, loading/error states. Uses the agreed fixtures until the API is ready.
    - Backend: Astra, selected effort. Score persistence, endpoint, validation, tests. Owns database migrations.
-4. Both run in separate worktrees from the accepted contract commit. The frontend does not wait for backend implementation when the contract and fixtures are sufficient.
+4. Both run in separate worktrees from a recorded base. The UI task isolates its sample-data adapter. When the shared contract is accepted, pin that revision for API wiring and reconcile the UI and backend against it.
 5. Combine accepted checkpoint commits in a feature integration worktree. Run the real frontend against the real backend, check the acceptance criteria, and preview the combined feature.
 6. Show the combined diff and evidence to Max. After approval, land one reviewed feature on the target branch.
 
