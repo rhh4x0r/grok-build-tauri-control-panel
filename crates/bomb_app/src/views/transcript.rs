@@ -1530,29 +1530,10 @@ fn model_switch_notice(text: &str, ui: &Ui) -> Option<AnyElement> {
     let (from, to, continuity) = switch_parts(text)?;
     let identity = |value: &str| {
         let (provider, model) = switch_identity(value);
-        div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(super::brand::brand_mark(provider, 18., true, ui))
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(super::brand::pretty_model(model)),
-            )
+        super::brand::model_identity(provider, super::brand::pretty_model(model), ui)
     };
     Some(
-        div()
-            .my_2()
-            .p_3()
-            .rounded(px(10.))
-            .border_1()
-            .border_color(ui.border)
-            .bg(ui.ink(0.03))
-            .flex()
-            .flex_col()
-            .gap_2()
+        super::brand::handoff_card(ui)
             .child(
                 div()
                     .flex()

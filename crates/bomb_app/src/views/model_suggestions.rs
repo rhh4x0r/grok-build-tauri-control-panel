@@ -354,18 +354,9 @@ impl ComposerView {
             return div().into_any_element();
         }
         let ui = Ui::of(cx);
-        let mut card = div()
-            .mb_2()
-            .p_3()
-            .rounded_lg()
-            .border_1()
-            .border_color(ui.border)
-            .bg(ui.glass)
-            .flex()
-            .flex_col()
-            .gap_2()
-            .text_sm()
-            .text_color(ui.text)
+        let mut card = super::super::brand::handoff_card(&ui)
+            .text_size(px(12.))
+            .text_color(ui.text_muted)
             .whitespace_normal();
         if self.routing_pending.is_some() {
             return card
@@ -379,9 +370,7 @@ impl ComposerView {
                 )
                 .into_any_element();
         }
-        if let (Some((_, suggestion)), Some(choice)) =
-            (&self.routing_suggestion, &self.routing_choice)
-        {
+        if let (Some(_), Some(choice)) = (&self.routing_suggestion, &self.routing_choice) {
             let m = self.model.read(cx);
             let current = m.model_name(&m.prefs.backend, &m.effective_model());
             let current_effort = super::super::brand::effort_label(&m.prefs.effort);
@@ -389,9 +378,13 @@ impl ComposerView {
             let selected = choice.id();
             let weak = cx.entity().downgrade();
             let picker = Button::new("routing-model")
-                .outline()
-                .small()
-                .label(choice.label.clone())
+                .ghost()
+                .compact()
+                .child(super::super::brand::model_identity(
+                    &choice.backend,
+                    m.model_name(&choice.backend, &choice.model),
+                    &ui,
+                ))
                 .dropdown_caret(true)
                 .dropdown_menu(move |mut menu, _, _| {
                     for candidate in &choices {
@@ -416,7 +409,7 @@ impl ComposerView {
             let effort = self.routing_effort.clone();
             let weak = cx.entity().downgrade();
             let effort_picker = Button::new("routing-effort")
-                .outline()
+                .ghost()
                 .small()
                 .disabled(!applies)
                 .label(if applies {
@@ -445,22 +438,35 @@ impl ComposerView {
             card = card
                 .child(
                     div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(format!("Suggested: {}", suggestion.candidate.label)),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(ui.text_muted)
-                        .child(format!("Current: {current} · {current_effort}")),
-                )
-                .child(
-                    div()
                         .flex()
+                        .items_center()
                         .flex_wrap()
-                        .gap_2()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(super::super::brand::model_identity(
+                                    &m.prefs.backend,
+                                    current.clone(),
+                                    &ui,
+                                ))
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(ui.text_faint)
+                                        .child(current_effort),
+                                ),
+                        )
+                        .child(Icon::from(Lucide::ArrowRight).size(px(14.)))
                         .child(picker)
                         .child(effort_picker),
+                )
+                .child(
+                    div().text_size(px(11.)).text_color(ui.text_faint).child(
+                        "Suggested for this prompt. Recent conversation history carries over.",
+                    ),
                 )
                 .child(
                     div()
@@ -480,7 +486,7 @@ impl ComposerView {
                             Button::new("routing-current")
                                 .ghost()
                                 .small()
-                                .label(format!("Keep {current}"))
+                                .label("Keep current")
                                 .on_click(
                                     cx.listener(|v, _, w, cx| v.use_routing_choice(false, w, cx)),
                                 ),
@@ -489,7 +495,7 @@ impl ComposerView {
                             Button::new("routing-why")
                                 .ghost()
                                 .small()
-                                .label("Why this suggestion")
+                                .label("Why this model")
                                 .icon(if self.routing_details {
                                     Lucide::ChevronUp
                                 } else {

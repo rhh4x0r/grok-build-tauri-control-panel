@@ -35,6 +35,18 @@ pub fn brand_mark(backend: &str, size: f32, tinted: bool, ui: &Ui) -> AnyElement
     }
 }
 
+/// Shared treatment for proposed and completed model handoffs.
+pub fn handoff_card(ui: &Ui) -> Div {
+    div().my_2().p_3().rounded(px(10.)).border_1().border_color(ui.border)
+        .bg(ui.ink(0.03)).flex().flex_col().gap_2()
+}
+
+pub fn model_identity(backend: &str, label: String, ui: &Ui) -> Div {
+    div().flex().items_center().gap_2()
+        .child(brand_mark(backend, 18., true, ui))
+        .child(div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).child(label))
+}
+
 /// Human-readable model name: `grok-4.6` → "Grok 4.6",
 /// `claude-opus-4-1-20250805` → "Claude Opus 4.1", `gpt-5-codex` → "GPT-5 Codex".
 pub fn pretty_model(id: &str) -> String {

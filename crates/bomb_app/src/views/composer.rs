@@ -1779,7 +1779,9 @@ impl Render for ComposerView {
                     .flex()
                     .flex_col()
                     .when_some(slash_menu, |el, menu| el.child(menu))
-                    .child(routing_card)
+                    .child(div().flex().justify_center().child(
+                        div().w_full().max_w(px(Layout::CONTENT_MAX)).px_6().child(routing_card)
+                    ))
                     .child(
                         div()
                             .id("composer-frame")
