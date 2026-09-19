@@ -7,7 +7,7 @@ use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
-use gpui_kit::component::{Icon, Sizable};
+use gpui_kit::component::{Disableable, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
@@ -212,9 +212,12 @@ impl ThreadView {
                     .map(|(cur, _)| cur == &id)
                     .unwrap_or(false);
                 if !same {
-                    let view = cx.new(|cx| TranscriptView::new(t.clone(), cx));
+                    let view = cx.new(|cx| {let mut view=TranscriptView::new(t.clone(), cx);view.review_loop=Some(self.review_loop.clone());view});
                     cx.observe(&t, |_, _, cx| cx.notify()).detach();
                     self.transcript = Some((id, view));
+                } else if let Some((_, view)) = &self.transcript {
+                    // Foundry status arrives on AppModel, independently of transcript events.
+                    view.update(cx, |_, cx| cx.notify());
                 }
             }
         }
@@ -632,6 +635,10 @@ impl Render for ThreadView {
                 !t.thread.explanations.is_empty(),
             )
         };
+        let retry_prompt = if presence.phase == bomb_core::presence::Phase::Error {
+            thread.read(cx).thread.entries.iter().rev().find(|e|e.role==bomb_core::transcript::Role::You)
+                .filter(|e|e.images.is_empty()).and_then(|e|e.text()).map(str::to_owned)
+        } else {None};
         let meter = presence.meter(now);
         let loop_run = crate::runtime::services(cx).foundry.for_thread(&tid);
         let has_loop = loop_run.is_some();
@@ -686,12 +693,18 @@ impl Render for ThreadView {
                                     },
                                     &ui,
                                 ))
+                                .when_some(retry_prompt, |el, prompt| {
+                                    el.child(Button::new("retry-failed-turn").ghost().small().icon(Lucide::RotateCcw).label("Retry")
+                                        .disabled(!self.composer.read(cx).can_retry(cx))
+                                        .tooltip("Retry the last prompt. Clear your current draft first if you have one.")
+                                        .on_click({let composer=self.composer.clone();move|_,window,cx|composer.update(cx,|v,cx|v.retry_prompt(&prompt,window,cx))}))
+                                })
                                 .child(div().pb_2().child(meter_bar("meter", meter, &ui)))
                             })
                             .when(!show_status, |el| el.child(div().h(px(20.)))),
                     ),
             )
-            .child(self.review_loop.clone())
+            .when(!crate::runtime::services(cx).foundry.for_thread(&tid).is_some_and(|r| matches!(r.status,bomb_foundry::RunStatus::Completed|bomb_foundry::RunStatus::Stopped)), |el|el.child(self.review_loop.clone()))
             .child(composer)
             .when(self.terminals_open.contains(&tid), |el| {
                 if let Some(panel) = self.terminals.get(&tid) {

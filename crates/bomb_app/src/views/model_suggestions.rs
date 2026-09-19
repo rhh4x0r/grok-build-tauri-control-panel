@@ -71,7 +71,10 @@ impl ComposerView {
             return false;
         }
         let id = self.model.read(cx).selected;
-        if !routing::thread_enabled(&state.persistence, id) {
+        if !id
+            .map(|id| routing::thread_enabled(&state.persistence, Some(id)))
+            .unwrap_or(true)
+        {
             return false;
         }
         // Jev is text-only. Keep attachment turns on the user's selected model.
@@ -157,6 +160,12 @@ impl ComposerView {
                     self.routing_feedback = Some((id, evaluation.message));
                     if let Some(suggestion) = evaluation.suggestion {
                         if self.routing_candidates(cx).contains(&suggestion.candidate) {
+                            self.routing_effort = suggested_effort(
+                                &suggestion.candidate.backend,
+                                &self.model.read(cx).prefs.effort,
+                            );
+                            self.routing_choice = Some(suggestion.candidate.clone());
+                            self.routing_details = false;
                             self.routing_suggestion = Some((expected, suggestion));
                             return;
                         }
@@ -192,16 +201,17 @@ impl ComposerView {
                 return;
             }
             if switch {
-                if !self.routing_candidates(cx).contains(&suggestion.candidate) {
+                let Some(candidate) = self.routing_choice.take() else {
+                    return;
+                };
+                if !self.routing_candidates(cx).contains(&candidate) {
                     cx.notify();
                     return;
                 }
                 self.model.update(cx, |m, cx| {
-                    m.set_backend(
-                        &suggestion.candidate.backend,
-                        Some(suggestion.candidate.model),
-                        cx,
-                    )
+                    m.set_backend(&candidate.backend, Some(candidate.model), cx);
+                    m.prefs.effort = self.routing_effort.clone();
+                    cx.notify();
                 });
             } else if let Some(id) = self.model.read(cx).selected {
                 let state = crate::runtime::services(cx);
@@ -214,15 +224,7 @@ impl ComposerView {
                 }
             }
         }
-        self.routing_feedback = Some((
-            self.model.read(cx).selected,
-            if switch {
-                "Model suggestion accepted."
-            } else {
-                "Using your selected model."
-            }
-            .into(),
-        ));
+        self.routing_feedback = None;
         self.routing_pending = None;
         self.routing_result = None;
         self.routing_bypass = true;
@@ -230,79 +232,314 @@ impl ComposerView {
         self.routing_bypass = false;
     }
 
-    pub(super) fn routing_card(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn routing_control(&self, cx: &mut Context<Self>) -> AnyElement {
         let state = crate::runtime::services(cx);
-        if !state
+        let configured = state
             .config
             .try_read()
             .ok()
-            .is_some_and(|c| c.model_suggestions.enabled)
-        {
+            .is_some_and(|c| c.model_suggestions.enabled);
+        let id = self.model.read(cx).selected;
+        let enabled = configured
+            && id
+                .map(|id| routing::thread_enabled(&state.persistence, Some(id)))
+                .unwrap_or(true);
+        let ui = Ui::of(cx);
+        let weak = cx.entity().downgrade();
+        let feedback = self
+            .routing_feedback
+            .as_ref()
+            .filter(|(thread, _)| *thread == id)
+            .map(|(_, text)| text.clone());
+        let trigger = Button::new("smart-routing")
+            .ghost()
+            .small()
+            .icon(Lucide::GitBranch)
+            .selected(enabled)
+            .tooltip(if !configured {
+                "Enable JEV in Settings to use Smart Model Routing."
+            } else if enabled {
+                "Smart Model Routing · On"
+            } else {
+                "Smart Model Routing · Off"
+            });
+        if !configured {
+            // Keep hover handling on the wrapper so the disabled control explains itself.
+            return div()
+                .id("smart-routing-disabled")
+                .tooltip(|window, cx| {
+                    Tooltip::new("Enable JEV in Settings to use Smart Model Routing.")
+                        .build(window, cx)
+                })
+                .child(trigger.disabled(true))
+                .into_any_element();
+        }
+        Popover::new("smart-routing-menu")
+            .anchor(Anchor::BottomLeft)
+            .trigger(trigger)
+            .content(move |_, _, _cx| {
+                let weak = weak.clone();
+                div()
+                    .w(px(300.))
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .text_sm()
+                    .text_color(ui.text)
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Smart Model Routing"),
+                    )
+                    .child(
+                        div().text_xs().text_color(ui.text_muted).child(
+                            "Suggest a model for each prompt. You choose whether to switch.",
+                        ),
+                    )
+                    .child(
+                        Button::new("routing-toggle")
+                            .ghost()
+                            .small()
+                            .disabled(id.is_none())
+                            .label(if id.is_none() {
+                                "Thread toggle available after first send"
+                            } else if enabled {
+                                "Turn off for this thread"
+                            } else {
+                                "Turn on for this thread"
+                            })
+                            .on_click(move |_, _, cx| {
+                                let _ = weak.update(cx, |v, cx| {
+                                    if let Some(id) = id {
+                                        if let Err(error) = routing::set_thread_enabled(
+                                            &crate::runtime::services(cx).persistence,
+                                            id,
+                                            !enabled,
+                                        ) {
+                                            v.model.update(cx, |m, cx| {
+                                                m.toast(ToastKind::Warning, error);
+                                                cx.notify();
+                                            });
+                                            return;
+                                        }
+                                    }
+                                    v.routing_pending = None;
+                                    v.routing_result = None;
+                                    v.routing_suggestion = None;
+                                    v.routing_feedback = None;
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .when_some(feedback.clone(), |el, text| {
+                        el.child(div().text_xs().text_color(ui.text_muted).child(text))
+                    })
+                    .child(
+                        Button::new("routing-settings")
+                            .ghost()
+                            .small()
+                            .icon(Lucide::Settings)
+                            .label("Settings · Smart Model Routing…")
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(crate::actions::OpenSettings), cx)
+                            }),
+                    )
+            })
+            .into_any_element()
+    }
+
+    pub(super) fn routing_card(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.routing_pending.is_none() && self.routing_suggestion.is_none() {
             return div().into_any_element();
         }
-        let id = self.model.read(cx).selected;
-        let enabled = routing::thread_enabled(&state.persistence, id);
         let ui = Ui::of(cx);
         let mut card = div()
+            .mb_2()
+            .p_3()
+            .rounded_lg()
+            .border_1()
+            .border_color(ui.border)
+            .bg(ui.glass)
             .flex()
             .flex_col()
             .gap_2()
-            .p_2()
-            .text_xs()
-            .text_color(ui.text_muted)
-            .whitespace_normal()
-            .child(
-                Button::new("jev-thread-toggle")
-                    .ghost()
-                    .small()
-                    .disabled(id.is_none())
-                    .label(if id.is_none() {
-                        "JEV suggestions enabled · configurable per thread after sending"
-                    } else if enabled {
-                        "JEV suggestions: on · disable for this thread"
-                    } else {
-                        "JEV suggestions: off · enable for this thread"
-                    })
-                    .on_click(cx.listener(move |v, _, _, cx| {
-                        if let Some(id) = id {
-                            if let Err(error) = routing::set_thread_enabled(
-                                &crate::runtime::services(cx).persistence,
-                                id,
-                                !enabled,
-                            ) {
-                                v.model.update(cx, |m, cx| {
-                                    m.toast(ToastKind::Warning, error);
+            .text_sm()
+            .text_color(ui.text)
+            .whitespace_normal();
+        if self.routing_pending.is_some() {
+            return card
+                .child(div().child("Checking model fit…"))
+                .child(
+                    Button::new("routing-skip")
+                        .ghost()
+                        .small()
+                        .label("Send with current model")
+                        .on_click(cx.listener(|v, _, w, cx| v.use_routing_choice(false, w, cx))),
+                )
+                .into_any_element();
+        }
+        if let (Some((_, suggestion)), Some(choice)) =
+            (&self.routing_suggestion, &self.routing_choice)
+        {
+            let m = self.model.read(cx);
+            let current = m.model_name(&m.prefs.backend, &m.effective_model());
+            let current_effort = super::super::brand::effort_label(&m.prefs.effort);
+            let choices = self.routing_candidates(cx);
+            let selected = choice.id();
+            let weak = cx.entity().downgrade();
+            let picker = Button::new("routing-model")
+                .outline()
+                .small()
+                .label(choice.label.clone())
+                .dropdown_caret(true)
+                .dropdown_menu(move |mut menu, _, _| {
+                    for candidate in &choices {
+                        let weak = weak.clone();
+                        let candidate = candidate.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(candidate.label.clone())
+                                .checked(candidate.id() == selected)
+                                .on_click(move |_, _, cx| {
+                                    let _ = weak.update(cx, |v, cx| {
+                                        v.routing_effort =
+                                            suggested_effort(&candidate.backend, &v.routing_effort);
+                                        v.routing_choice = Some(candidate.clone());
+                                        cx.notify();
+                                    });
+                                }),
+                        );
+                    }
+                    menu
+                });
+            let (levels, applies) = super::super::brand::effort_levels(&choice.backend);
+            let effort = self.routing_effort.clone();
+            let weak = cx.entity().downgrade();
+            let effort_picker = Button::new("routing-effort")
+                .outline()
+                .small()
+                .disabled(!applies)
+                .label(if applies {
+                    format!("Reasoning: {}", super::super::brand::effort_label(&effort))
+                } else {
+                    "Reasoning: provider default".into()
+                })
+                .dropdown_caret(true)
+                .dropdown_menu(move |mut menu, _, _| {
+                    for level in levels {
+                        let weak = weak.clone();
+                        let level = *level;
+                        menu = menu.item(
+                            PopupMenuItem::new(super::super::brand::effort_label(level))
+                                .checked(effort == level)
+                                .on_click(move |_, _, cx| {
+                                    let _ = weak.update(cx, |v, cx| {
+                                        v.routing_effort = level.into();
+                                        cx.notify();
+                                    });
+                                }),
+                        );
+                    }
+                    menu
+                });
+            card = card
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(format!("Suggested: {}", suggestion.candidate.label)),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(ui.text_muted)
+                        .child(format!("Current: {current} · {current_effort}")),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(picker)
+                        .child(effort_picker),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(
+                            Button::new("routing-switch")
+                                .primary()
+                                .small()
+                                .label("Switch & send")
+                                .on_click(
+                                    cx.listener(|v, _, w, cx| v.use_routing_choice(true, w, cx)),
+                                ),
+                        )
+                        .child(
+                            Button::new("routing-current")
+                                .ghost()
+                                .small()
+                                .label(format!("Keep {current}"))
+                                .on_click(
+                                    cx.listener(|v, _, w, cx| v.use_routing_choice(false, w, cx)),
+                                ),
+                        )
+                        .child(
+                            Button::new("routing-why")
+                                .ghost()
+                                .small()
+                                .label("Why this suggestion")
+                                .icon(if self.routing_details {
+                                    Lucide::ChevronUp
+                                } else {
+                                    Lucide::ChevronDown
+                                })
+                                .on_click(cx.listener(|v, _, _, cx| {
+                                    v.routing_details = !v.routing_details;
                                     cx.notify();
-                                });
-                            }
-                        }
-                        v.routing_pending = None;
-                        v.routing_result = None;
-                        v.routing_suggestion = None;
-                        cx.notify();
-                    })),
-            );
-        if let Some((thread, message)) = &self.routing_feedback {
-            if *thread == id {
-                card = card.child(div().child(message.clone()));
+                                })),
+                        ),
+                );
+            if self.routing_details {
+                card=card.child(div().text_xs().text_color(ui.text_muted).child("Based on your model preferences, this prompt and recent conversation. Conversation history carries over when switching providers."));
+                if let Some((_, message)) = &self.routing_feedback {
+                    card = card.child(
+                        div()
+                            .text_xs()
+                            .text_color(ui.text_muted)
+                            .child(message.clone()),
+                    );
+                }
             }
         }
-        if self.routing_pending.is_some() {
-            card = card.child(div().child("Checking model fit…")).child(
-                Button::new("jev-skip")
-                    .ghost()
-                    .small()
-                    .label("Send with current model")
-                    .on_click(cx.listener(|v, _, w, cx| v.use_routing_choice(false, w, cx))),
-            );
-        }
-        if let Some((_, suggestion)) = &self.routing_suggestion {
-            card=card.child(div().text_color(ui.text).child(format!("Suggested: {}",suggestion.candidate.label)))
-                .child(div().child("JEV recommends this model using your preferences and recent conversation. Switching carries conversation history to the selected agent."))
-                .child(div().flex().gap_2()
-                    .child(Button::new("jev-switch").small().label("Switch & send").on_click(cx.listener(|v,_,w,cx|v.use_routing_choice(true,w,cx))))
-                    .child(Button::new("jev-current").ghost().small().label("Use current").on_click(cx.listener(|v,_,w,cx|v.use_routing_choice(false,w,cx)))));
-        }
         card.into_any_element()
+    }
+}
+
+fn suggested_effort(backend: &str, current: &str) -> String {
+    let (levels, _) = super::super::brand::effort_levels(backend);
+    if levels.contains(&current) {
+        current.into()
+    } else {
+        levels
+            .iter()
+            .find(|e| **e == "high")
+            .or(levels.last())
+            .copied()
+            .unwrap_or_default()
+            .into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::suggested_effort;
+    #[test]
+    fn destination_effort_preserves_supported_levels_and_replaces_unsupported_ones() {
+        assert_eq!(suggested_effort("claude", "high"), "high");
+        assert_eq!(suggested_effort("claude", "minimal"), "high");
+        assert_eq!(suggested_effort("codex", "max"), "high");
+        assert_eq!(suggested_effort("unknown", "high"), "");
     }
 }

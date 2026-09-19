@@ -40,6 +40,9 @@ pub struct ComposerView {
     routing_suggestion: Option<(String, bomb_core::services::model_suggestions::Suggestion)>,
     routing_feedback: Option<(Option<uuid::Uuid>, String)>,
     routing_bypass: bool,
+    routing_choice: Option<bomb_core::services::model_suggestions::Candidate>,
+    routing_effort: String,
+    routing_details: bool,
     model: Entity<AppModel>,
     input: Entity<TextareaState>,
     attachments: Vec<Attachment>,
@@ -112,6 +115,9 @@ impl ComposerView {
             routing_suggestion: None,
             routing_feedback: None,
             routing_bypass: false,
+            routing_choice: None,
+            routing_effort: String::new(),
+            routing_details: false,
             location,
             speed,
             model,
@@ -459,6 +465,17 @@ impl ComposerView {
         self.input
             .update(cx, |s, cx| s.set_value(text.to_string(), window, cx));
         self.focus(window, cx);
+    }
+
+    pub fn can_retry(&self, cx: &App) -> bool {
+        self.input.read(cx).value().trim().is_empty() && self.attachments.is_empty()
+            && !self.model.read(cx).starting
+    }
+
+    pub fn retry_prompt(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_retry(cx) { return; }
+        self.set_text(text, window, cx);
+        self.send(window, cx);
     }
 
     /// Context usage ring: tokens used vs the model's window; red past 85%.
@@ -842,7 +859,8 @@ impl ComposerView {
         };
         let (_, effort_applies) = crate::views::brand::effort_levels(&backend);
         let eff_label = if effort_applies {
-            crate::views::brand::effort_label(&effort)
+            let label = crate::views::brand::effort_label(&effort);
+            if label.is_empty() { if effort.is_empty() { "Default" } else { &effort } } else { label }
         } else {
             ""
         };
@@ -883,7 +901,7 @@ impl ComposerView {
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
-                            .child(eff_label),
+                            .child(eff_label.to_owned()),
                     )
                 }),
         );
@@ -1691,6 +1709,7 @@ impl Render for ComposerView {
         let tray = self.tray(&ui, cx);
         let model_picker = self.model_selector(&ui, cx);
         let routing_card = self.routing_card(cx);
+        let routing_control = self.routing_control(cx);
         let mode_picker = self.mode_picker(&ui, cx);
         let mcp_picker = self.mcp_picker(&ui, cx);
         let context_ring = self.context_ring(&ui, cx);
@@ -1812,6 +1831,7 @@ impl Render for ComposerView {
                                             .justify_end()
                                             .gap(px(2.))
                                             .child(model_picker)
+                                            .child(routing_control)
                                             .child(self.speed.clone())
                                             .child(mode_picker)
                                             .children(mcp_picker)

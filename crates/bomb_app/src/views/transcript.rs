@@ -23,6 +23,7 @@ const TAIL_SLACK: f32 = 120.0;
 
 pub struct TranscriptView {
     thread: Entity<ThreadModel>,
+    pub review_loop: Option<Entity<super::review_loop::ReviewLoopView>>,
     scroll: ScrollHandle,
     follow: bool,
     seen_tail: u64,
@@ -140,6 +141,7 @@ impl TranscriptView {
             scrolled_to: None,
             stage_expanded: Default::default(),
             technical_expanded: Default::default(),
+            review_loop: None,
         }
     }
 
@@ -1241,6 +1243,7 @@ impl Render for TranscriptView {
                         .flex()
                         .flex_col()
                         .children(children)
+                        .when(svc(cx).foundry.for_thread(&self.thread.read(cx).id().to_string()).is_some_and(|r| matches!(r.status,bomb_foundry::RunStatus::Completed|bomb_foundry::RunStatus::Stopped)), |el|el.children(self.review_loop.clone()))
                         .when(count == 0, |el| {
                             el.child(
                                 div()

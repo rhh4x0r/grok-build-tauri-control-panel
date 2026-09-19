@@ -725,6 +725,7 @@ pub async fn send_prompt(
         !t.is_empty()
     });
 
+    let mut switch_notice = None;
     // Switching backend/model mid-thread: restart the thread under the new
     // agent. Cross-agent session/load can't work, so the resume ladder lands
     // on history-only and injects the prior transcript as context.
@@ -742,7 +743,7 @@ pub async fn send_prompt(
         {
             persist_session(state, id).await;
             state.registry.retire_session(id).await.map_err(err)?;
-            resume_saved_session(
+            switch_notice = resume_saved_session(
                 state,
                 id,
                 want_backend,
@@ -758,7 +759,7 @@ pub async fn send_prompt(
     // Saved threads after reboot have history in SQLite but no live ACP process.
     // Auto-resume so "Send" picks up the same thread id + transcript.
     if !state.registry.is_live(id) {
-        resume_saved_session(
+        switch_notice = resume_saved_session(
             state,
             id,
             want_backend,
@@ -819,9 +820,28 @@ pub async fn send_prompt(
         });
     }
 
-    if let Some(effort) = effort {
-        state.registry.set_effort(id, &effort).await.map_err(err)?;
+    let effort_result = if let Some(effort) = effort.as_deref() {
+        state.registry.set_effort(id, effort).await.map_err(err)
+    } else { Ok(false) };
+    let actual_effort = state.registry.current_effort(id).await;
+    if let Some(line) = switch_notice {
+        let reasoning = if effort_result.is_err() {
+            format!("Reasoning selection could not be applied; current effort: {}. Prompt not sent.", actual_effort.as_deref().unwrap_or("not reported"))
+        } else { match (&actual_effort, &effort) {
+            (Some(actual), Some(requested)) if !actual.eq_ignore_ascii_case(requested) =>
+                format!("Reasoning: {actual} (provider adjusted from {requested})."),
+            (Some(actual), _) => format!("Reasoning: {actual}."),
+            (None, Some(requested)) => format!("Reasoning: not reported by this agent (requested {requested})."),
+            (None, None) => "Reasoning: not reported by this agent.".into(),
+        }};
+        let line = format!("{line} {reasoning}");
+        state.persistence.append_message(id, "system", &line, Utc::now()).map_err(err)?;
+        state.event_bus.emit(ControlEvent::Raw {
+            session_id: Some(id),
+            payload: serde_json::json!({"channel":"thread", "kind":"model_switch", "line":line, "effort":actual_effort}),
+        });
     }
+    effort_result?;
     if let Some(enabled) = fast_mode {
         if let Some((option, values, _)) = state.registry.speed_option(id).await.map_err(err)? {
             let value = speed_value(&values, enabled).ok_or_else(|| "The connected agent does not offer the selected speed. Refresh provider models and try again.".to_string())?;
@@ -953,7 +973,7 @@ async fn resume_saved_session(
     approval_mode: Option<String>,
     plan_mode: Option<bool>,
     always_approve: Option<bool>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let rec = state
         .persistence
         .get_session(id)
@@ -1095,19 +1115,10 @@ async fn resume_saved_session(
                 current.backend.key(),
                 current.model
             );
-            state
-                .persistence
-                .append_message(id, "system", &line, Utc::now())
-                .map_err(err)?;
-            state.event_bus.emit(ControlEvent::Raw {
-                session_id: Some(id),
-                payload: serde_json::json!({
-                    "channel":"thread", "kind":"model_switch", "line":line
-                }),
-            });
+            return Ok(Some(line));
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Cheap instant label: first significant words of the prompt.

@@ -627,6 +627,11 @@ impl SessionRegistry {
         client.set_config_option(option, value).await.map_err(Into::into)
     }
 
+    pub async fn current_effort(&self, id: Uuid) -> Option<String> {
+        let client = self.sessions.get(&id).and_then(|entry| entry.acp_client.clone())?;
+        client.current_effort().await
+    }
+
     pub async fn set_effort(&self, id: Uuid, effort: &str) -> Result<bool> {
         let client = self
             .sessions

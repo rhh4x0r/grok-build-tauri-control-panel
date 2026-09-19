@@ -20,7 +20,8 @@ pub struct ReviewLoopView {
     feedback: Entity<InputState>,
     feedback_open: bool,
     run_id: String,
-    hidden: HashSet<String>,
+    collapsed: bool,
+    presentation_key: String,
     busy: bool,
     error: Option<String>,
 }
@@ -35,10 +36,18 @@ impl ReviewLoopView {
             }),
             feedback_open: false,
             run_id: String::new(),
-            hidden: HashSet::new(),
+            collapsed: false,
+            presentation_key: String::new(),
             busy: false,
             error: None,
         }
+    }
+    fn set_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
+        match services(cx).persistence.set_kv(&self.presentation_key, if collapsed {"collapsed"} else {"expanded"}) {
+            Ok(()) => self.collapsed=collapsed,
+            Err(error) => self.error=Some(format!("Could not save review display preference: {error}")),
+        }
+        cx.notify();
     }
     fn act(&mut self, run: Run, command: &'static str, cx: &mut Context<Self>) {
         if self.busy {
@@ -111,9 +120,19 @@ impl Render for ReviewLoopView {
             self.feedback
                 .update(cx, |s, cx| s.set_value("", window, cx));
         }
-        if self.hidden.contains(&run.id) {
-            let id=run.id.clone();
-            return div().mx_6().my_1().child(Button::new("reopen-review-loop").ghost().small().icon(Lucide::Repeat).label(format!("{} · Show details",status(&run))).on_click(cx.listener(move|v,_,_,cx|{v.hidden.remove(&id);cx.notify();}))).into_any_element();
+        // A new gate or status gets its own presentation state, so an older
+        // dismissal never hides a new decision that needs the user's attention.
+        let key = format!("review-loop/presentation/{}/{:?}", run.gate_token(), run.status);
+        if self.presentation_key != key {
+            self.collapsed = services(cx).persistence.get_kv(&key).ok().flatten()
+                .map(|value| value == "collapsed")
+                .unwrap_or(matches!(run.status, RunStatus::Completed | RunStatus::Stopped));
+            self.presentation_key = key;
+        }
+        if self.collapsed {
+            return div().my_2().child(Button::new("reopen-review-loop").ghost().small().icon(Lucide::ChevronRight)
+                .label(format!("Review loop · {} · View results",status(&run)))
+                .on_click(cx.listener(|v,_,_,cx|v.set_collapsed(false,cx)))).into_any_element();
         }
         let waiting = run.status == RunStatus::WaitingGate;
         let complete = run.status == RunStatus::Completed;
@@ -411,7 +430,7 @@ impl Render for ReviewLoopView {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(status(&run)),
                     ).child(div().flex_1())
-                    .child({let id=run.id.clone();Button::new("hide-review-loop").ghost().small().icon(Lucide::X).label("Close").on_click(cx.listener(move|v,_,_,cx|{v.hidden.insert(id.clone());cx.notify();}))}),
+                    .child(Button::new("hide-review-loop").ghost().small().icon(Lucide::ChevronUp).label("Collapse").on_click(cx.listener(|v,_,_,cx|v.set_collapsed(true,cx)))),
             )
             .child(strip)
             .child(content)

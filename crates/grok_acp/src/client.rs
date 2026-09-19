@@ -1114,13 +1114,19 @@ impl AcpClient {
         let result = self
             .request_timeout("session/set_config_option", Some(params))
             .await?;
-        self.capture_config_options(&result).await;
-        self.config_current
-            .write()
-            .await
-            .insert(id.to_string(), value.clone());
+        self.apply_config_option_result(id, &value, &result).await;
         info!(%id, %value, "ACP config option set");
         Ok(true)
+    }
+
+    async fn apply_config_option_result(&self, id: &str, value: &str, result: &Value) {
+        // Respect a provider's returned currentValue (it may normalize/clamp).
+        let applied = result.get("configOptions").and_then(Value::as_array)
+            .and_then(|options| options.iter().find(|option| option.get("id").and_then(Value::as_str)==Some(id)))
+            .and_then(|option| option.get("currentValue").and_then(Value::as_str))
+            .unwrap_or(value).to_owned();
+        self.capture_config_options(result).await;
+        self.config_current.write().await.insert(id.to_string(), applied);
     }
 
     /// Find the advertised mode id matching an intent ("plan", "yolo", "default").
@@ -1205,6 +1211,11 @@ impl AcpClient {
             }
         }
         Ok(())
+    }
+
+    pub async fn current_effort(&self) -> Option<String> {
+        let current = self.config_current.read().await;
+        current.get("reasoning_effort").or_else(||current.get("effort")).cloned()
     }
 
     pub async fn set_effort(&self, effort: &str) -> Result<bool> {
@@ -3457,6 +3468,19 @@ mod tests {
             })
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn reasoning_reports_provider_adjustments_and_acknowledged_values() {
+        let client = AcpClient::mock_for_tests("reasoning-result", None);
+        client.apply_config_option_result("reasoning_effort", "high", &json!({"configOptions":[
+            {"id":"reasoning_effort","currentValue":"medium","options":[{"value":"medium"},{"value":"high"}]}
+        ]})).await;
+        assert_eq!(client.current_effort().await.as_deref(), Some("medium"));
+        client.apply_config_option_result("reasoning_effort", "high", &json!({})).await;
+        assert_eq!(client.current_effort().await.as_deref(), Some("high"));
+        let unknown = AcpClient::mock_for_tests("no-reasoning", None);
+        assert_eq!(unknown.current_effort().await, None);
     }
 
     #[tokio::test]

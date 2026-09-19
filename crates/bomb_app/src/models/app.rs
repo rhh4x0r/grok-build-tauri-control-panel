@@ -833,9 +833,15 @@ impl AppModel {
                     // The composer observes AppModel; refresh its advertised command menu.
                     cx.notify();
                 }
-                ControlEvent::Raw { payload, session_id: Some(_) }
+                ControlEvent::Raw { payload, session_id: Some(id) }
                     if payload.get("channel").and_then(|c| c.as_str()) == Some("thread") =>
                 {
+                    if self.selected == Some(*id) && payload.get("kind").and_then(|v| v.as_str()) == Some("model_switch") {
+                        if let Some(effort)=payload.get("effort").and_then(|v|v.as_str()) {
+                            self.prefs.effort=effort.to_owned();
+                            cx.notify();
+                        }
+                    }
                     need_refresh = true;
                 }
                 _ => {}

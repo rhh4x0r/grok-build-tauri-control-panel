@@ -66,6 +66,7 @@ pub fn status_line(
 ) -> impl IntoElement {
     let p = props.presence;
     let active = p.turn_active();
+    let failed = p.phase == bomb_core::presence::Phase::Error;
     let mood = p.mood(props.now);
     let label = p.label(props.now);
     let elapsed = p
@@ -157,10 +158,11 @@ pub fn status_line(
                             .cursor_pointer()
                             .hover(move |s| s.bg(hover))
                             .on_click(on_toggle_explain)
-                            .child(if props.explain_open {
-                                "explain ▾"
-                            } else {
-                                "explain ▸"
+                            .child(match (failed, props.explain_open) {
+                                (true, true) => "Details ▾",
+                                (true, false) => "Details ▸",
+                                (false, true) => "explain ▾",
+                                (false, false) => "explain ▸",
                             }),
                     )
                 }),
@@ -171,7 +173,9 @@ pub fn status_line(
                     .pb_2()
                     .text_sm()
                     .text_color(text_muted)
-                    .child(if props.explain_pending && props.explain_text.is_none() {
+                    .child(if failed && !p.note.is_empty() {
+                        p.note.clone()
+                    } else if props.explain_pending && props.explain_text.is_none() {
                         "thinking…".to_string()
                     } else {
                         props.explain_text.clone().unwrap_or_else(|| {

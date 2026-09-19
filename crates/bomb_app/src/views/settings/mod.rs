@@ -791,10 +791,10 @@ fn render_protocol_log(cx: &mut App) -> AnyElement {
 }
 
 fn routing_page() -> SettingPage {
-    SettingPage::new("Model suggestions")
+    SettingPage::new("Smart Model Routing")
         .description("JEV can suggest a different connected model before sending. Switching always needs your click. Enabling sends your prompt and a short recent conversation excerpt to the selected routing provider; evaluation calls are billed by that provider.")
-        .group(SettingGroup::new().title("JEV routing")
-            .item(SettingItem::new("Suggest models with JEV", SettingField::switch(
+        .group(SettingGroup::new().title("Smart Model Routing")
+            .item(SettingItem::new("Enable Smart Model Routing", SettingField::switch(
                 |cx|settings(cx).read(cx).config.as_ref().is_some_and(|c|c.model_suggestions.enabled),
                 |v,cx|settings(cx).update(cx,|m,cx|m.edit_config(|c|c.model_suggestions.enabled=v,cx)))))
             .item(SettingItem::new("Connection",SettingField::dropdown(
