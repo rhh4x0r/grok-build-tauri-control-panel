@@ -80,6 +80,7 @@ pub(super) async fn turn(
         .map_err(err)?;
     let mut output = String::new();
     let mut observed = Vec::new();
+    let mut policy_block: Option<String> = None;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(1800);
     loop {
         if load(state, project)?.state == RunState::Stopped {
@@ -117,18 +118,21 @@ pub(super) async fn turn(
                     ));
                 }
             }
-            ControlEvent::Error { message, .. } => return Err(message),
+            ControlEvent::Raw { payload, .. } if payload["channel"] == "policy_blocked" => {
+                policy_block = payload["message"].as_str().map(str::to_owned);
+            }
+            ControlEvent::Error { message, .. } => return Err(policy_block.unwrap_or(message)),
             ControlEvent::SessionStatusChanged {
                 status: SessionStatus::Failed | SessionStatus::Cancelled,
                 ..
-            } => return Err("The task failed or was cancelled. Inspect its thread.".into()),
+            } => return Err(policy_block.unwrap_or_else(||"The task failed or was cancelled. Completed checkpoints are saved.".into())),
             ControlEvent::Raw { payload, .. } if payload["correlation"] == token => {
                 if payload["turn_complete"] == true {
                     super::super::wait_until_idle(state, &sid.to_string(), Duration::from_secs(15))
                         .await?;
                     return Ok((output, observed));
                 }
-                return Err("The agent stopped without completing the task.".into());
+                return Err(policy_block.unwrap_or_else(||"The agent stopped without completing the task. Inspect the saved attempt before continuing.".into()));
             }
             _ => {}
         }
@@ -176,9 +180,7 @@ async fn task(
         .find(|t| t.id == tid)
         .ok_or("Task no longer exists")?
         .clone();
-    let assignment = task
-        .assignment
-        .clone()
+    let assignment = f.assignments.get(&tid).cloned().or(task.assignment.clone())
         .ok_or("Choose a model for this task")?;
     let w = if let Some(w) = f.tasks.get(&tid).and_then(|t| t.workspace.clone()) {
         w
@@ -363,6 +365,7 @@ pub(super) fn next_job(p: &ProjectWork, active: &HashSet<String>) -> Option<Job>
         && p.features
             .iter()
             .all(|f| matches!(f.state, FeatureState::Done | FeatureState::Idea))
+        && p.final_blocker.is_none()
         && !active.contains("final")
     {
         return Some(Job::Final);
@@ -394,6 +397,7 @@ pub(super) fn drive(state: Arc<AppState>, project: String) {
                 };
                 active.insert(job.key());
                 let reserved = change(&state, &project, |p| {
+                    p.active_jobs.insert(job.key());
                     match &job {
                         Job::Task(f, t) => {
                             let f = feature_mut(p, f)?;
@@ -403,7 +407,8 @@ pub(super) fn drive(state: Arc<AppState>, project: String) {
                         Job::Candidate(f) => {
                             feature_mut(p, f)?.state = FeatureState::Checking;
                         }
-                        Job::Land(_) | Job::Final => {}
+                        Job::Land(f) => {feature_mut(p,f)?.state=FeatureState::Landing;},
+                        Job::Final => {}
                     }
                     Ok(())
                 });
@@ -436,10 +441,17 @@ pub(super) fn drive(state: Arc<AppState>, project: String) {
                 match result {
                     Ok((job, result)) => {
                         active.remove(&job.key());
+                        let _ = change(&state,&project,|p| {p.active_jobs.remove(&job.key());Ok(())});
                         if let Err(error) = result {
                             let _ = change(&state, &project, |p| {
                                 if let Some(fid) = job.feature() {
                                     let f = feature_mut(p, fid)?;
+                                    let stage = match &job {
+                                        Job::Task(_,_) => WorkStage::Build, Job::Land(_) => WorkStage::Merge,
+                                        _ if f.state==FeatureState::Reviewing => WorkStage::Review,
+                                        _ => WorkStage::Checks,
+                                    };
+                                    f.blocker=Some(Blocker::new(stage,error.clone(),match &job {Job::Task(_,tid)=>Some(tid.clone()),_=>None}));
                                     f.state = FeatureState::NeedsInput;
                                     f.note = error.clone();
                                     if let Job::Task(_, tid) = &job {
@@ -454,6 +466,7 @@ pub(super) fn drive(state: Arc<AppState>, project: String) {
                                     m.features.push(fid.into());
                                     p.messages.push(m);
                                 } else {
+                                    p.final_blocker=Some(Blocker::new(WorkStage::Final,error.clone(),None));
                                     p.state = RunState::Paused;
                                     p.note =
                                         format!("Final project checks need attention: {error}");
@@ -465,7 +478,9 @@ pub(super) fn drive(state: Arc<AppState>, project: String) {
                     }
                     Err(error) => {
                         let _ = change(&state, &project, |p| {
+                            p.active_jobs.clear();
                             p.state = RunState::Interrupted;
+                            p.final_blocker=Some(Blocker::new(WorkStage::Final,format!("A worker was interrupted: {error}"),None));
                             p.note=format!("A worker was interrupted: {error}. Inspect its thread before resuming.");
                             Ok(())
                         });
@@ -473,6 +488,7 @@ pub(super) fn drive(state: Arc<AppState>, project: String) {
                 }
             }
         }
+        let _ = change(&state,&project,|p|{p.active_jobs.clear();Ok(())});
         state.project_work.driving.lock().unwrap().remove(&project);
         // A user may enqueue work while the old driver is exiting. Avoid both
         // duplicate drivers and losing that wakeup.
@@ -558,6 +574,7 @@ pub(super) async fn final_check(state: &Arc<AppState>, project: &str) -> Result<
                 .collect::<Vec<_>>()
                 == approved_features.iter().collect::<Vec<_>>()
         {
+            p.final_blocker=None;
             p.state = RunState::Complete;
             p.completed_head = Some(head);
             p.note = "All started features are integrated and final checks passed.".into();

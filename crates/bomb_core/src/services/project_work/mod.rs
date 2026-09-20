@@ -3,6 +3,8 @@
 mod execution;
 mod integration;
 mod planning;
+mod recovery;
+pub use recovery::*;
 mod types;
 pub use planning::{accept_plan, describe};
 pub use types::*;
@@ -51,13 +53,13 @@ impl ProjectWorkService {
             || work.features.iter().any(|f| {
                 matches!(
                     f.state,
-                    FeatureState::Working | FeatureState::Checking | FeatureState::Reviewing
+                    FeatureState::Working | FeatureState::Checking | FeatureState::Reviewing | FeatureState::Landing
                 ) || f.tasks.values().any(|t| t.state == TaskState::Running)
             })
         {
             work.planning = false;
             work.state = RunState::Interrupted;
-            work.note="This project was interrupted. Inspect the saved work, then Resume; no prompts or merges were repeated.".into();
+            work.note="Work was interrupted. Open Needs you to continue unfinished stages; Resume only restarts ready work.".into();
             for f in &mut work.features {
                 for t in f
                     .tasks
@@ -69,8 +71,10 @@ impl ProjectWorkService {
                 }
                 if matches!(
                     f.state,
-                    FeatureState::Working | FeatureState::Checking | FeatureState::Reviewing
+                    FeatureState::Working | FeatureState::Checking | FeatureState::Reviewing | FeatureState::Landing
                 ) {
+                    let stage = match f.state { FeatureState::Landing => WorkStage::Merge, FeatureState::Reviewing => WorkStage::Review, FeatureState::Checking => WorkStage::Checks, _ => WorkStage::Build };
+                    f.blocker = Some(Blocker::new(stage, "Execution was interrupted. Completed checkpoints are saved.", None));
                     f.state = FeatureState::NeedsInput;
                     f.note = "Execution was interrupted; inspect and continue this feature.".into();
                 }
@@ -245,11 +249,6 @@ pub async fn command(state: Arc<AppState>, project: String, command: &str) -> Re
         if ["go", "resume"].contains(&command) {
             p.completed_head = None;
             p.final_checks.clear();
-            for f in &mut p.features {
-                if f.state == FeatureState::Idea {
-                    f.state = FeatureState::Queued;
-                }
-            }
         }
         p.note = match command {
             "pause" => "Paused. Active tasks may finish; no new tasks or merges will start.",
@@ -361,6 +360,8 @@ pub async fn keep_working(
         if f.state == FeatureState::Done {
             return Err("This feature is already merged. Describe the follow-up in the project conversation to plan a new change.".into());
         }
+        f.blocker = None;
+        f.checked_head = None;
         f.feedback.push(feedback.clone());
         f.review = None;
         f.approved_head = None;

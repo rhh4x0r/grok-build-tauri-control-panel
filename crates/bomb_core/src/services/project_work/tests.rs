@@ -104,6 +104,7 @@ fn work(d: FeatureDraft, w: Workspace) -> FeatureWork {
         feedback: vec![],
         repairs: 0,
         reviewer_thread: None,
+                blocker: None, checked_head: None, verification_notes: vec![], review_history: vec![], assignments: Default::default(),
     }
 }
 fn fake_workspace() -> Workspace {
@@ -120,6 +121,48 @@ fn proposal() -> Proposal {
         features: vec![draft("F-scores")],
         ..Default::default()
     }
+}
+
+#[test]
+fn blocked_project_reports_attention_and_named_dependency() {
+    let mut foundation=work(draft("F-foundation"),fake_workspace());
+    foundation.state=FeatureState::NeedsInput;
+    foundation.blocker=Some(Blocker::new(WorkStage::Review,"Read-only policy blocked permission",None));
+    let mut child=draft("F-child");child.depends_on=vec![foundation.id.clone()];
+    let child=work(child,fake_workspace());
+    let p=ProjectWork {state:RunState::Running,features:vec![foundation,child],..Default::default()};
+    assert!(p.activity_label().contains("Waiting for you"));
+    assert!(p.activity_label().contains("no jobs running"));
+    assert_eq!(p.features[0].state.column(),"Needs you");
+    assert_eq!(p.waiting_reason(&p.features[1]),"Waiting for Scores to merge");
+    assert_eq!(p.unblocks("F-foundation"),1);
+    assert!(next_job(&p,&HashSet::new()).is_none());
+}
+
+#[tokio::test]
+async fn resume_never_dispatches_saved_backlog() {
+    let (_temp,state,root)=fixture().await;
+    change(&state,&root,|p|{p.enabled=true;let mut f=work(draft("F-later"),fake_workspace());f.state=FeatureState::Idea;p.features.push(f);Ok(())}).unwrap();
+    command(state.clone(),root.clone(),"resume").await.unwrap();
+    let p=load(&state,&root).unwrap();
+    assert_eq!(p.features[0].state,FeatureState::Idea);
+    assert!(next_job(&p,&HashSet::new()).is_none());
+}
+
+#[tokio::test]
+async fn stale_recovery_cannot_repeat_a_stage() {
+    let (_temp,state,root)=fixture().await;
+    change(&state,&root,|p| {p.enabled=true;let mut f=work(draft("F-work"),fake_workspace());f.state=FeatureState::NeedsInput;f.blocker=Some(Blocker::new(WorkStage::Build,"Interrupted",None));p.features.push(f);Ok(())}).unwrap();
+    assert!(retry_stage(state.clone(),root.clone(),"F-work".into(),"stale-id".into(),None).await.is_err());
+    assert_eq!(load(&state,&root).unwrap().features[0].state,FeatureState::NeedsInput);
+}
+
+#[test]
+fn infrastructure_failures_are_not_code_findings() {
+    assert_eq!(Blocker::classify("getaddrinfo ENOTFOUND api.convex.dev"),BlockerKind::Environment);
+    assert_eq!(Blocker::classify("Review policy blocked permission"),BlockerKind::Access);
+    assert_eq!(Blocker::classify("provider model unavailable"),BlockerKind::Provider);
+    assert_eq!(Blocker::classify("session cancelled"),BlockerKind::Interrupted);
 }
 #[test]
 fn planner_contract_preserves_prose_and_rejects_dependency_cycles() {

@@ -589,6 +589,9 @@ impl Thread {
                         if row.args.is_empty() {
                             row.args.clone_from(&previous.args);
                         }
+                        if tool_status_terminal(&previous.status) && !terminal {
+                            row.status.clone_from(&previous.status);
+                        }
                     }
                     self.entries[i].body = Body::Tool(row);
                     self.entries[i].at = te.at;
@@ -601,6 +604,10 @@ impl Thread {
             }
         }
 
+        // Late tool updates belong in history, never in the active turn meter.
+        if !self.presence.turn_active() && self.presence.finished_at.is_some() {
+            return ch;
+        }
         if terminal {
             if self.open_tools.remove(&te.id) {
                 self.presence.tool_finished(&te.tool, &status, now);
@@ -646,6 +653,7 @@ impl Thread {
     }
 
     fn on_status(&mut self, status: SessionStatus, now: Instant) -> Vec<Change> {
+        if matches!(status,SessionStatus::Running|SessionStatus::WaitingApproval) && !self.presence.turn_active() && self.presence.finished_at.is_some() { return Vec::new(); }
         self.status = Some(status);
         let mut ch = vec![Change::Status(status)];
         self.protocol(&format!("status → {status:?}"));
@@ -764,8 +772,8 @@ impl Thread {
                     return Vec::new();
                 };
                 self.protocol(&line);
-                if payload.get("turn_complete").and_then(Value::as_bool) == Some(true) {
-                    return self.on_status(SessionStatus::Completed, now);
+                if let Some(completed)=payload.get("turn_complete").and_then(Value::as_bool) {
+                    return self.on_status(if completed {SessionStatus::Completed} else {SessionStatus::Cancelled}, now);
                 }
                 let mut ch = vec![Change::Protocol];
                 if self.presence.turn_active() {
@@ -1423,6 +1431,21 @@ mod tests {
         t.apply(&status(SessionStatus::Running), now);
         assert!(!t.presence.turn_active());
         assert_eq!(t.presence.phase, Phase::Idle);
+    }
+
+    #[test]
+    fn cancelled_turn_stays_terminal_after_late_tool_updates() {
+        let now=Instant::now();let mut t=Thread::new();
+        t.note_prompt("review",vec![],now);
+        t.apply(&tool("late","terminal",ToolCallStatus::Running,"verify"),now);
+        t.apply(&ControlEvent::Raw {session_id:Some(sid()),payload:serde_json::json!({"channel":"term","line":"cancelled","turn_complete":false})},now);
+        t.apply(&tool("late","terminal",ToolCallStatus::Running,"verify"),now);
+        t.apply(&tool("late","terminal",ToolCallStatus::Failed,"verify"),now);
+        assert!(!t.presence.turn_active());
+        assert_eq!(t.presence.tools_active,0);
+        assert_eq!(t.presence.phase,Phase::Error);
+        t.note_prompt("new explicit attempt",vec![],now);
+        assert!(t.presence.turn_active());
     }
 
     #[test]

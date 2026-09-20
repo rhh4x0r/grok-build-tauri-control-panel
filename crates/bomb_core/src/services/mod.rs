@@ -2359,7 +2359,6 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
             let is_plan_tool = event.tool.to_lowercase().contains("plan")
                 || event.args_summary.contains("\"plan\":");
             if is_plan_tool {
-                let _ = db.update_session_status(*session_id, "running");
                 return Ok(());
             }
             let payload = serde_json::json!({
@@ -2372,7 +2371,7 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
             .to_string();
             db.append_message(*session_id, "tool", payload, event.at)
                 .map(|_| ())?;
-            let _ = db.update_session_status(*session_id, "running");
+            // Tool output may arrive after the turn ends. Only lifecycle events change status.
             Ok(())
         }
         PlanUpdate { session_id, event } => {
@@ -2438,6 +2437,9 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
             };
             db.append_message(*session_id, "system", body, *at)
                 .map(|_| ())
+        }
+        Raw { session_id:Some(session_id), payload } if payload["channel"]=="policy_blocked" => {
+            db.append_message(*session_id,"system",payload["message"].as_str().unwrap_or("Access was blocked by read-only policy."),Utc::now()).map(|_|())
         }
         // Plan documents lifted out of plan-presenting tool calls
         // (ExitPlanMode etc.) — durable as real plan rows.

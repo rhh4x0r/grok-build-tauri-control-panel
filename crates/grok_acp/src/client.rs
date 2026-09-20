@@ -1898,6 +1898,14 @@ impl AcpClient {
                 "session/request_permission" | "session/requestPermission"
             ) && !self.provider_support_request(&req.params)
             {
+                if let Some(bus) = &self.event_bus {
+                    bus.emit(ControlEvent::Raw {
+                        session_id: Some(self.control_session_id),
+                        payload: json!({"channel":"policy_blocked", "kind":"access",
+                            "message":"Review/planning policy blocked a permission request. This read-only agent cannot grant itself additional access. Provide verification evidence or resolve the required access before retrying.",
+                            "operation":req.params}),
+                    });
+                }
                 return transport
                     .send_response(req.id, json!({"outcome": {"outcome": "cancelled"}}))
                     .await;

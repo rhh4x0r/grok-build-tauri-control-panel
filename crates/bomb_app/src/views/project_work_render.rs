@@ -145,7 +145,7 @@ impl ProjectWorkView {
                 div()
                     .text_xs()
                     .text_color(ui.text_muted)
-                    .child(f.state.label()),
+                    .child(f.status_label().to_string()),
             );
         if let Ok(spec) = f.feature() {
             for t in &spec.tasks {
@@ -165,7 +165,7 @@ impl ProjectWorkView {
                 card = card.child(div().text_xs().child(format!(
                     "{} · {}\n{}",
                     t.role,
-                    actual.map(|t| format!("{:?}", t.state)).unwrap_or_default(),
+                    actual.map(|t| t.state.label()).unwrap_or_default(),
                     label
                 )));
             }
@@ -201,7 +201,7 @@ impl ProjectWorkView {
             .w_full()
             .overflow_x_scroll()
             .min_h_0();
-        for name in ["Ideas", "Queued", "Working", "Review", "Done"] {
+        for name in ["Backlog", "Queued", "In progress", "Needs you", "Done"] {
             let items = p
                 .features
                 .iter()
@@ -211,7 +211,7 @@ impl ProjectWorkView {
                             || matches!(f.state, FeatureState::NeedsInput | FeatureState::Review))
                 })
                 .collect::<Vec<_>>();
-            let count = items.len() + usize::from(name == "Ideas" && p.draft.is_some());
+            let count = items.len() + usize::from(name == "Backlog" && p.draft.is_some());
             let mut column = div()
                 .flex()
                 .flex_col()
@@ -224,7 +224,7 @@ impl ProjectWorkView {
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(format!("{name} · {count}")),
                 );
-            if name == "Ideas" && p.draft.is_some() {
+            if name == "Backlog" && p.draft.is_some() {
                 column = column.child(
                     super::super::brand::handoff_card(ui)
                         .gap_2()
@@ -556,7 +556,7 @@ impl ProjectWorkView {
                                     .label(if f.approved_head.is_some() {
                                         "Approved · merge queued"
                                     } else {
-                                        "Approve & merge"
+                                        if self.snapshot(cx).state==RunState::Running {"Approve & merge"} else {"Approve · merge when resumed"}
                                     })
                                     .disabled(self.busy || f.approved_head.is_some())
                                     .on_click(cx.listener(move |v, _, _, cx| {
@@ -709,7 +709,7 @@ impl Render for ProjectWorkView {
                         div()
                             .text_xs()
                             .text_color(ui.text_muted)
-                            .child(format!("{:?}", p.state)),
+                            .child(p.activity_label()),
                     )
                     .child(div().flex_1())
                     .child(
@@ -781,11 +781,7 @@ impl Render for ProjectWorkView {
                     Button::new("go-project")
                         .primary()
                         .small()
-                        .label(if p.state == RunState::Idle {
-                            "Go"
-                        } else {
-                            "Resume"
-                        })
+                        .label("Resume ready work")
                         .disabled(p.features.is_empty() || self.busy || p.planning)
                         .on_click(cx.listener(|v, _, _, cx| v.command("go", cx))),
                 );
@@ -795,7 +791,7 @@ impl Render for ProjectWorkView {
                     .ghost()
                     .small()
                     .label("Stop")
-                    .disabled(p.state != RunState::Running && !p.planning)
+                    .disabled(!p.has_activity() && p.state != RunState::Running)
                     .on_click(cx.listener(|v, _, _, cx| v.command("stop", cx))),
             );
         }

@@ -16,6 +16,13 @@ pub async fn describe(
     if text.trim().is_empty() || text.len() > 32000 {
         return Err("Describe the work in 1–32,000 characters.".into());
     }
+    match text.trim().trim_end_matches(['.','!']).to_lowercase().as_str() {
+        "pause" | "pause project" | "pause the project" => return command(state,project,"pause").await,
+        "stop" | "stop project" | "stop the project" => return command(state,project,"stop").await,
+        "resume" | "resume project" | "resume the project" => return command(state,project,"resume").await,
+        "status" | "project status" | "what is happening?" => return change(&state,&project,|p|{p.messages.push(Message::new("assistant",p.activity_label()));Ok(())}),
+        _ => {}
+    }
     features::validate_assignment(&planner)?;
     if !candidates
         .iter()
@@ -76,7 +83,7 @@ pub async fn describe(
                 if !candidates.iter().any(|c|c.backend==a.backend && c.model==a.model) { return Err(format!("The planner selected an unavailable model: {}. Refine the plan using a connected model.",a.model)); }
             }
         }
-        if state.config.read().await.model_suggestions.enabled {
+        if before.routing.unwrap_or(state.config.read().await.model_suggestions.enabled) {
             // Suggestions remain editable in the plan card; they never dispatch work.
             // Explicit planner/user preferences stay authoritative.
             let mut jobs=tokio::task::JoinSet::new();
@@ -99,7 +106,9 @@ pub async fn describe(
         change(&state,&project,|p|{
             p.messages.push(Message::new("assistant",proposal.message.clone()));
             for q in &proposal.questions {p.messages.push(Message::new("assistant",q.clone()));}
-            p.draft=if proposal.features.is_empty() && proposal.updates.is_empty() {None} else {Some(proposal)};
+            p.questions=proposal.questions.clone();
+            if !proposal.features.is_empty() || !proposal.updates.is_empty() {p.draft=Some(proposal);}
+            else if p.questions.is_empty() {if let Some(d)=&mut p.draft {d.questions.clear();}}
             Ok(())
         })
     }.await;
@@ -189,6 +198,7 @@ pub async fn accept_plan(
                 feedback: vec![],
                 repairs: 0,
                 reviewer_thread: None,
+                blocker: None, checked_head: None, verification_notes: vec![], review_history: vec![], assignments: Default::default(),
             });
         }
         let status = features::documents::safe_path(Path::new(&seed.path), &["plan", "STATUS.md"])?;
@@ -273,12 +283,13 @@ pub async fn accept_plan(
             f.note = "Saved with your feedback.".into();
         }
         p.draft = None;
+        p.questions.clear();
         let mut message = Message::new(
             "assistant",
             if start {
                 "Plan approved. Starting ready work in isolated worktrees."
             } else {
-                "Plan saved. Choose Go when you want to start."
+                "Plan saved to Backlog. Start selected features when you are ready; Resume will not start them."
             },
         );
         message.features = ids;
