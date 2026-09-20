@@ -10,6 +10,8 @@ gpui_kit::actions!(
         OpenFoundry,
         OpenHome,
         NewThread,
+        NewFeature,
+        OpenFeatures,
         NewWorkspaceConversation,
         NewMockSession,
         OpenProject,
@@ -39,6 +41,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-.", StopTurn, None),
         KeyBinding::new("cmd-f", FindInThread, None),
         KeyBinding::new("cmd-k", OpenCommandPalette, None),
+        KeyBinding::new("cmd-alt-n", NewFeature, None),
     ]);
     cx.set_menus(vec![
         Menu {
@@ -54,6 +57,8 @@ pub fn init(cx: &mut App) {
             name: "File".into(),
             items: vec![
                 MenuItem::action("New Workspace", NewThread),
+                MenuItem::action("New Feature", NewFeature),
+                MenuItem::action("Project Features", OpenFeatures),
                 MenuItem::action("New Conversation in Workspace", NewWorkspaceConversation),
                 MenuItem::action("Open Project…", OpenProject),
                 MenuItem::action("Reveal Project in Finder", RevealProject),

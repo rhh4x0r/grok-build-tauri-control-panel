@@ -1,5 +1,6 @@
 //! Service layer: every former Tauri command as a plain async fn over `&AppState`.
 
+pub mod features;
 pub mod project_overview;
 pub mod thread_setup;
 pub mod prompt_sources;
@@ -829,6 +830,7 @@ pub async fn send_prompt(
         state.registry.set_effort(id, effort).await.map_err(err)
     } else { Ok(false) };
     let actual_effort = state.registry.current_effort(id).await;
+    let _=state.persistence.set_kv(&format!("session-effort/{id}"),actual_effort.as_deref().unwrap_or_default());
     let active = state.registry.get_snapshot(id).map_err(err)?.metadata;
     let variant_note = requested_model.as_ref().filter(|wanted| active.backend == grok_config::Backend::Claude && wanted.strip_suffix("[1m]").is_some_and(|base| base.eq_ignore_ascii_case(&active.model)))
         .map(|wanted| format!("Requested {wanted}; this session offers {}. Using its advertised model variant.", active.model));
@@ -1342,7 +1344,10 @@ pub async fn set_session_effort(
     effort: String,
 ) -> Result<bool, String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
-    state.registry.set_effort(id, &effort).await.map_err(err)
+    let applied=state.registry.set_effort(id, &effort).await.map_err(err)?;
+    let actual=state.registry.current_effort(id).await.unwrap_or_default();
+    state.persistence.set_kv(&format!("session-effort/{id}"),&actual).map_err(err)?;
+    Ok(applied)
 }
 
 pub async fn set_approval_mode(state: &AppState, id: String, mode: String) -> Result<(), String> {

@@ -316,9 +316,24 @@ pub async fn suggest(
     id: Option<Uuid>,
     prompt: String,
     current: Candidate,
-    mut candidates: Vec<Candidate>,
+    candidates: Vec<Candidate>,
 ) -> Result<Evaluation, String> {
-    let cfg = state.config.read().await.model_suggestions.clone();
+    suggest_with_guidelines(state, id, prompt, current, candidates, String::new()).await
+}
+
+/// Project-level preferences are explicit user instructions, not conversation text.
+pub async fn suggest_with_guidelines(
+    state: &AppState,
+    id: Option<Uuid>,
+    prompt: String,
+    current: Candidate,
+    mut candidates: Vec<Candidate>,
+    project_guidelines: String,
+) -> Result<Evaluation, String> {
+    let mut cfg = state.config.read().await.model_suggestions.clone();
+    if !project_guidelines.trim().is_empty() {
+        cfg.guidelines = format!("Project preferences: {}\nGlobal preferences: {}", project_guidelines.chars().take(4000).collect::<String>(), cfg.guidelines);
+    }
     if !cfg.enabled || !thread_enabled(&state.persistence, id) {
         return Ok(Evaluation::keep(
             "JEV suggestions are disabled for this thread.",

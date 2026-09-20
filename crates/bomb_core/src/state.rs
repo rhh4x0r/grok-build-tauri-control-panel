@@ -22,6 +22,8 @@ use crate::devserver::DevServerManager;
 use crate::explainer::ExplainerService;
 
 pub struct AppState {
+    /// Serializes explicit project record edits and task launch reservations.
+    pub feature_gate: Arc<tokio::sync::Mutex<()>>,
     pub foundry: Arc<crate::foundry::FoundryService>,
     pub workspace_turns: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     pub workspace_gate: Arc<tokio::sync::Mutex<()>>,
@@ -222,6 +224,7 @@ impl AppState {
 
         let foundry = Arc::new(crate::foundry::FoundryService::open(&paths.sessions_dir.join("foundry.db")).map_err(anyhow::Error::msg)?);
         Ok(Self {
+            feature_gate: Arc::new(tokio::sync::Mutex::new(())),
             foundry,
             workspace_turns: Arc::new(std::sync::Mutex::new(Default::default())),
             workspace_gate: Arc::new(tokio::sync::Mutex::new(())),

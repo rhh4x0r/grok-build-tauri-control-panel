@@ -31,6 +31,7 @@ pub struct RootView {
     settings_open: bool,
     foundry: Option<Entity<crate::views::foundry::FoundryView>>,
     foundry_open: bool,
+    features: Entity<crate::views::features::FeaturesView>,
     _mode_shortcut: Subscription,
 }
 
@@ -47,6 +48,7 @@ impl RootView {
             if close { this.foundry_open = false; }
             cx.notify();
         }).detach();
+        let features = cx.new(|cx| crate::views::features::FeaturesView::new(model.clone(), window, cx));
         let sidebar = cx.new(|cx| SidebarView::new(model.clone(), window, cx));
         let thread = cx.new(|cx| ThreadView::new(model.clone(), window, cx));
         let preview = cx.new(|cx| PreviewPanel::new(model.clone(), cx));
@@ -85,7 +87,21 @@ impl RootView {
             settings_open: false,
             foundry: None,
             foundry_open: false,
+            features,
         }
+    }
+
+    fn open_features(&mut self, new: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.model.read(cx).active_project.is_none() {
+            self.model.update(cx, |m, cx| { m.toast(ToastKind::Info, "Open a project to create or track features"); cx.notify(); });
+            return;
+        }
+        self.settings_open = false;
+        self.foundry_open = false;
+        self.preview_open = false;
+        self.model.update(cx, |m,cx| { m.features_open = true; m.review_open = false; cx.notify(); });
+        self.features.update(cx, |v,cx| v.open(new,window,cx));
+        cx.notify();
     }
 
     fn drain_toasts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -108,7 +124,7 @@ impl RootView {
             .as_ref()
             .map(|t| t.read(cx).title())
             .unwrap_or_else(|| "New thread".to_string());
-        let title = if self.settings_open { "Settings".to_string() } else { title };
+        let title = if self.settings_open { "Settings".to_string() } else if model.features_open { "Features".to_string() } else { title };
         let project = model
             .active_project
             .as_deref()
@@ -244,6 +260,7 @@ impl Render for RootView {
                 if this.model.update(cx, |m,_| std::mem::take(&mut m.foundry_show_runs)) {
                     if let Some(v)=&this.foundry {v.update(cx,|v,cx|v.show_runs(cx));}
                 }
+                this.model.update(cx, |m,_| m.features_open = false);
                 this.foundry_open = true; this.settings_open = false; cx.notify();
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
@@ -253,6 +270,12 @@ impl Render for RootView {
                 this.settings_open = true;
                 this.focus.focus(window, cx);
                 cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &crate::actions::NewFeature, window, cx| {
+                this.open_features(true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &crate::actions::OpenFeatures, window, cx| {
+                this.open_features(false, window, cx);
             }))
             .on_action(cx.listener(|this, _: &OpenCommandPalette, window, cx| {
                 crate::views::palette::open_palette(this.model.clone(), window, cx);
@@ -360,7 +383,7 @@ impl Render for RootView {
                                 .child(self.sidebar.clone()),
                         )
                     })
-                    .child(resizable_panel().child(if self.foundry_open { self.foundry.clone().unwrap().into_any_element() } else { self.thread.clone().into_any_element() }))
+                    .child(resizable_panel().child(if self.model.read(cx).features_open { self.features.clone().into_any_element() } else if self.foundry_open { self.foundry.clone().unwrap().into_any_element() } else { self.thread.clone().into_any_element() }))
                     .when(self.model.read(cx).review_open, |el| {
                         el.child(resizable_panel().size(px(640.)).size_range(px(400.)..px(1100.)).child(self.review.clone()))
                     })

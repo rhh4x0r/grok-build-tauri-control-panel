@@ -57,6 +57,11 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                         .flex()
                         .gap_2()
                         .child(
+                            Button::new("project-features")
+                                .ghost().small().icon(Lucide::GitBranch).label("Features")
+                                .on_click(|_,window,cx|window.dispatch_action(Box::new(crate::actions::OpenFeatures),cx)),
+                        )
+                        .child(
                             Button::new("project-fetch")
                                 .ghost()
                                 .small()

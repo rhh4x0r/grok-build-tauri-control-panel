@@ -8,7 +8,7 @@ use gpui_kit::*;
 use uuid::Uuid;
 
 use crate::actions::{
-    CycleApprovalMode, DeleteThread, FindInThread, LandThread, NewThread, OpenProject, OpenSettings,
+    NewFeature, OpenFeatures, CycleApprovalMode, DeleteThread, FindInThread, LandThread, NewThread, OpenProject, OpenSettings,
     RevealProject, StopTurn, SyncThread, ToggleDevPreview, ToggleExplainer,
 };
 use crate::models::app::AppModel;
@@ -22,6 +22,8 @@ struct Entry {
 
 fn entries() -> Vec<Entry> {
     vec![
+        Entry { label: "New feature…", keywords: &["project", "task", "parallel", "idea"], icon: Lucide::Plus, action: Box::new(NewFeature) },
+        Entry { label: "Project features", keywords: &["tasks", "board", "tracking"], icon: Lucide::GitBranch, action: Box::new(OpenFeatures) },
         Entry { label: "New thread", keywords: &["chat", "start"], icon: Lucide::Plus, action: Box::new(NewThread) },
         Entry { label: "Open project…", keywords: &["folder", "repo"], icon: Lucide::FolderOpen, action: Box::new(OpenProject) },
         Entry { label: "Find in conversation", keywords: &["search"], icon: Lucide::Search, action: Box::new(FindInThread) },

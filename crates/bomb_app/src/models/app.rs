@@ -100,6 +100,7 @@ pub struct AppModel {
     pub threads: HashMap<Uuid, Entity<ThreadModel>>,
     pub selected: Option<Uuid>,
     pub new_thread_open: bool,
+    pub features_open: bool,
     pub foundry_request: Option<String>,
     pub foundry_insert: Option<String>,
     pub foundry_close: bool,
@@ -150,6 +151,7 @@ impl AppModel {
             threads: HashMap::new(),
             selected: None,
             new_thread_open: false,
+            features_open: false,
             foundry_request: None,
             foundry_insert: None,
             foundry_close: false,
@@ -278,6 +280,7 @@ impl AppModel {
     }
 
     pub fn new_workspace_thread(&mut self, cx: &mut Context<Self>) {
+        self.features_open = false;
         self.new_thread_open = true;
         self.prefs.fast_mode = Some(false);
         if self.prefs.mode == "yolo" { self.prefs.mode = "plan".into(); }
@@ -296,6 +299,7 @@ impl AppModel {
     }
 
     pub fn inline_project(&mut self, root: String, cx: &mut Context<Self>) {
+        self.features_open = false;
         if let Some(w) = self.workspaces.iter().find(|w| w.project_root == root && w.inline) {
             self.open_workspace(w.id.clone(), cx);
         } else {
@@ -672,6 +676,8 @@ impl AppModel {
     // ── selection ───────────────────────────────────────────────────────
 
     pub fn select(&mut self, id: Option<Uuid>, cx: &mut Context<Self>) {
+        self.features_open = false;
+        cx.notify();
         if self.selected == id {
             return;
         }
@@ -703,6 +709,16 @@ impl AppModel {
                 }
             }
             self.hydrate(id, cx);
+            let effort_state=svc(cx);
+            let weak=cx.entity().downgrade();
+            let expected=(self.prefs.backend.clone(),self.prefs.model.clone(),self.prefs.effort.clone());
+            spawn_service(cx,async move {
+                effort_state.registry.current_effort(id).await.or_else(||effort_state.persistence.get_kv(&format!("session-effort/{id}")).ok().flatten())
+            },move |effort,cx|{let _=weak.update(cx,|m,cx|{
+                if m.selected==Some(id) && (m.prefs.backend.clone(),m.prefs.model.clone(),m.prefs.effort.clone())==expected {
+                    if let Some(effort)=effort {m.prefs.effort=effort;cx.notify();}
+                }
+            });});
             let state = svc(cx);
             spawn_service(
                 cx,
@@ -715,6 +731,8 @@ impl AppModel {
 
     /// Deselect: the composer starts a fresh thread in the active project.
     pub fn new_thread(&mut self, cx: &mut Context<Self>) {
+        self.features_open = false;
+        cx.notify();
         self.prefs.fast_mode = Some(false);
         self.new_thread_open = true;
         if self.prefs.mode == "yolo" { self.prefs.mode = "plan".into(); }
@@ -754,6 +772,8 @@ impl AppModel {
 
     /// Return to the welcome screen without removing projects or conversations.
     pub fn open_home(&mut self, cx: &mut Context<Self>) {
+        self.features_open = false;
+        cx.notify();
         self.new_thread(cx);
         self.active_project = None;
         self.review = None;
@@ -1376,6 +1396,8 @@ impl AppModel {
     }
 
     pub fn set_active_project(&mut self, root: String, cx: &mut Context<Self>) {
+        self.features_open = false;
+        cx.notify();
         self.new_thread_open = false;
         if self.prefs.mode == "yolo" { self.prefs.mode = "plan".into(); }
         self.source_thread = None;
