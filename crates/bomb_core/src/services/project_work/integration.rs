@@ -572,13 +572,20 @@ pub(super) async fn land(state: &AppState, project: &str, fid: &str) -> Result<(
                 p.policy.target
             ));
         }
-        if !state
-            .worktrees
-            .is_clean(Path::new(project))
-            .await
-            .map_err(err)?
-        {
-            return Err("The project checkout has local edits. Commit or move them before landing; they were preserved.".into());
+        // Untracked planning records and other unrelated files do not prevent
+        // integration. Git checks path collisions when applying the exact
+        // reviewed tree; tracked edits still require explicit resolution.
+        let tracked_edits = run_git(
+            Path::new(project),
+            &["status", "--porcelain", "--untracked-files=no"],
+        )
+        .await
+        .map_err(err)?;
+        if !tracked_edits.trim().is_empty() {
+            return Err(format!(
+                "Existing project files have local edits. They and the approved result are preserved. Save these edits in Git or move them aside before retrying:\n{}",
+                tracked_edits.trim()
+            ));
         }
         for workspace in state
             .persistence
@@ -610,7 +617,12 @@ pub(super) async fn land(state: &AppState, project: &str, fid: &str) -> Result<(
         // unrelated concurrent target change or conflicting working-tree edits.
         run_git(
             Path::new(project),
-            &["merge", "--ff-only", &review.candidate],
+            &[
+                "merge",
+                "--ff-only",
+                "--no-overwrite-ignore",
+                &review.candidate,
+            ],
         )
         .await
         .map_err(err)?;

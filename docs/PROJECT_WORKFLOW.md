@@ -42,7 +42,7 @@ Project messages and in-app notices announce results or blockers. Finishing all 
 
 Review before merging is the default. **Automatic local merging** is an explicit option in Workflow settings; pause before changing it. It still requires checks and independent review. Neither mode pushes or deploys.
 
-Landing is serialized and fast-forwards the selected local target to the reviewed candidate. If the target advances, the candidate is combined with the new target and checked/reviewed again. Dirty project files are preserved and block landing. Switch to the target branch and commit/move your edits before continuing.
+Landing is serialized and fast-forwards the selected local target to the reviewed candidate. If the target advances, the candidate is combined with the new target and checked/reviewed again. Unrelated untracked files (including older planning records) stay in place and do not block landing. Tracked or staged edits still block with the affected paths listed. Git also refuses to overwrite colliding untracked or ignored files. The app does not silently commit unrelated work. The project checkout must be on the target branch.
 
 - **Pause:** no new tasks or merges; active tasks may finish. Stop remains available during those tasks.
 - **Stop:** cancel active agents/checks; preserve worktrees, transcripts and checkpoints.

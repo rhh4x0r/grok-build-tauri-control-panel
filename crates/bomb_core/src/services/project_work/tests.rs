@@ -629,6 +629,13 @@ async fn reviewed(state: &Arc<AppState>, root: &str) -> FeatureWork {
 #[tokio::test]
 async fn landing_preserves_dirty_checkout_and_rejects_changed_candidate() {
     let (_tmp, state, root) = fixture().await;
+    let local = Path::new(&root).join("my-work.txt");
+    std::fs::write(&local, "saved work").unwrap();
+    state
+        .worktrees
+        .commit_all(Path::new(&root), "Save existing work")
+        .await
+        .unwrap();
     let f = reviewed(&state, &root).await;
     std::fs::write(Path::new(&root).join("my-work.txt"), "keep this").unwrap();
     assert!(integration::land(&state, &root, &f.id)
@@ -650,6 +657,100 @@ async fn landing_preserves_dirty_checkout_and_rejects_changed_candidate() {
         .unwrap_err()
         .contains("changed after review"));
 }
+#[tokio::test]
+async fn landing_preserves_unrelated_untracked_plans_without_extra_commits() {
+    let (_tmp, state, root) = fixture().await;
+    let f = reviewed(&state, &root).await;
+    let plan = Path::new(&root).join("plan/features/older-plan.md");
+    std::fs::create_dir_all(plan.parent().unwrap()).unwrap();
+    std::fs::write(&plan, "An earlier planning draft").unwrap();
+    integration::land(&state, &root, &f.id).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&plan).unwrap(),
+        "An earlier planning draft"
+    );
+    assert_eq!(
+        integration::head(&root).await.unwrap(),
+        f.approved_head.unwrap()
+    );
+    assert_eq!(
+        load(&state, &root).unwrap().features[0].state,
+        FeatureState::Done
+    );
+    assert_eq!(
+        run_git(
+            Path::new(&root),
+            &["ls-files", "--others", "--exclude-standard"]
+        )
+        .await
+        .unwrap()
+        .trim(),
+        "plan/features/older-plan.md"
+    );
+}
+
+#[tokio::test]
+async fn landing_preserves_colliding_untracked_and_ignored_files() {
+    for ignored in [false, true] {
+        let (_tmp, state, root) = fixture().await;
+        let f = reviewed(&state, &root).await;
+        if ignored {
+            std::fs::write(Path::new(&root).join(".git/info/exclude"), "scores.txt\n").unwrap();
+        }
+        let local = Path::new(&root).join("scores.txt");
+        std::fs::write(&local, "Unsaved local scores").unwrap();
+        let before = integration::head(&root).await.unwrap();
+        assert!(integration::land(&state, &root, &f.id).await.is_err());
+        assert_eq!(integration::head(&root).await.unwrap(), before);
+        assert_eq!(
+            std::fs::read_to_string(local).unwrap(),
+            "Unsaved local scores"
+        );
+        assert_ne!(
+            load(&state, &root).unwrap().features[0].state,
+            FeatureState::Done
+        );
+    }
+}
+
+#[tokio::test]
+async fn landing_preserves_untracked_directory_in_the_way_of_a_file() {
+    let (_tmp, state, root) = fixture().await;
+    let f = reviewed(&state, &root).await;
+    let local = Path::new(&root).join("scores.txt/draft.txt");
+    std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+    std::fs::write(&local, "Local draft").unwrap();
+    let before = integration::head(&root).await.unwrap();
+    assert!(integration::land(&state, &root, &f.id).await.is_err());
+    assert_eq!(integration::head(&root).await.unwrap(), before);
+    assert_eq!(std::fs::read_to_string(local).unwrap(), "Local draft");
+}
+
+#[tokio::test]
+async fn landing_preserves_staged_changes() {
+    let (_tmp, state, root) = fixture().await;
+    let f = reviewed(&state, &root).await;
+    let local = Path::new(&root).join("new-file.txt");
+    std::fs::write(&local, "Staged work").unwrap();
+    run_git(Path::new(&root), &["add", "new-file.txt"])
+        .await
+        .unwrap();
+    let before = integration::head(&root).await.unwrap();
+    assert!(integration::land(&state, &root, &f.id)
+        .await
+        .unwrap_err()
+        .contains("local edits"));
+    assert_eq!(integration::head(&root).await.unwrap(), before);
+    assert_eq!(std::fs::read_to_string(local).unwrap(), "Staged work");
+    assert_eq!(
+        run_git(Path::new(&root), &["diff", "--cached", "--name-only"])
+            .await
+            .unwrap()
+            .trim(),
+        "new-file.txt"
+    );
+}
+
 #[tokio::test]
 async fn target_advance_invalidates_review_and_approval() {
     let (_tmp, state, root) = fixture().await;
@@ -1053,9 +1154,15 @@ fn conversational_controls_do_not_consume_feature_requests() {
 #[tokio::test]
 async fn merge_retry_retains_exact_approval_after_checkout_cleanup() {
     let (_tmp, state, root) = fixture().await;
+    let scratch = Path::new(&root).join("local-draft.txt");
+    std::fs::write(&scratch, "saved draft").unwrap();
+    state
+        .worktrees
+        .commit_all(Path::new(&root), "Save existing draft")
+        .await
+        .unwrap();
     let f = reviewed(&state, &root).await;
     let reviewed_head = f.approved_head.clone().unwrap();
-    let scratch = Path::new(&root).join("local-draft.txt");
     std::fs::write(&scratch, "user draft").unwrap();
     let error = integration::land(&state, &root, &f.id).await.unwrap_err();
     change(&state, &root, |p| {
@@ -1069,7 +1176,7 @@ async fn merge_retry_retains_exact_approval_after_checkout_cleanup() {
         .waiting_reason(&blocked.features[0])
         .contains("local edits"));
     let expected = blocked.features[0].decision_key();
-    std::fs::remove_file(scratch).unwrap();
+    std::fs::write(scratch, "saved draft").unwrap();
     // Reserve the test's driver so retry can be inspected before dispatch.
     state
         .project_work
