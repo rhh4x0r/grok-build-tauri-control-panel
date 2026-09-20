@@ -668,7 +668,7 @@ impl Render for ThreadView {
             .when(self.search_open, |el| el.child(self.find_bar(&ui, cx)))
             .child(fade_in(
                 SharedString::from(format!("transcript-{tid}")),
-                div().flex_1().min_h_0().child(transcript),
+                div().flex_1().min_h_0().overflow_hidden().child(transcript),
             ))
             .child(
                 div()

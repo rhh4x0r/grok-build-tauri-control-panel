@@ -75,8 +75,7 @@ pub fn status_line(
         .map(format_elapsed)
         .unwrap_or_default();
     let last_tool = p
-        .last_tool
-        .clone()
+        .last_tool_summary()
         .filter(|_| active && !label.starts_with("Running"))
         .unwrap_or_default();
     let stalled = p.stalled(props.now);
@@ -84,6 +83,10 @@ pub fn status_line(
     let mut bits: Vec<AnyElement> = Vec::new();
     bits.push(
         div()
+            .min_w_0()
+            .overflow_hidden()
+            .text_ellipsis()
+            .whitespace_nowrap()
             .text_xs()
             .font_weight(FontWeight::MEDIUM)
             .text_color(if p.visible() { ui.text } else { ui.text_faint })
@@ -92,6 +95,10 @@ pub fn status_line(
     );
     let muted = |s: String, ui: &Ui| {
         div()
+            .min_w_0()
+            .overflow_hidden()
+            .text_ellipsis()
+            .whitespace_nowrap()
             .text_xs()
             .text_color(ui.text_muted)
             .child(s)
@@ -131,22 +138,37 @@ pub fn status_line(
     };
     let text_muted = ui.text_muted;
     div()
+        .w_full()
+        .min_w_0()
         .flex()
         .flex_col()
         .child(
             div()
+                .min_w_0()
+                .flex_shrink_0()
+                .overflow_hidden()
                 .flex()
                 .items_center()
                 .gap_2()
                 .h(px(28.))
                 .child(sprite(mood, active, ui))
-                .child(div().flex().items_center().gap_2().children(bits))
-                .child(div().flex_1())
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .children(bits),
+                )
                 .when(true, |el| {
                     let _ = props.has_explanations;
                     el.child(
                         div()
                             .id("explain-toggle")
+                            .flex_shrink_0()
+                            .whitespace_nowrap()
                             .flex()
                             .items_center()
                             .gap_1()
@@ -170,6 +192,12 @@ pub fn status_line(
         .when(props.explain_open, |el| {
             el.child(
                 div()
+                    .id("status-explanation")
+                    .min_w_0()
+                    .max_h(px(180.))
+                    .overflow_y_scroll()
+                    .overflow_x_hidden()
+                    .whitespace_normal()
                     .pb_2()
                     .text_sm()
                     .text_color(text_muted)

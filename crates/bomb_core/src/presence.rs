@@ -309,6 +309,21 @@ impl Presence {
         }
     }
 
+    /// A status-row summary only. Providers sometimes send a complete shell
+    /// script as the tool title; retain the original for transcript/details.
+    pub fn last_tool_summary(&self) -> Option<String> {
+        let raw = self.last_tool.as_deref()?.trim();
+        let mut lines = raw.lines().filter(|line| !line.trim().is_empty());
+        let first = lines.next()?;
+        let first = first.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut chars = first.chars().filter(|c| !c.is_control());
+        let mut summary: String = chars.by_ref().take(80).collect();
+        if chars.next().is_some() || lines.next().is_some() {
+            summary.push('…');
+        }
+        Some(summary)
+    }
+
     /// The one status label the UI shows.
     pub fn label(&self, now: Instant) -> String {
         match self.stall(now) {
@@ -318,7 +333,7 @@ impl Presence {
             None => {}
         }
         match self.phase {
-            Phase::Tools => match &self.last_tool {
+            Phase::Tools => match self.last_tool_summary() {
                 Some(t) => format!("Running · {t}"),
                 None => "Running".into(),
             },
@@ -365,6 +380,32 @@ mod tests {
 
     fn t0() -> Instant {
         Instant::now()
+    }
+
+    #[test]
+    fn multiline_tool_titles_stay_in_the_status_row() {
+        let now = t0();
+        let script = "\npython3   - <<'EOF'\np='src/fx/effects.ts'\ns=open(p).read()\nEOF\nnpm run typecheck";
+        let mut p = Presence::default();
+        p.tool_started(script, now);
+        assert_eq!(p.label(now), "Running · python3 - <<'EOF'…");
+        assert_eq!(p.last_tool.as_deref(), Some(script));
+        p.tool_finished(script, "completed", now);
+        p.signal(Phase::Reply, Patch::default(), now);
+        assert_eq!(p.last_tool_summary().as_deref(), Some("python3 - <<'EOF'…"));
+    }
+
+    #[test]
+    fn tool_summary_handles_long_unicode_and_empty_titles() {
+        let mut p = Presence {
+            last_tool: Some("界".repeat(120)),
+            ..Default::default()
+        };
+        assert_eq!(p.last_tool_summary(), Some(format!("{}…", "界".repeat(80))));
+        p.last_tool = Some(" \n\t ".into());
+        assert_eq!(p.last_tool_summary(), None);
+        p.last_tool = Some("read_file".into());
+        assert_eq!(p.last_tool_summary().as_deref(), Some("read_file"));
     }
 
     #[test]
