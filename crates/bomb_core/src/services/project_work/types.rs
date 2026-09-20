@@ -85,10 +85,25 @@ pub struct Proposal {
     pub message: String,
     #[serde(default)]
     pub questions: Vec<String>,
+    /// A preference to settle together before accepting this draft. Unlike
+    /// `questions`, this need not block understanding the repository or task.
+    #[serde(default)]
+    pub planning_question: Option<PlanningQuestion>,
+    #[serde(default)]
+    pub decisions: Vec<String>,
+    #[serde(default)]
+    pub assumptions: Vec<String>,
     #[serde(default)]
     pub features: Vec<FeatureDraft>,
     #[serde(default)]
     pub updates: Vec<WorkUpdate>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanningQuestion {
+    pub prompt: String,
+    /// Empty is a free-text question; otherwise offer two or three choices.
+    #[serde(default)]
+    pub options: Vec<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkUpdate {
@@ -153,6 +168,39 @@ impl Proposal {
     pub fn validate(&self, existing: &[FeatureWork]) -> Result<(), String> {
         if self.features.len() > 16 || self.questions.len() > 6 || self.updates.len() > 16 {
             return Err("Keep one plan update to 16 features and at most 6 questions.".into());
+        }
+        if let Some(question) = &self.planning_question {
+            if question.prompt.trim().is_empty() || question.prompt.len() > 2000 {
+                return Err("Ask one focused planning question in 1–2,000 characters.".into());
+            }
+            if !matches!(question.options.len(), 0 | 2 | 3) {
+                return Err(
+                    "Offer two or three planning choices, or allow a free-text answer.".into(),
+                );
+            }
+            let mut choices = HashSet::new();
+            if question.options.iter().any(|option| {
+                option.trim().is_empty()
+                    || option.len() > 500
+                    || !choices.insert(option.trim().to_lowercase())
+            }) {
+                return Err(
+                    "Planning choices must be distinct, nonempty, and at most 500 characters."
+                        .into(),
+                );
+            }
+        }
+        for notes in [&self.decisions, &self.assumptions] {
+            if notes.len() > 32
+                || notes
+                    .iter()
+                    .any(|note| note.trim().is_empty() || note.len() > 4000)
+            {
+                return Err(
+                    "Keep planning decisions and assumptions to 32 concise, nonempty notes each."
+                        .into(),
+                );
+            }
         }
         let mut ids: HashSet<_> = existing.iter().map(|f| f.id.clone()).collect();
         for f in &self.features {
@@ -562,7 +610,13 @@ impl ProjectWork {
             })
             .count()
             + usize::from(self.final_blocker.is_some())
-            + usize::from(!self.questions.is_empty())
+            + usize::from(
+                !self.questions.is_empty()
+                    || self
+                        .draft
+                        .as_ref()
+                        .is_some_and(|d| d.planning_question.is_some()),
+            )
     }
     pub fn activity_label(&self) -> String {
         let active = self.active_jobs.len();

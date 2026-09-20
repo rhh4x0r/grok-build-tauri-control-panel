@@ -23,11 +23,115 @@ impl ProjectWorkView {
                 })
                 .unwrap_or_else(|| id.clone())
         };
-        let mut card=super::super::brand::handoff_card(ui).min_w_0().overflow_hidden().gap_3()
-            .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(format!("Proposed work · {selected}/{} selected",p.features.len())))
-            .child(div().text_sm().child(format!("{} parallel jobs · local target {} · {} · up to {} code repair(s)",project.policy.concurrency,project.policy.target,if project.policy.auto_merge {"automatic merge after checks + AI review"}else{"you test and approve before merging"},project.policy.max_repairs)))
-            .child(div().text_xs().text_color(ui.text_muted).child("Unselected features stay in Backlog. Tool permissions still apply. Nothing is pushed or deployed."))
-            .child(Button::new("plan-details").ghost().small().selected(self.expanded_plan).label(if self.expanded_plan {"Hide acceptance details"}else{"Review acceptance criteria, test steps & commands"}).on_click(cx.listener(|v,_,_,cx|{v.expanded_plan= !v.expanded_plan;cx.notify();})));
+        let mut card = super::super::brand::handoff_card(ui)
+            .min_w_0()
+            .overflow_hidden()
+            .gap_3()
+            .child(
+                div()
+                    .text_lg()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Your plan"),
+            )
+            .child(div().text_sm().child(if p.features.is_empty() {
+                "Let's work out what you want to build.".into()
+            } else {
+                format!(
+                    "{selected} of {} features selected · the rest stay saved for later",
+                    p.features.len()
+                )
+            }))
+            .child(div().text_xs().text_color(ui.text_muted).child(format!(
+                "Changes go to local {}. {} Nothing is published.",
+                project.policy.target,
+                if project.policy.auto_merge {
+                    "Automatic merging after checks and AI review is enabled."
+                } else {
+                    "You review each result before it is added."
+                }
+            )))
+            .child(
+                Button::new("plan-details")
+                    .ghost()
+                    .small()
+                    .selected(self.expanded_plan)
+                    .label(if self.expanded_plan {
+                        "Hide agents & plan details"
+                    } else {
+                        "Full plan, agents & checks"
+                    })
+                    .on_click(cx.listener(|v, _, _, cx| {
+                        v.expanded_plan = !v.expanded_plan;
+                        cx.notify();
+                    })),
+            );
+        if let Some(question) = &p.planning_question {
+            let prompt = question.prompt.clone();
+            let mut question_card = div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_3()
+                .rounded_lg()
+                .bg(ui.hover)
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(prompt.clone()),
+                );
+            let mut answers = div().flex().flex_wrap().gap_2();
+            for (i, answer) in question.options.iter().enumerate() {
+                let answer = answer.clone();
+                let prompt = prompt.clone();
+                answers = answers.child(
+                    Button::new(SharedString::from(format!("planning-answer-{i}")))
+                        .outline()
+                        .small()
+                        .label(answer.clone())
+                        .disabled(self.busy || project.planning)
+                        .on_click(cx.listener(move |v, _, w, cx| {
+                            v.answer_plan(prompt.clone(), answer.clone(), w, cx)
+                        })),
+                );
+            }
+            let help_prompt = prompt.clone();
+            answers = answers.child(Button::new("planning-help").ghost().small().label("Help me decide").disabled(self.busy || project.planning)
+                .on_click(cx.listener(move |v,_,w,cx| v.answer_plan(help_prompt.clone(), "Explain the tradeoffs and recommend an option. Keep this decision open until I answer.".into(), w, cx))));
+            question_card = question_card
+                .child(answers)
+                .child(div().text_xs().text_color(ui.text_muted).child(
+                "Or reply in your own words below. Nothing starts until you choose Start building.",
+            ));
+            card = card.child(question_card);
+        }
+        for (label, items) in [
+            ("Decided", &p.decisions),
+            ("Assumptions to review", &p.assumptions),
+        ] {
+            if !items.is_empty() {
+                card = card.child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label));
+                for item in items
+                    .iter()
+                    .take(if self.expanded_plan { usize::MAX } else { 3 })
+                {
+                    card = card.child(div().text_sm().child(format!(
+                        "• {}",
+                        if self.expanded_plan {
+                            item.clone()
+                        } else {
+                            concise(item, 200)
+                        }
+                    )));
+                }
+                if !self.expanded_plan && items.len() > 3 {
+                    card = card.child(div().text_xs().text_color(ui.text_muted).child(format!(
+                        "{} more · open Full plan to review",
+                        items.len() - 3
+                    )));
+                }
+            }
+        }
         for (fi, f) in p.features.iter().enumerate() {
             let fid = f.id.clone();
             let included = !self.excluded.contains(&fid);
@@ -55,14 +159,14 @@ impl ProjectWorkView {
                 .child(div().text_sm().child(if self.expanded_plan {
                     f.brief.clone()
                 } else {
-                    f.brief.chars().take(200).collect::<String>()
+                    concise(&f.brief, 200)
                 }))
                 .child(div().text_xs().text_color(ui.text_muted).child(
                     if f.depends_on.is_empty() {
                         "Can start independently".into()
                     } else {
                         format!(
-                            "After {} merges",
+                            "Starts after {} is added",
                             f.depends_on
                                 .iter()
                                 .map(&title_for)
@@ -71,24 +175,47 @@ impl ProjectWorkView {
                         )
                     },
                 ));
-            for (ti, t) in f.tasks.iter().enumerate() {
-                feature = feature.child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .items_center()
-                        .gap_2()
-                        .child(div().text_sm().child(format!("{} · {}", t.role, t.title)))
-                        .child(self.picker(
-                            format!("plan-{fi}-{ti}"),
-                            Choice::Task(fi, ti),
-                            t.assignment.clone(),
-                            cx,
-                        )),
-                );
-                if !t.waits_for.is_empty() {
-                    feature =
-                        feature.child(div().text_xs().text_color(ui.text_muted).child(format!(
+            let assignments = f
+                .tasks
+                .iter()
+                .map(|t| {
+                    self.model
+                        .read(cx)
+                        .model_name(&t.assignment.backend, &t.assignment.model)
+                })
+                .chain(std::iter::once(self.model.read(cx).model_name(
+                    &f.verification.reviewer.backend,
+                    &f.verification.reviewer.model,
+                )))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(" · ");
+            feature = feature.child(
+                div()
+                    .text_xs()
+                    .text_color(ui.text_muted)
+                    .child(format!("Agents: {assignments}")),
+            );
+            if self.expanded_plan {
+                for (ti, t) in f.tasks.iter().enumerate() {
+                    feature = feature.child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .child(div().text_sm().child(format!("{} · {}", t.role, t.title)))
+                            .child(self.picker(
+                                format!("plan-{fi}-{ti}"),
+                                Choice::Task(fi, ti),
+                                t.assignment.clone(),
+                                cx,
+                            )),
+                    );
+                    if !t.waits_for.is_empty() {
+                        feature = feature.child(div().text_xs().text_color(ui.text_muted).child(
+                            format!(
                             "Waits for {}",
                             t.waits_for
                                 .iter()
@@ -100,42 +227,42 @@ impl ProjectWorkView {
                                     .unwrap_or_else(|| id.clone()))
                                 .collect::<Vec<_>>()
                                 .join(", ")
-                        )));
-                }
-                if let Some(suggestion) = project
-                    .routing_suggestions
-                    .get(&format!("{}/{}", f.id, t.id))
-                    .filter(|s| s.assignment != t.assignment)
-                {
-                    let a = suggestion.assignment.clone();
-                    feature = feature
-                        .child(div().text_xs().child(suggestion.reason.clone()))
-                        .child(
-                            Button::new(SharedString::from(format!("route-{fi}-{ti}")))
-                                .outline()
-                                .small()
-                                .label(format!(
-                                    "Use suggestion: {} · {}",
-                                    self.model.read(cx).model_name(&a.backend, &a.model),
-                                    super::super::brand::effort_label(&a.effort)
-                                ))
-                                .on_click(cx.listener(move |v, _, _, cx| {
-                                    v.assignment(Choice::Task(fi, ti), a.clone(), cx)
-                                })),
-                        );
-                }
-                if self.expanded_plan {
+                        ),
+                        ));
+                    }
+                    if let Some(suggestion) = project
+                        .routing_suggestions
+                        .get(&format!("{}/{}", f.id, t.id))
+                        .filter(|s| s.assignment != t.assignment)
+                    {
+                        let a = suggestion.assignment.clone();
+                        feature = feature
+                            .child(div().text_xs().child(suggestion.reason.clone()))
+                            .child(
+                                Button::new(SharedString::from(format!("route-{fi}-{ti}")))
+                                    .outline()
+                                    .small()
+                                    .label(format!(
+                                        "Use suggestion: {} · {}",
+                                        self.model.read(cx).model_name(&a.backend, &a.model),
+                                        super::super::brand::effort_label(&a.effort)
+                                    ))
+                                    .on_click(cx.listener(move |v, _, _, cx| {
+                                        v.assignment(Choice::Task(fi, ti), a.clone(), cx)
+                                    })),
+                            );
+                    }
                     feature = feature.child(div().text_sm().child(t.brief.clone()));
                 }
+                feature = feature
+                    .child(div().text_xs().child("Independent reviewer"))
+                    .child(self.picker(
+                        format!("reviewer-{fi}"),
+                        Choice::Reviewer(fi),
+                        f.verification.reviewer.clone(),
+                        cx,
+                    ));
             }
-            feature = feature
-                .child(div().text_xs().child("Independent reviewer"))
-                .child(self.picker(
-                    format!("reviewer-{fi}"),
-                    Choice::Reviewer(fi),
-                    f.verification.reviewer.clone(),
-                    cx,
-                ));
             if self.expanded_plan {
                 feature = feature.child(div().text_sm().child(format!(
                         "Done when:\n{}\nHow to test: {}",
@@ -165,6 +292,15 @@ impl ProjectWorkView {
                 update.feedback
             )));
         }
+        let expected = serde_json::to_string(p).unwrap_or_default();
+        let start_expected = expected.clone();
+        let selected_ids: Vec<_> = p
+            .features
+            .iter()
+            .filter(|f| !self.excluded.contains(&f.id))
+            .map(|f| f.id.clone())
+            .collect();
+        let start_selected = selected_ids.clone();
         card.child(
             div()
                 .flex()
@@ -174,30 +310,41 @@ impl ProjectWorkView {
                     Button::new("plan-go")
                         .primary()
                         .small()
-                        .label("Start selected")
+                        .label("Start building")
                         .disabled(
                             self.busy
+                                || project.planning
                                 || !project.questions.is_empty()
                                 || !p.questions.is_empty()
+                                || p.planning_question.is_some()
                                 || (selected == 0 && p.updates.is_empty()),
                         )
-                        .on_click(cx.listener(|v, _, _, cx| v.accept(true, cx))),
+                        .on_click(cx.listener(move |v, _, _, cx| {
+                            v.accept(true, start_expected.clone(), start_selected.clone(), cx)
+                        })),
                 )
                 .child(
                     Button::new("plan-save")
                         .outline()
                         .small()
-                        .label("Save to Backlog")
+                        .label("Save for later")
                         .disabled(
-                            self.busy || !project.questions.is_empty() || !p.questions.is_empty(),
+                            self.busy
+                                || project.planning
+                                || !project.questions.is_empty()
+                                || !p.questions.is_empty()
+                                || p.planning_question.is_some()
+                                || (p.features.is_empty() && p.updates.is_empty()),
                         )
-                        .on_click(cx.listener(|v, _, _, cx| v.accept(false, cx))),
+                        .on_click(cx.listener(move |v, _, _, cx| {
+                            v.accept(false, expected.clone(), selected_ids.clone(), cx)
+                        })),
                 )
                 .child(
                     Button::new("plan-revise")
                         .ghost()
                         .small()
-                        .label("Revise")
+                        .label("Keep planning")
                         .on_click(
                             cx.listener(|v, _, w, cx| v.input.update(cx, |s, cx| s.focus(w, cx))),
                         ),
@@ -215,7 +362,7 @@ impl ProjectWorkView {
     }
     fn feature_card(&self, f: &FeatureWork, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
         let id = f.id.clone();
-        let mut card = super::super::brand::handoff_card(ui)
+        let card = super::super::brand::handoff_card(ui)
             .gap_2()
             .min_w_0()
             .child(div().font_weight(FontWeight::SEMIBOLD).child(f.title()))
@@ -223,33 +370,24 @@ impl ProjectWorkView {
                 div()
                     .text_xs()
                     .text_color(ui.text_muted)
-                    .child(f.status_label().to_string()),
+                    .child(outcome_status(f).to_string()),
             );
-        if let Ok(spec) = f.feature() {
-            for t in &spec.tasks {
-                let actual = f.tasks.get(&t.id);
-                let assignment = actual
-                    .and_then(|t| t.applied.as_ref())
-                    .or(f.assignments.get(&t.id))
-                    .or(t.assignment.as_ref());
-                let label = assignment
-                    .map(|a| {
-                        format!(
-                            "{} · {}",
-                            self.model.read(cx).model_name(&a.backend, &a.model),
-                            super::super::brand::effort_label(&a.effort)
-                        )
-                    })
-                    .unwrap_or_default();
-                card = card.child(div().text_xs().child(format!(
-                    "{} · {}\n{}",
-                    t.role,
-                    actual.map(|t| t.state.label()).unwrap_or_default(),
-                    label
-                )));
+        let snapshot = self.snapshot(cx);
+        let waiting = if f.state == FeatureState::Done {
+            if snapshot.state == RunState::Complete {
+                format!(
+                    "Added to local {} · final project checks passed",
+                    snapshot.policy.target
+                )
+            } else {
+                format!(
+                    "Added to local {} · final project checks still required",
+                    snapshot.policy.target
+                )
             }
-        }
-        let waiting = self.snapshot(cx).waiting_reason(f);
+        } else {
+            snapshot.waiting_reason(f)
+        };
         let note = waiting
             .lines()
             .take(2)
@@ -259,19 +397,31 @@ impl ProjectWorkView {
             .take(180)
             .collect::<String>();
         card.child(div().text_xs().text_color(ui.text_muted).child(note))
-            .child(div().text_xs().child(format!(
-                "Unblocks {} feature(s)",
-                self.snapshot(cx).unblocks(&f.id)
-            )))
+            .when(self.snapshot(cx).unblocks(&f.id) > 0, |d| {
+                d.child(div().text_xs().text_color(ui.text_muted).child(format!(
+                    "{} features follow this one",
+                    self.snapshot(cx).unblocks(&f.id)
+                )))
+            })
             .child(
                 Button::new(SharedString::from(format!("inspect-{}", f.id)))
                     .outline()
                     .small()
-                    .label(if f.state == FeatureState::Review {
-                        "Test & review"
-                    } else {
-                        "Inspect"
-                    })
+                    .label(
+                        if f.state == FeatureState::Review && f.approved_head.is_none() {
+                            "Review result"
+                        } else if f
+                            .blocker
+                            .as_ref()
+                            .is_some_and(|b| b.kind == BlockerKind::Input)
+                        {
+                            "Answer question"
+                        } else if f.state == FeatureState::NeedsInput {
+                            "Resolve blocker"
+                        } else {
+                            "View progress"
+                        },
+                    )
                     .on_click(cx.listener(move |v, _, _, cx| v.inspect(id.clone(), cx))),
             )
             .into_any_element()
@@ -295,17 +445,25 @@ impl ProjectWorkView {
             .w_full()
             .overflow_x_scroll()
             .min_h_0();
-        for name in ["Backlog", "Queued", "In progress", "Needs you", "Done"] {
+        for name in [
+            "Saved for later",
+            "Queued",
+            "In progress",
+            "Ready to review",
+            "Questions",
+            "Blocked",
+            "Added",
+        ] {
             let items = p
                 .features
                 .iter()
                 .filter(|f| {
-                    f.state.column() == name
+                    outcome_group(f) == name
                         && (!self.needs_only
                             || matches!(f.state, FeatureState::NeedsInput | FeatureState::Review))
                 })
                 .collect::<Vec<_>>();
-            let count = items.len() + usize::from(name == "Backlog" && p.draft.is_some());
+            let count = items.len() + usize::from(name == "Saved for later" && p.draft.is_some());
             let mut column = div()
                 .flex()
                 .flex_col()
@@ -318,7 +476,7 @@ impl ProjectWorkView {
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(format!("{name} · {count}")),
                 );
-            if name == "Backlog" && p.draft.is_some() {
+            if name == "Saved for later" && p.draft.is_some() {
                 column = column.child(
                     super::super::brand::handoff_card(ui)
                         .gap_2()
@@ -509,31 +667,59 @@ impl ProjectWorkView {
                         cx.notify();
                     })),
             );
-        for tab in [
-            "Result", "Changes", "Thread", "Preview", "Records", "Models",
+        for (tab, label) in [
+            ("Result", "Result"),
+            ("Changes", "Changes"),
+            ("Thread", "Activity"),
         ] {
             tabs = tabs.child(
                 Button::new(SharedString::from(format!("result-{tab}")))
                     .ghost()
                     .small()
-                    .label(tab)
+                    .label(label)
                     .selected(self.detail == tab)
-                    .on_click(cx.listener(move |v, _, _, cx| match tab {
-                        "Changes" => v.changes(cx),
-                        "Preview" => v.preview(cx),
-                        _ => {
+                    .on_click(cx.listener(move |v, _, _, cx| {
+                        if tab == "Changes" {
+                            v.changes(cx);
+                        } else {
                             v.detail = tab;
                             cx.notify();
                         }
                     })),
             );
         }
-        card = card.child(tabs).child(self.decision.clone()).child(
-            div()
-                .text_sm()
-                .text_color(ui.text_muted)
-                .child(f.note.clone()),
+        let weak = cx.entity().downgrade();
+        tabs = tabs.child(
+            Button::new("result-more")
+                .ghost()
+                .small()
+                .label("Details")
+                .dropdown_caret(true)
+                .dropdown_menu(move |menu, _, _| {
+                    let agents = weak.clone();
+                    let records = weak.clone();
+                    menu.item(PopupMenuItem::new("Agents & assignments").on_click(
+                        move |_, _, cx| {
+                            let _ = agents.update(cx, |v, cx| {
+                                v.detail = "Models";
+                                cx.notify();
+                            });
+                        },
+                    ))
+                    .item(
+                        PopupMenuItem::new("Approved scope & records").on_click(move |_, _, cx| {
+                            let _ = records.update(cx, |v, cx| {
+                                v.detail = "Records";
+                                cx.notify();
+                            });
+                        }),
+                    )
+                }),
         );
+        card = card.child(tabs);
+        if f.state == FeatureState::NeedsInput {
+            card = card.child(self.decision.clone());
+        }
         let spec = f.feature().ok();
         match self.detail {
             "Records" => {
@@ -639,45 +825,42 @@ impl ProjectWorkView {
                         ),
                 );
             }
-            "Preview" => {
-                card = card
-                    .child(div().text_xs().child(match &f.review {
-                        Some(r) => format!("Reviewed revision {} · local candidate preview. Use the test steps and evidence to verify whether external services are connected.", &r.candidate[..8.min(r.candidate.len())]),
-                        None => "Unreviewed local candidate · not yet verified. Fixtures or missing external services may affect behavior.".into(),
-                    }))
-                    .when_some(self.preview_message.clone(), |d, message| {
-                        d.child(div().text_sm().child(message))
-                    })
-                    .child(
-                        Button::new("preview-retry")
-                            .outline()
-                            .small()
-                            .label(if self.preview_switch {
-                                "Switch preview"
-                            } else {
-                                "Open / retry preview"
-                            })
-                            .disabled(self.preview_busy || f.candidate.is_none())
-                            .on_click(
-                                cx.listener(|v, _, _, cx| v.start_preview(v.preview_switch, cx)),
-                            ),
-                    )
-                    .child(
-                        div().text_xs().child(
-                            f.candidate
-                                .as_ref()
-                                .map(|w| format!("Candidate: {}", w.path))
-                                .unwrap_or_else(|| {
-                                    "The combined candidate will be available after tasks finish."
-                                        .into()
-                                }),
-                        ),
-                    )
-                    .when(f.candidate.is_some(), |d| {
-                        d.child(div().h(px(460.)).child(self.preview.clone()))
-                    });
-            }
             "Thread" => {
+                if let Some(w) = &f.candidate {
+                    card = card.child(
+                        div()
+                            .text_sm()
+                            .child(format!("Combined result branch: {}", w.branch)),
+                    );
+                }
+                for (id, task) in &f.tasks {
+                    let title = spec
+                        .as_ref()
+                        .and_then(|s| s.tasks.iter().find(|t| &t.id == id))
+                        .map(|t| t.title.clone())
+                        .unwrap_or_else(|| id.clone());
+                    card = card.child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(format!("{title} · {}", task.state.label())),
+                    );
+                    if let Some(w) = &task.workspace {
+                        card = card.child(
+                            div()
+                                .text_xs()
+                                .text_color(ui.text_muted)
+                                .child(format!("Branch: {}", w.branch)),
+                        );
+                    }
+                    if !task.summary.is_empty() {
+                        card = card.child(div().text_sm().child(task.summary.clone()));
+                    }
+                    if !task.note.is_empty() {
+                        card = card.child(div().text_sm().child(task.note.clone()));
+                    }
+                }
+
                 for attempt in &f.review_history {
                     let sid = attempt.thread;
                     card = card
@@ -738,24 +921,82 @@ impl ProjectWorkView {
                             .child(div().text_sm().child(v.test_steps.clone()));
                     }
                 }
-                for t in f.tasks.values() {
-                    if !t.summary.is_empty() {
-                        card = card.child(div().text_sm().child(t.summary.clone()));
-                    }
-                    if !t.note.is_empty() {
-                        card = card.child(div().text_sm().child(t.note.clone()));
-                    }
-                }
-                if let Some(review) = &f.review {
+                card = card.child(
+                    Button::new("result-preview-toggle")
+                        .outline()
+                        .small()
+                        .label(if self.show_preview {
+                            "Hide preview"
+                        } else {
+                            "Try result / open preview"
+                        })
+                        .disabled(self.preview_busy || f.candidate.is_none())
+                        .on_click(cx.listener(|v, _, _, cx| {
+                            if v.show_preview {
+                                v.show_preview = false;
+                                cx.notify();
+                            } else {
+                                v.preview(cx);
+                            }
+                        })),
+                );
+                if self.show_preview {
                     card = card
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child("Independent review"),
-                        )
-                        .child(div().text_sm().child(review.summary.clone()))
-                        .child(div().text_xs().text_color(ui.text_muted).child(format!(
+                    .child(div().text_xs().child(match &f.review {
+                        Some(r) => format!("Reviewed revision {} · local candidate preview. Use the test steps and evidence to verify whether external services are connected.", &r.candidate[..8.min(r.candidate.len())]),
+                        None => "Unreviewed local candidate · not yet verified. Fixtures or missing external services may affect behavior.".into(),
+                    }))
+                    .when_some(self.preview_message.clone(), |d, message| {
+                        d.child(div().text_sm().child(message))
+                    })
+                    .child(
+                        Button::new("preview-retry")
+                            .outline()
+                            .small()
+                            .label(if self.preview_switch {
+                                "Switch preview"
+                            } else {
+                                "Open / retry preview"
+                            })
+                            .disabled(self.preview_busy || f.candidate.is_none())
+                            .on_click(
+                                cx.listener(|v, _, _, cx| v.start_preview(v.preview_switch, cx)),
+                            ),
+                    )
+                    .child(
+                        div().text_xs().child(
+                            f.candidate
+                                .as_ref()
+                                .map(|w| format!("Candidate: {}", w.path))
+                                .unwrap_or_else(|| {
+                                    "The combined candidate will be available after tasks finish."
+                                        .into()
+                                }),
+                        ),
+                    )
+                    .when(f.candidate.is_some(), |d| {
+                        d.child(div().h(px(460.)).child(self.preview.clone()))
+                    });
+                }
+                if self.show_checks {
+                    for t in f.tasks.values() {
+                        if !t.summary.is_empty() {
+                            card = card.child(div().text_sm().child(t.summary.clone()));
+                        }
+                        if !t.note.is_empty() {
+                            card = card.child(div().text_sm().child(t.note.clone()));
+                        }
+                    }
+                    if let Some(review) = &f.review {
+                        card = card
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child("Independent review"),
+                            )
+                            .child(div().text_sm().child(review.summary.clone()))
+                            .child(div().text_xs().text_color(ui.text_muted).child(format!(
                                 "{} · {} · checked commit {}",
                                 self.model
                                     .read(cx)
@@ -763,8 +1004,8 @@ impl ProjectWorkView {
                                 super::super::brand::effort_label(&review.reviewer.effort),
                                 review.candidate
                             )));
-                    for criterion in &review.criteria {
-                        card = card.child(div().text_sm().child(format!(
+                        for criterion in &review.criteria {
+                            card = card.child(div().text_sm().child(format!(
                                 "{}: {}\n{}",
                                 spec.as_ref()
                                     .and_then(|s| s.verification.as_ref())
@@ -777,6 +1018,7 @@ impl ProjectWorkView {
                                 criterion.status,
                                 criterion.evidence.join("\n")
                             )));
+                        }
                     }
                 }
                 card = card.child(
@@ -785,9 +1027,9 @@ impl ProjectWorkView {
                         .small()
                         .selected(self.show_checks)
                         .label(if self.show_checks {
-                            "Hide passing checks"
+                            "Hide verification & handoffs"
                         } else {
-                            "Show all check output"
+                            "Verification details & worker handoffs"
                         })
                         .on_click(cx.listener(|v, _, _, cx| {
                             v.show_checks = !v.show_checks;
@@ -804,8 +1046,57 @@ impl ProjectWorkView {
                 }
             }
         }
-        card.into_any_element()
+        card.when(f.state != FeatureState::NeedsInput, |d| {
+            d.child(self.decision.clone())
+        })
+        .into_any_element()
     }
+}
+fn outcome_group(f: &FeatureWork) -> &'static str {
+    match f.state {
+        FeatureState::Idea => "Saved for later",
+        FeatureState::Review if f.approved_head.is_none() => "Ready to review",
+        FeatureState::NeedsInput
+            if f.blocker
+                .as_ref()
+                .is_some_and(|b| b.kind == BlockerKind::Input) =>
+        {
+            "Questions"
+        }
+        FeatureState::NeedsInput => "Blocked",
+        FeatureState::Done => "Added",
+        FeatureState::Queued => "Queued",
+        _ => "In progress",
+    }
+}
+fn outcome_status(f: &FeatureWork) -> &str {
+    match f.state {
+        FeatureState::Review if f.approved_head.is_some() => "Approved · waiting to add",
+        FeatureState::Review => "Ready to review",
+        FeatureState::Landing => "Adding to project",
+        FeatureState::Done => "Added to project",
+        _ => f.status_label(),
+    }
+}
+fn has_ready_work(p: &ProjectWork) -> bool {
+    p.has_activity()
+        || p.features.iter().any(|f| {
+            matches!(
+                f.state,
+                FeatureState::Queued
+                    | FeatureState::Working
+                    | FeatureState::Checking
+                    | FeatureState::Landing
+            ) || f.state == FeatureState::Review
+        })
+}
+fn concise(text: &str, limit: usize) -> String {
+    let mut chars = text.chars();
+    let mut short: String = chars.by_ref().take(limit).collect();
+    if chars.next().is_some() {
+        short.push('…');
+    }
+    short
 }
 fn diff_files(text: &str) -> Vec<(String, String)> {
     let mut files: Vec<(String, String)> = Vec::new();
@@ -887,6 +1178,7 @@ impl Render for ProjectWorkView {
         }
         if let Some(id) = self.selected.clone() {
             self.decision.update(cx, |d, cx| {
+                d.set_embedded(true);
                 d.set_context(self.project.clone(), id, window, cx)
             });
         }
@@ -896,10 +1188,28 @@ impl Render for ProjectWorkView {
         }
         let ui = Ui::of(cx);
         let p = self.snapshot(cx);
+        let inspected = self
+            .selected
+            .as_ref()
+            .and_then(|id| p.features.iter().find(|f| &f.id == id))
+            .map(FeatureWork::decision_key);
+        if self.inspected_revision != inspected {
+            self.inspected_revision = inspected;
+            self.preview_generation += 1;
+            self.preview_busy = false;
+            self.preview_message = None;
+            self.preview_switch = false;
+            self.show_preview = false;
+            self.diff = None;
+            if self.selected.is_some() && self.detail == "Changes" {
+                self.changes(cx);
+            }
+        }
         let tail = p.messages.last().map(|m| m.id.clone());
         if self.last_message != tail {
             self.last_message = tail;
-            if self.tab == "Conversation"
+            if self.show_history
+                && self.tab == "Conversation"
                 && self.selected.is_none()
                 && (self.scroll.max_offset().y + self.scroll.offset().y < px(80.))
             {
@@ -965,7 +1275,7 @@ impl Render for ProjectWorkView {
                         Button::new("project-work-settings")
                             .ghost()
                             .small()
-                            .label("Workflow settings")
+                            .label("Agents & settings")
                             .on_click(cx.listener(|v, _, _, cx| {
                                 v.settings = !v.settings;
                                 cx.notify();
@@ -978,7 +1288,11 @@ impl Render for ProjectWorkView {
                 Button::new(SharedString::from(format!("project-tab-{tab}")))
                     .ghost()
                     .small()
-                    .label(tab)
+                    .label(if tab == "Conversation" {
+                        "Project"
+                    } else {
+                        tab
+                    })
                     .selected(self.tab == tab && self.selected.is_none())
                     .on_click(cx.listener(move |v, _, _, cx| {
                         v.tab = tab;
@@ -997,7 +1311,7 @@ impl Render for ProjectWorkView {
                     .outline()
                     .small()
                     .label(format!(
-                        "Needs you · {needs}{}",
+                        "Attention · {needs}{}",
                         if self.needs_only { " · showing" } else { "" }
                     ))
                     .on_click(cx.listener(|v, _, _, cx| {
@@ -1030,8 +1344,8 @@ impl Render for ProjectWorkView {
                     Button::new("go-project")
                         .primary()
                         .small()
-                        .label("Resume ready work")
-                        .disabled(p.features.is_empty() || self.busy || p.planning)
+                        .label("Resume project")
+                        .disabled(!has_ready_work(&p) || self.busy || p.planning)
                         .on_click(cx.listener(|v, _, _, cx| v.command("go", cx))),
                 );
             }
@@ -1055,6 +1369,7 @@ impl Render for ProjectWorkView {
                         v.new_activity = false;
                         v.selected = None;
                         v.tab = "Conversation";
+                        v.show_history = true;
                         v.pin_frames = 2;
                         cx.notify();
                     })),
@@ -1076,7 +1391,7 @@ impl Render for ProjectWorkView {
         if let Some(message) = &self.message {
             body = body.child(div().text_sm().child(message.clone()));
         }
-        if let Some(sid) = p.planner_thread {
+        if let Some(sid) = p.planner_thread.filter(|_| self.show_history) {
             body = body.child(
                 Button::new("project-planning-thread")
                     .ghost()
@@ -1094,15 +1409,16 @@ impl Render for ProjectWorkView {
             );
         }
         if !p.enabled {
-            body = body.child(super::super::workspaces::project_page(
-                self.model.clone(),
-                &ui,
-                cx,
-            ));
             body=body.child(super::super::brand::handoff_card(&ui).gap_3()
-            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Optional: plan and track parallel features"))
-            .child(div().text_sm().child("Describe what you want. Review a plan, run tasks in parallel, then test and approve each result. This workflow is optional for every project."))
-            .child(Button::new("enable-project-work").primary().small().label("Enable project workflow").disabled(self.busy).on_click(cx.listener(|v,_,_,cx|v.enable(true,cx)))));
+            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("What would you like to build?"))
+            .child(div().text_sm().child("Plan together, watch the work, then review each result. Planning reads your project; building starts only when you choose Start building."))
+            .child(Button::new("enable-project-work").primary().small().label("Plan this project").disabled(self.busy).on_click(cx.listener(|v,_,_,cx|v.enable(true,cx)))));
+        }
+        if self.candidates(cx).is_empty() {
+            body = body.child(super::super::brand::handoff_card(&ui).gap_2()
+                .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Connect an agent to plan together"))
+                .child(div().text_sm().text_color(ui.text_muted).child("You can keep your idea below. Connect a provider in Settings, then return to this project; your draft stays saved."))
+                .child(Button::new("project-connect-agent").primary().small().label("Connect an agent").on_click(|_,window,cx| window.dispatch_action(Box::new(crate::actions::OpenSettings),cx))));
         }
         if self.settings {
             let auto = p.policy.auto_merge;
@@ -1225,7 +1541,11 @@ impl Render for ProjectWorkView {
                                 Button::new("retry-final")
                                     .primary()
                                     .small()
-                                    .label("Retry final checks")
+                                    .label(if p.state == RunState::Running {
+                                        "Retry project checks"
+                                    } else {
+                                        "Resume project & retry checks"
+                                    })
                                     .disabled(p.has_activity() || self.busy)
                                     .on_click(cx.listener(|v, _, _, cx| v.retry_final(cx))),
                             )
@@ -1311,10 +1631,74 @@ impl Render for ProjectWorkView {
                 body = body.child(self.board(&p, &ui, cx));
             }
         } else {
-            if p.messages.is_empty() && p.enabled {
-                body=body.child(div().text_sm().text_color(ui.text_muted).child("What do you want to build? You can describe several ideas at once and say which models you prefer for each part."));
+            if let Some(draft) = &p.draft {
+                body = body.child(self.plan_card(draft, &ui, cx));
             }
-            if p.messages.len() > self.history_limit {
+            if p.planning {
+                body = body.child("Planning with you · your existing work can continue.");
+            }
+            if !p.features.is_empty() {
+                body = body.child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("Your work"),
+                );
+                for group in [
+                    "Ready to review",
+                    "Questions",
+                    "Blocked",
+                    "In progress",
+                    "Queued",
+                    "Saved for later",
+                    "Added",
+                ] {
+                    let items = p
+                        .features
+                        .iter()
+                        .filter(|f| {
+                            outcome_group(f) == group
+                                && (!self.needs_only
+                                    || matches!(
+                                        f.state,
+                                        FeatureState::NeedsInput | FeatureState::Review
+                                    ))
+                        })
+                        .collect::<Vec<_>>();
+                    if !items.is_empty() {
+                        body = body.child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(format!("{group} · {}", items.len())),
+                        );
+                        for f in items {
+                            body = body.child(self.feature_card(f, &ui, cx));
+                        }
+                    }
+                }
+            } else if p.draft.is_none() && p.enabled && !p.planning {
+                body = body.child(div().text_lg().child("Describe what you want to build or improve."))
+                    .child(div().text_sm().text_color(ui.text_muted).child("We'll work out a plan together. Your answers and draft are saved with this project."));
+            }
+            if !p.messages.is_empty() {
+                body = body.child(
+                    Button::new("project-history-toggle")
+                        .ghost()
+                        .small()
+                        .label(if self.show_history {
+                            "Show less conversation"
+                        } else {
+                            "Conversation & activity history"
+                        })
+                        .selected(self.show_history)
+                        .on_click(cx.listener(|v, _, _, cx| {
+                            v.show_history = !v.show_history;
+                            cx.notify();
+                        })),
+                );
+            }
+            if self.show_history && p.messages.len() > self.history_limit {
                 body = body.child(
                     Button::new("older-project-history")
                         .ghost()
@@ -1326,7 +1710,17 @@ impl Render for ProjectWorkView {
                         })),
                 );
             }
-            for m in p.messages.iter().rev().take(self.history_limit).rev() {
+            for m in p
+                .messages
+                .iter()
+                .rev()
+                .take(if self.show_history {
+                    self.history_limit
+                } else {
+                    2
+                })
+                .rev()
+            {
                 let mut message = div()
                     .flex()
                     .flex_col()
@@ -1335,8 +1729,15 @@ impl Render for ProjectWorkView {
                         d.ml_8().p_3().rounded_lg().bg(ui.hover)
                     })
                     .child(
-                        TextView::markdown(SharedString::from(m.id.clone()), m.text.clone())
-                            .selectable(true),
+                        TextView::markdown(
+                            SharedString::from(m.id.clone()),
+                            if self.show_history {
+                                m.text.clone()
+                            } else {
+                                concise(&m.text, 420)
+                            },
+                        )
+                        .selectable(true),
                     );
                 for fid in &m.features {
                     if let Some(f) = p.features.iter().find(|f| &f.id == fid) {
@@ -1353,12 +1754,6 @@ impl Render for ProjectWorkView {
                     }
                 }
                 body = body.child(message);
-            }
-            if let Some(draft) = &p.draft {
-                body = body.child(self.plan_card(draft, &ui, cx));
-            }
-            if p.planning {
-                body = body.child("Planning from your repository and connected models…");
             }
         }
         if !p.final_checks.is_empty() {
@@ -1398,18 +1793,12 @@ impl Render for ProjectWorkView {
             .border_t_1()
             .border_color(ui.border)
             .flex_shrink_0()
-            .child(div().text_xs().text_color(ui.text_muted).child("New project work or a project question · Enter to send · Shift+Enter for a new line"))
+            .child(div().text_xs().text_color(ui.text_muted).child("To this project · describe a new feature, answer a planning question, or ask about progress"))
             .child(Textarea::new(&self.input));
         let mut controls = div().flex().flex_wrap().items_center().gap_2();
         if let Some(a) = self.planner(cx) {
             controls = controls.child(self.picker("planner".into(), Choice::Planner, a, cx));
         }
-        let routing_ready = services(cx)
-            .config
-            .try_read()
-            .ok()
-            .is_some_and(|c| c.model_suggestions.enabled);
-        controls=controls.child(Button::new("composer-smart-routing").ghost().small().label("Smart Model Routing").selected(p.routing.unwrap_or(routing_ready)).disabled(!routing_ready).tooltip(if routing_ready {"Toggle routing suggestions for this project's future plans. Model choices remain yours."} else {"Enable JEV in Settings to use Smart Model Routing."}).on_click(cx.listener(move|v,_,_,cx|{let enabled=v.snapshot(cx).routing.unwrap_or(routing_ready);if let Err(e)=work::set_routing(&services(cx),&v.project,Some(!enabled)){v.message=Some(e);}cx.notify();})));
         controls = controls.child(div().flex_1()).child(
             Button::new("describe-project-work")
                 .primary()
@@ -1420,7 +1809,7 @@ impl Render for ProjectWorkView {
                     } else if p.planning {
                         "Planning…"
                     } else {
-                        "Plan this"
+                        "Send"
                     },
                 )
                 .disabled(

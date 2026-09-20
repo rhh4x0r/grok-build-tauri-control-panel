@@ -128,6 +128,178 @@ fn proposal() -> Proposal {
     }
 }
 
+fn planning_question() -> PlanningQuestion {
+    PlanningQuestion {
+        prompt: "Who should be able to see the scores?".into(),
+        options: vec!["Only me".into(), "My team".into()],
+    }
+}
+
+#[test]
+fn legacy_plans_and_free_text_planning_questions_remain_readable() {
+    let old = Proposal::parse(
+        r#"<project-plan>{"message":"Existing plan","questions":[],"features":[],"updates":[]}</project-plan>"#,
+    )
+    .unwrap();
+    old.validate(&[]).unwrap();
+    assert!(old.planning_question.is_none());
+    assert!(old.decisions.is_empty());
+    assert!(old.assumptions.is_empty());
+
+    let open = Proposal::parse(
+        r#"<project-plan>{"planning_question":{"prompt":"What should a successful result let you do?"}}</project-plan>"#,
+    )
+    .unwrap();
+    open.validate(&[]).unwrap();
+    assert!(open.planning_question.unwrap().options.is_empty());
+}
+
+#[test]
+fn planning_question_rejects_empty_ambiguous_and_excessive_choices() {
+    let mut p = proposal();
+    p.planning_question = Some(planning_question());
+    p.validate(&[]).unwrap();
+    for options in [
+        vec!["One".into()],
+        vec!["One".into(), "  ".into()],
+        vec!["One".into(), " one ".into()],
+        vec!["One".into(), "Two".into(), "Three".into(), "Four".into()],
+        vec!["One".into(), "x".repeat(501)],
+    ] {
+        p.planning_question.as_mut().unwrap().options = options;
+        assert!(p.validate(&[]).is_err());
+    }
+    p.planning_question = Some(PlanningQuestion {
+        prompt: " ".into(),
+        options: vec![],
+    });
+    assert!(p.validate(&[]).is_err());
+}
+
+#[tokio::test]
+async fn guided_planning_survives_restart_and_keeps_scope_until_revised() {
+    let (_temp, state, root) = fixture().await;
+    let mut draft = proposal();
+    draft.decisions = vec!["Keep the scores private.".into()];
+    draft.assumptions = vec!["Use the existing visual style.".into()];
+    let scope = serde_json::to_string(&draft.features).unwrap();
+    change(&state, &root, |p| {
+        p.enabled = true;
+        planning::record_proposal(p, draft, Default::default())?;
+        planning::record_proposal(
+            p,
+            Proposal {
+                planning_question: Some(planning_question()),
+                decisions: vec!["Keep the scores private.".into()],
+                assumptions: vec!["Use the existing visual style.".into()],
+                ..Default::default()
+            },
+            Default::default(),
+        )?;
+        planning::record_proposal(
+            p,
+            Proposal {
+                message: "A team includes people you invite.".into(),
+                ..Default::default()
+            },
+            Default::default(),
+        )
+    })
+    .unwrap();
+    let restarted = ProjectWorkService::new(state.persistence.clone());
+    let restored = restarted.load(&root).unwrap();
+    let restored = restored.draft.unwrap();
+    assert_eq!(serde_json::to_string(&restored.features).unwrap(), scope);
+    assert_eq!(restored.planning_question, Some(planning_question()));
+    assert_eq!(restored.decisions, ["Keep the scores private."]);
+    assert_eq!(restored.assumptions, ["Use the existing visual style."]);
+
+    let mut updated = restored;
+    updated.planning_question = None;
+    updated.decisions = vec!["Share scores with invited teammates.".into()];
+    change(&state, &root, |p| {
+        planning::record_proposal(p, updated, Default::default())
+    })
+    .unwrap();
+    let updated = load(&state, &root).unwrap().draft.unwrap();
+    assert!(updated.planning_question.is_none());
+    assert_eq!(updated.decisions, ["Share scores with invited teammates."]);
+}
+
+#[test]
+fn planning_can_begin_with_a_question_before_features_exist() {
+    let mut p = ProjectWork::default();
+    planning::record_proposal(
+        &mut p,
+        Proposal {
+            planning_question: Some(planning_question()),
+            ..Default::default()
+        },
+        Default::default(),
+    )
+    .unwrap();
+    let draft = p.draft.unwrap();
+    assert!(draft.features.is_empty());
+    assert_eq!(draft.planning_question, Some(planning_question()));
+}
+
+#[test]
+fn next_planning_question_can_clear_rejected_decisions_and_assumptions() {
+    let mut draft = proposal();
+    draft.decisions = vec!["Create public profiles.".into()];
+    draft.assumptions = vec!["Everyone can see the scores.".into()];
+    let scope = serde_json::to_string(&draft.features).unwrap();
+    let mut p = ProjectWork {
+        draft: Some(draft),
+        ..Default::default()
+    };
+    planning::record_proposal(
+        &mut p,
+        Proposal {
+            message: "Public profiles are removed from the plan. Let's settle access.".into(),
+            planning_question: Some(planning_question()),
+            decisions: vec![],
+            assumptions: vec![],
+            ..Default::default()
+        },
+        Default::default(),
+    )
+    .unwrap();
+    let updated = p.draft.unwrap();
+    assert!(updated.decisions.is_empty());
+    assert!(updated.assumptions.is_empty());
+    assert_eq!(updated.planning_question, Some(planning_question()));
+    assert_eq!(serde_json::to_string(&updated.features).unwrap(), scope);
+}
+
+#[tokio::test]
+async fn pending_planning_choice_blocks_start_and_save_without_side_effects() {
+    let (_temp, state, root) = fixture().await;
+    enable(&state, &root, true).await.unwrap();
+    let mut draft = proposal();
+    draft.planning_question = Some(planning_question());
+    update_draft(&state, &root, draft.clone()).unwrap();
+    let expected = serde_json::to_string(&draft).unwrap();
+    for start in [false, true] {
+        let error = accept_plan(state.clone(), root.clone(), expected.clone(), start)
+            .await
+            .unwrap_err();
+        assert!(error.contains("Answer the planning question"));
+        let p = load(&state, &root).unwrap();
+        assert!(p.features.is_empty());
+        assert!(p.draft.is_some());
+        assert!(state.project_work.driving.lock().unwrap().is_empty());
+        assert_eq!(
+            run_git(Path::new(&root), &["worktree", "list", "--porcelain"])
+                .await
+                .unwrap()
+                .matches("worktree ")
+                .count(),
+            1
+        );
+    }
+}
+
 #[test]
 fn blocked_project_reports_attention_and_named_dependency() {
     let mut foundation = work(draft("F-foundation"), fake_workspace());
@@ -390,8 +562,11 @@ async fn saving_plan_is_optional_isolated_and_does_not_dispatch() {
     assert!(!load(&state, &root).unwrap().enabled);
     assert!(!Path::new(&root).join("plan").exists());
     enable(&state, &root, true).await.unwrap();
-    update_draft(&state, &root, proposal()).unwrap();
-    let expected = serde_json::to_string(&proposal()).unwrap();
+    let mut draft = proposal();
+    draft.decisions = vec!["Keep scores private.".into()];
+    draft.assumptions = vec!["Use the existing visual style.".into()];
+    update_draft(&state, &root, draft.clone()).unwrap();
+    let expected = serde_json::to_string(&draft).unwrap();
     accept_plan(state.clone(), root.clone(), expected, false)
         .await
         .unwrap();
@@ -402,6 +577,14 @@ async fn saving_plan_is_optional_isolated_and_does_not_dispatch() {
     assert!(Path::new(&p.features[0].seed.path)
         .join("plan/features/F-scores.md")
         .exists());
+    let approved = std::fs::read_to_string(
+        Path::new(&p.features[0].seed.path)
+            .join("plan/runs")
+            .join(format!("{}.md", p.features[0].seed.id)),
+    )
+    .unwrap();
+    assert!(approved.contains("## Decisions\n\n- Keep scores private."));
+    assert!(approved.contains("## Assumptions\n\n- Use the existing visual style."));
     assert!(state.worktrees.is_clean(Path::new(&root)).await.unwrap());
     assert!(state.project_work.driving.lock().unwrap().is_empty());
     let restarted = ProjectWorkService::new(state.persistence.clone());

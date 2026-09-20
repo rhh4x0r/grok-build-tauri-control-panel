@@ -1397,9 +1397,7 @@ impl AppModel {
                 let _ = this.update(cx, |m, cx| match res {
                     Ok((p, list)) => {
                         m.projects = list;
-                        m.active_project = Some(p);
-                        m.selected = None;
-                        cx.notify();
+                        m.set_active_project(p, cx);
                     }
                     Err(e) => m.fail(e, cx),
                 });

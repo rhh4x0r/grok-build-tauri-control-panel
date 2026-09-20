@@ -207,6 +207,9 @@ pub async fn prepare_workflow(state: &bomb_core::AppState) -> Result<(), String>
         features: vec![f, ready, queued],
         draft: Some(Proposal {
             message: "A separate proposed feature.".into(),
+            planning_question: Some(PlanningQuestion { prompt: "What should we focus on first?".into(), options: vec!["Clarity".into(), "More controls".into()] }),
+            decisions: vec!["Keep the existing sidebar.".into()],
+            assumptions: vec!["Review before local merging.".into()],
             features: vec![later],
             ..Default::default()
         }),

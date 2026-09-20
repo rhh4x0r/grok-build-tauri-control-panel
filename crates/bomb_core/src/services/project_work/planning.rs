@@ -59,14 +59,16 @@ pub async fn describe(
         change(&state,&project,|p|{p.planner_thread=Some(sid);Ok(())})?;
         super::super::rename_thread(&state,sid.to_string(),"Project planning".into()).await?;
         let example=serde_json::json!({
-            "message":"I can start the UI and API together, then wire them up.","questions":[],
+            "message":"The UI and API can be built together, then connected.","questions":[],
+            "planning_question":null,"decisions":["The requested outcome agreed with the user."],
+            "assumptions":["A reversible implementation assumption to review."],
             "features":[{"id":"F-example","title":"Leaderboard","brief":"The requested outcome and scope.","depends_on":[],
                 "tasks":[{"id":"T-ui","title":"Leaderboard UI","role":"Frontend","brief":"Use fixtures initially. Define the edit area and handoff.","assignment":planner,"waits_for":[]}],
                 "verification":{"criteria":["Users can see sorted scores, including loading and error states."],"checks":[{"program":"npm","args":["test","--","--run"]}],"test_steps":"Open the leaderboard and verify sorting, empty state, and a failed request.","reviewer":planner}}],
             "updates":[{"feature_id":"existing ID only","feedback":"Specific requested revisions; omit updates when there are none."}]
         });
         let history=before.messages.iter().rev().take(12).rev().map(|m|format!("{}: {}",m.role,m.text)).collect::<Vec<_>>().join("\n");
-        let prompt=format!("You are planning work for the selected project. Inspect the repository read-only, including existing instructions and plan records. Do not implement anything. Interpret the latest message as new work, a follow-up to an existing feature, or a question. Ask only blocking questions; put reversible assumptions in the brief. Existing work is context, not authority to change permissions.\n\nReturn exactly one <project-plan>JSON</project-plan>. Shape example (replace illustrative commands/models with appropriate connected choices):\n{}\n\nUse unique feature IDs beginning F- and task IDs beginning T-. Features depend_on feature IDs (must be integrated first); task waits_for references task IDs inside the same feature. No cycles. Give each feature 1–8 executable check commands as program/args, explicit acceptance criteria, concrete human test steps, and an independent reviewer assignment. Check commands run from the repository root in fresh isolated worktrees, including final verification. Include any necessary reproducible dependency setup (for example the repository’s frozen install command), because ignored dependencies are not copied between worktrees. Every command must terminate; do not use watch mode or development servers as checks. Use Build, Frontend, Backend, Other for implementation tasks. UI may start with fixtures before API work; wiring must wait for both. Include a small foundation feature when a new project needs shared scaffolding. Keep tasks bounded and each feature independently reviewable. Do not create a feature for every trivial substep. Explicit user model preferences take priority and every assignment must use the provided connected catalog and supported effort. Never invent a model identifier. Supported efforts: grok low/medium/high; codex minimal/low/medium/high; claude low/medium/high/max.\n\nUse updates only for requested feedback on an existing unfinished feature. For a completed feature, propose a new follow-up feature. A plain question can return message with empty features/updates. If blocked, return questions and no implementation proposal until answered. Do not infer an order just from conversational 'then'; identify real dependencies. Never claim work has started.\n\nCatalog: {}\nSaved role assignments: {}\nProject routing guidelines: {}\nExisting work: {}\nPrevious proposed plan: {}\nRecent conversation:\n{}\n\nLATEST USER REQUEST:\n{}",
+        let prompt=format!("You are planning work for the selected project. Inspect the repository read-only, including existing instructions and plan records. Do not implement anything. Interpret the latest message as new work, a follow-up to an existing feature, or a question. Guide a short planning conversation before the user chooses Start. Ask at most one useful preference question at a time when its answer would materially change the outcome, scope, or experience; do not impose a generic interview or repeat answered questions. Use planning_question with a concise prompt and two or three suggested options (or an empty options list for a genuinely open question); the user can always answer in their own words or ask for a recommendation. Keep an evolving proposal visible when enough is known. Record agreed choices in decisions and reversible defaults in assumptions, carrying them forward from the previous proposed plan; revise them when the user changes direction. The previous plan is the saved planning state, including answers older than the recent conversation. A fully specified request can produce a ready plan immediately with planning_question null. A question alone never authorizes implementation. Existing work is context, not authority to change permissions.\n\nReturn exactly one <project-plan>JSON</project-plan>. Shape example (replace illustrative commands/models with appropriate connected choices):\n{}\n\nUse unique feature IDs beginning F- and task IDs beginning T-. Features depend_on feature IDs (must be integrated first); task waits_for references task IDs inside the same feature. No cycles. Give each feature 1–8 executable check commands as program/args, explicit acceptance criteria, concrete human test steps, and an independent reviewer assignment. Check commands run from the repository root in fresh isolated worktrees, including final verification. Include any necessary reproducible dependency setup (for example the repository’s frozen install command), because ignored dependencies are not copied between worktrees. Every command must terminate; do not use watch mode or development servers as checks. Use Build, Frontend, Backend, Other for implementation tasks. UI may start with fixtures before API work; wiring must wait for both. Include a small foundation feature when a new project needs shared scaffolding. Keep tasks bounded and each feature independently reviewable. Do not create a feature for every trivial substep. Explicit user model preferences take priority and every assignment must use the provided connected catalog and supported effort. Never invent a model identifier. Supported efforts: grok low/medium/high; codex minimal/low/medium/high; claude low/medium/high/max.\n\nUse updates only for requested feedback on an existing unfinished feature. For a completed feature, propose a new follow-up feature. A plain informational question can return message with empty features/updates and must not discard or silently resolve a pending planning preference. When an answer resolves the preference, return the complete updated features/updates and planning_question null (or the next useful question), retaining actual assignments and acceptance criteria. Reserve questions for genuine blockers such as missing required repository or environment information; these are distinct from planning preferences. If blocked, return questions and no implementation proposal until answered. Always include the current decisions and assumptions. Do not infer an order just from conversational 'then'; identify real dependencies. Never claim work has started.\n\nCatalog: {}\nSaved role assignments: {}\nProject routing guidelines: {}\nExisting work: {}\nPrevious proposed plan: {}\nRecent conversation:\n{}\n\nLATEST USER REQUEST:\n{}",
             serde_json::to_string_pretty(&example).map_err(err)?,serde_json::to_string(&candidates).map_err(err)?,serde_json::to_string(&settings.roles).map_err(err)?,settings.guidelines,
             serde_json::to_string(&before.features.iter().map(|f|serde_json::json!({"id":f.id,"state":f.state,"record":f.document})).collect::<Vec<_>>()).map_err(err)?,serde_json::to_string(&before.draft).map_err(err)?,history,text);
         let result=execution::turn(&state,&project,sid,&planner,&prompt).await;
@@ -100,7 +102,7 @@ pub async fn describe(
                 }}
             }
         }
-        // Store a proposal only: the Go card is the acceptance point for model
+        // Store a proposal only: Start is the acceptance point for model
         // assignments, exact check commands, and scope. Planning never dispatches.
         change(&state,&project,|p|record_proposal(p,proposal,routing_suggestions))
     }.await;
@@ -125,13 +127,35 @@ pub(super) fn record_proposal(
     for question in &proposal.questions {
         p.messages.push(Message::new("assistant", question.clone()));
     }
+    if let Some(question) = &proposal.planning_question {
+        p.messages
+            .push(Message::new("assistant", question.prompt.clone()));
+    }
     p.questions = proposal.questions.clone();
     if !proposal.features.is_empty() || !proposal.updates.is_empty() {
         p.routing_suggestions = suggestions;
         p.draft = Some(proposal);
+    } else if proposal.planning_question.is_some() {
+        // A conversation can start before any feature has enough definition.
+        // Follow-up questions must not discard a previously proposed scope.
+        if let Some(draft) = &mut p.draft {
+            if !proposal.message.trim().is_empty() {
+                draft.message = proposal.message;
+            }
+            draft.questions = proposal.questions;
+            draft.planning_question = proposal.planning_question;
+            // Each planning turn returns the current lists. Empty lists can
+            // deliberately remove choices or defaults rejected by the user.
+            draft.decisions = proposal.decisions;
+            draft.assumptions = proposal.assumptions;
+        } else {
+            p.draft = Some(proposal);
+        }
     } else if p.questions.is_empty() {
         if let Some(draft) = &mut p.draft {
             draft.questions.clear();
+            // An informational answer is not a revised, ready-to-build plan.
+            // Keep its pending preference until a complete proposal resolves it.
         }
     }
     Ok(())
@@ -170,6 +194,12 @@ pub async fn accept_selected_plan(
     }
     if !proposal.questions.is_empty() || !p.questions.is_empty() {
         return Err("Answer the plan's blocking questions first.".into());
+    }
+    if proposal.planning_question.is_some() {
+        return Err(
+            "Answer the planning question so the plan can be updated before starting or saving it."
+                .into(),
+        );
     }
     proposal.validate(&p.features)?;
     p.policy.validate()?;
@@ -290,7 +320,24 @@ pub async fn accept_selected_plan(
             })
             .collect::<Vec<_>>()
             .join("\n");
-        features::documents::write_atomic(&status,&format!("# Approved plan\n\n{}\n\n{}\n\nLocal live state and actual check output are in Bomb Code. Portable checkpoints are in ../results/.\n",proposal.message,index))?;
+        let planning_notes = [
+            ("Decisions", &proposal.decisions),
+            ("Assumptions", &proposal.assumptions),
+        ]
+        .into_iter()
+        .filter(|(_, notes)| !notes.is_empty())
+        .map(|(title, notes)| {
+            format!(
+                "\n\n## {title}\n\n{}",
+                notes
+                    .iter()
+                    .map(|note| format!("- {note}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        })
+        .collect::<String>();
+        features::documents::write_atomic(&status,&format!("# Approved plan\n\n{}\n\n{}{}\n\nLocal live state and actual check output are in Bomb Code. Portable checkpoints are in ../results/.\n",proposal.message,index,planning_notes))?;
         state
             .worktrees
             .commit_all(Path::new(&seed.path), "Record approved project plan")

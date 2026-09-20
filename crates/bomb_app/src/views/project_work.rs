@@ -63,10 +63,13 @@ pub struct ProjectWorkView {
     preview_generation: u64,
     expanded_plan: bool,
     show_checks: bool,
+    show_history: bool,
+    show_preview: bool,
     history_limit: usize,
     new_activity: bool,
     list_board: bool,
     selected_file: Option<String>,
+    inspected_revision: Option<String>,
     excluded: std::collections::HashSet<String>,
     board_offset: Point<Pixels>,
     contexts: std::collections::HashMap<String, ViewContext>,
@@ -134,10 +137,13 @@ impl ProjectWorkView {
             preview_generation: 0,
             expanded_plan: false,
             show_checks: false,
+            show_history: false,
+            show_preview: false,
             history_limit: 60,
             new_activity: false,
-            list_board: false,
+            list_board: true,
             selected_file: None,
+            inspected_revision: None,
             excluded: Default::default(),
             board_offset: point(px(0.), px(0.)),
             contexts: Default::default(),
@@ -198,7 +204,11 @@ impl ProjectWorkView {
         self.submission = None;
         self.clear_submission = None;
         self.excluded.clear();
+        self.show_history = false;
+        self.show_preview = false;
+        self.expanded_plan = false;
         self.diff = None;
+        self.inspected_revision = None;
         self.message = None;
         self.planner = None;
         self.busy = false;
@@ -354,10 +364,75 @@ impl ProjectWorkView {
             cx,
         );
     }
-    fn accept(&mut self, start: bool, cx: &mut Context<Self>) {
+    fn answer_plan(
+        &mut self,
+        prompt: String,
+        answer: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let p = self.snapshot(cx);
+        if p.planning
+            || self.busy
+            || p.draft
+                .as_ref()
+                .and_then(|d| d.planning_question.as_ref())
+                .is_none_or(|q| q.prompt != prompt)
+        {
+            self.message = Some(
+                "The planning question changed. Review its current version before answering."
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
+        let current = self.input.read(cx).value().to_string();
+        let reply = format!("For the planning question ‘{prompt}’: {answer}");
+        self.input.update(cx, |s, cx| {
+            s.set_value(
+                if current.trim().is_empty() {
+                    reply
+                } else {
+                    format!("{current}\n{reply}")
+                },
+                window,
+                cx,
+            );
+            s.focus(window, cx);
+        });
+        if current.trim().is_empty() {
+            self.describe(window, cx);
+        } else {
+            self.message =
+                Some("Answer added to your unsent message. Review it, then Send.".into());
+        }
+        cx.notify();
+    }
+    fn accept(
+        &mut self,
+        start: bool,
+        expected: String,
+        selected: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(draft) = self.snapshot(cx).draft else {
             return;
         };
+        let current_selected: Vec<_> = draft
+            .features
+            .iter()
+            .filter(|f| !self.excluded.contains(&f.id))
+            .map(|f| f.id.clone())
+            .collect();
+        if serde_json::to_string(&draft).ok().as_deref() != Some(expected.as_str())
+            || current_selected != selected
+        {
+            self.message = Some(
+                "The plan or selection changed. Review the current plan before starting.".into(),
+            );
+            cx.notify();
+            return;
+        }
         if draft
             .features
             .iter()
@@ -378,15 +453,8 @@ impl ProjectWorkView {
             cx.notify();
             return;
         }
-        let expected = serde_json::to_string(&draft).unwrap_or_default();
         let state = services(cx);
         let project = self.project.clone();
-        let selected = draft
-            .features
-            .iter()
-            .filter(|f| !self.excluded.contains(&f.id))
-            .map(|f| f.id.clone())
-            .collect();
         self.operation(
             async move { work::accept_selected_plan(state, project, expected, start, selected).await },
             cx,
@@ -591,8 +659,11 @@ impl ProjectWorkView {
         self.preview_message = None;
         self.preview_switch = false;
         self.selected_file = None;
+        self.inspected_revision = None;
         self.selected = Some(id);
         self.detail = "Result";
+        self.show_preview = false;
+        self.show_checks = false;
         self.diff = None;
         cx.notify();
     }
@@ -606,6 +677,12 @@ impl ProjectWorkView {
         let Some(id) = self.selected.clone() else {
             return;
         };
+        let expected = self
+            .snapshot(cx)
+            .features
+            .iter()
+            .find(|f| f.id == id)
+            .map(FeatureWork::decision_key);
         self.detail = "Changes";
         self.diff = None;
         let project = self.project.clone();
@@ -619,7 +696,15 @@ impl ProjectWorkView {
             },
             move |(project, id, result), cx| {
                 let _ = weak.update(cx, |v, cx| {
-                    if v.project == project && v.selected.as_ref() == Some(&id) {
+                    if v.project == project
+                        && v.selected.as_ref() == Some(&id)
+                        && v.snapshot(cx)
+                            .features
+                            .iter()
+                            .find(|f| f.id == id)
+                            .map(FeatureWork::decision_key)
+                            == expected
+                    {
                         v.diff = Some(result.unwrap_or_else(|e| e));
                     }
                     cx.notify();
@@ -632,13 +717,20 @@ impl ProjectWorkView {
         self.start_preview(false, cx);
     }
     fn start_preview(&mut self, switch: bool, cx: &mut Context<Self>) {
-        self.detail = "Preview";
+        self.detail = "Result";
+        self.show_preview = true;
         if self.preview_busy {
             return;
         }
         let Some(id) = self.selected.clone() else {
             return;
         };
+        let expected = self
+            .snapshot(cx)
+            .features
+            .iter()
+            .find(|f| f.id == id)
+            .map(FeatureWork::decision_key);
         let state = services(cx);
         let project = self.project.clone();
         let path = match work::candidate_path(&state, &project, &id) {
@@ -675,7 +767,7 @@ impl ProjectWorkView {
             },
             move |(project, id, generation, result, needs_switch), cx| {
                 let _=weak.update(cx,|v,cx| {
-                if v.project!=project || v.selected.as_ref()!=Some(&id) || v.preview_generation!=generation {return;}
+                if v.project!=project || v.selected.as_ref()!=Some(&id) || v.preview_generation!=generation || v.snapshot(cx).features.iter().find(|f| f.id == id).map(FeatureWork::decision_key) != expected {return;}
                 v.preview_busy=false;v.preview_switch=needs_switch;
                 match result {Ok(status)=>{v.preview_message=Some("Preview ready · this feature's working copy. Follow the test steps and verify connected services; fixtures may still be in use.".into());v.model.update(cx,|m,cx|{m.dev_server=Some(status);cx.notify();});},Err(e)=>v.preview_message=Some(e)}
                 cx.notify();
@@ -687,7 +779,11 @@ impl ProjectWorkView {
     pub fn next_decision(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let p = self.snapshot(cx);
         let mut targets: Vec<(Option<String>, Option<Uuid>)> = Vec::new();
-        if !p.questions.is_empty() {
+        if !p.questions.is_empty()
+            || p.draft
+                .as_ref()
+                .is_some_and(|d| d.planning_question.is_some())
+        {
             targets.push((Some("questions".into()), None));
         }
         if p.final_blocker.is_some() {
