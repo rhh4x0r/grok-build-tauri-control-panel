@@ -1,6 +1,6 @@
 # Conversational project workspace, board, and review workflow
 
-Research and design proposal for Max, 2026-09-19. No kanban, planner, or automatic project-run implementation is included. This extends the optional Features workflow in [FEATURES.md](../FEATURES.md).
+Research and design proposal for Max, 2026-09-19. Max subsequently authorized implementation after the Stop fix. The implemented workflow and current boundaries are documented in [PROJECT_WORKFLOW.md](../PROJECT_WORKFLOW.md). This proposal preserves the research and broader interaction ideas; it extends the optional manual Features workflow in [FEATURES.md](../FEATURES.md).
 
 ## Intended experience
 

@@ -657,6 +657,10 @@ impl Render for ThreadView {
         });
         let show_status = presence.visible() && (!has_loop || normal_turn);
         let thread_for_toggle = thread.clone();
+        let project_feature=thread.read(cx).meta.project_root.as_ref().and_then(|root| {
+            let p=crate::runtime::services(cx).project_work.snapshot(root)?;
+            p.features.into_iter().find(|f| f.tasks.values().any(|t|t.workspace.as_ref().and_then(|w|w.session).is_some_and(|id|id.to_string()==tid)) || f.reviewer_thread.is_some_and(|id|id.to_string()==tid) || f.candidate.as_ref().and_then(|w|w.session).is_some_and(|id|id.to_string()==tid))
+        });
 
         div()
             .size_full()
@@ -665,6 +669,12 @@ impl Render for ThreadView {
             .flex()
             .flex_col()
             .child(self.header(&thread, &ui, cx))
+            .when_some(project_feature,|el,f|{
+                let app=self.model.clone();let id=f.id.clone();
+                el.child(div().px_6().py_2().flex().items_center().gap_2().border_b_1().border_color(ui.border)
+                    .child(div().flex_1().min_w_0().text_sm().child(format!("{} · {}",f.title(),f.state.label())))
+                    .child(Button::new("thread-feature-result").outline().small().label("Result · test · approve / keep working").on_click(move|_,_,cx|app.update(cx,|m,cx|{m.project_feature_request=Some(id.clone());cx.notify();}))))
+            })
             .when(self.search_open, |el| el.child(self.find_bar(&ui, cx)))
             .child(fade_in(
                 SharedString::from(format!("transcript-{tid}")),

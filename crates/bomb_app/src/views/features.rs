@@ -352,7 +352,12 @@ impl FeaturesView {
         self.busy = true;
         spawn_service(
             cx,
-            async move { features::save_settings(&state, &project, settings).await },
+            async move {
+                if !enabled && state.project_work.snapshot(&project).is_some_and(|p|p.enabled) {
+                    bomb_core::services::project_work::enable(&state,&project,false).await?;
+                }
+                features::save_settings(&state, &project, settings).await
+            },
             move |result, cx| {
                 let _ = weak.update(cx, |v, cx| {
                     if v.generation != generation {

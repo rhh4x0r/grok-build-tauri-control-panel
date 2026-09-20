@@ -101,6 +101,7 @@ pub struct AppModel {
     pub selected: Option<Uuid>,
     pub new_thread_open: bool,
     pub features_open: bool,
+    pub project_feature_request: Option<String>,
     pub foundry_request: Option<String>,
     pub foundry_insert: Option<String>,
     pub foundry_close: bool,
@@ -152,6 +153,7 @@ impl AppModel {
             selected: None,
             new_thread_open: false,
             features_open: false,
+            project_feature_request: None,
             foundry_request: None,
             foundry_insert: None,
             foundry_close: false,
@@ -848,9 +850,10 @@ impl AppModel {
                 }
                 ControlEvent::McpChanged { .. } => self.refresh_mcp_names(cx),
                 ControlEvent::Raw { payload, .. }
-                    if matches!(payload.get("channel").and_then(|c| c.as_str()), Some("provider_commands" | "foundry")) =>
+                    if matches!(payload.get("channel").and_then(|c| c.as_str()), Some("provider_commands" | "foundry" | "project-work")) =>
                 {
-                    // The composer observes AppModel; refresh its advertised command menu.
+                    if let Some(notice)=payload.get("notice").and_then(|v|v.as_str()) {self.toast(ToastKind::Info,notice.to_string());}
+                    // Project and composer surfaces observe this model.
                     cx.notify();
                 }
                 ControlEvent::Raw { payload, session_id: Some(id) }

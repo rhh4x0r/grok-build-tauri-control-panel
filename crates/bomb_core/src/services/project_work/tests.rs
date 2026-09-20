@@ -1,0 +1,633 @@
+use super::*;
+use execution::{next_job, Job};
+use features::{Assignment, CheckCommand, Verification};
+use grok_worktree::run_git;
+
+async fn fixture() -> (tempfile::TempDir, Arc<AppState>, String) {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    for args in [
+        vec!["init", "-b", "main"],
+        vec!["config", "user.name", "Test"],
+        vec!["config", "user.email", "test@example.com"],
+        vec!["commit", "--allow-empty", "-m", "initial"],
+    ] {
+        run_git(&repo, &args).await.unwrap();
+    }
+    let home = temp.path().to_path_buf();
+    let grok = home.join("grok");
+    let panel = grok.join("panel");
+    let state = AppState::initialize_with_paths(grok_config::GrokPaths {
+        home_dir: home.clone(),
+        grok_dir: grok.clone(),
+        config_file: panel.join("config.toml"),
+        grok_cli_config_file: grok.join("config.toml"),
+        worktrees_dir: home.join("worktrees"),
+        memory_dir: panel.join("memory"),
+        sessions_dir: panel.join("sessions"),
+        panel_dir: panel,
+        project_config_file: None,
+        project_root: None,
+    })
+    .await
+    .unwrap();
+    (
+        temp,
+        Arc::new(state),
+        repo.canonicalize().unwrap().to_string_lossy().into_owned(),
+    )
+}
+fn assignment() -> Assignment {
+    Assignment {
+        backend: "grok".into(),
+        model: "mock".into(),
+        effort: "medium".into(),
+    }
+}
+fn draft(id: &str) -> FeatureDraft {
+    FeatureDraft {
+        id: id.into(),
+        title: "Scores".into(),
+        brief: "Show sorted scores, loading and failure states.".into(),
+        depends_on: vec![],
+        tasks: [
+            ("T-ui", "Frontend"),
+            ("T-api", "Backend"),
+            ("T-wire", "Build"),
+        ]
+        .into_iter()
+        .map(|(id, role)| TaskDraft {
+            id: id.into(),
+            role: role.into(),
+            title: role.into(),
+            brief: format!("Build {role} and verify its behavior."),
+            assignment: assignment(),
+            waits_for: if role == "Build" {
+                vec!["T-ui".into(), "T-api".into()]
+            } else {
+                vec![]
+            },
+        })
+        .collect(),
+        verification: Verification {
+            criteria: vec!["Scores are sorted".into()],
+            checks: vec![CheckCommand {
+                program: "git".into(),
+                args: vec!["diff".into(), "--check".into()],
+            }],
+            test_steps: "Open scores and test loading, ordering and errors.".into(),
+            reviewer: assignment(),
+        },
+    }
+}
+fn work(d: FeatureDraft, w: Workspace) -> FeatureWork {
+    let f = d.feature();
+    FeatureWork {
+        id: f.id.clone(),
+        document: features::encode(&f).unwrap(),
+        seed: w,
+        seed_head: "test-seed".into(),
+        state: FeatureState::Queued,
+        tasks: f
+            .tasks
+            .iter()
+            .map(|t| (t.id.clone(), TaskWork::default()))
+            .collect(),
+        candidate: None,
+        candidate_base: None,
+        review: None,
+        checks: vec![],
+        approved_head: None,
+        integrated_head: None,
+        note: String::new(),
+        feedback: vec![],
+        repairs: 0,
+        reviewer_thread: None,
+    }
+}
+fn fake_workspace() -> Workspace {
+    Workspace {
+        id: "W-test".into(),
+        path: "/tmp/not-used".into(),
+        branch: "task-test".into(),
+        session: None,
+    }
+}
+fn proposal() -> Proposal {
+    Proposal {
+        message: "Build scores.".into(),
+        features: vec![draft("F-scores")],
+        ..Default::default()
+    }
+}
+#[test]
+fn planner_contract_preserves_prose_and_rejects_dependency_cycles() {
+    let p = proposal();
+    let parsed = Proposal::parse(&format!(
+        "<project-plan>{}</project-plan>",
+        serde_json::to_string(&p).unwrap()
+    ))
+    .unwrap();
+    parsed.validate(&[]).unwrap();
+    let content = features::encode(&parsed.features[0].feature()).unwrap();
+    assert!(content.starts_with("<!-- bomb-feature/2"));
+    let round = features::decode(&content).unwrap();
+    assert_eq!(round.brief, p.features[0].brief);
+    assert_eq!(round.tasks[0].brief, p.features[0].tasks[0].brief);
+    assert!(round.verification.is_some());
+    let mut p = p;
+    p.features.push(draft("F-followup"));
+    p.features[0].depends_on = vec!["F-followup".into()];
+    p.features[1].depends_on = vec!["F-scores".into()];
+    assert!(p.validate(&[]).unwrap_err().contains("circular"));
+    p.features[1].depends_on = vec!["missing".into()];
+    assert!(p.validate(&[]).is_err());
+}
+#[test]
+fn scheduler_parallelizes_independent_tasks_and_waits_for_exact_dependencies() {
+    let mut p = ProjectWork {
+        state: RunState::Running,
+        features: vec![work(draft("F-scores"), fake_workspace())],
+        ..Default::default()
+    };
+    let first = next_job(&p, &HashSet::new()).unwrap();
+    assert_eq!(first, Job::Task("F-scores".into(), "T-ui".into()));
+    p.features[0].tasks.get_mut("T-ui").unwrap().state = TaskState::Running;
+    assert_eq!(
+        next_job(&p, &HashSet::from(["F-scores/T-ui".into()])),
+        Some(Job::Task("F-scores".into(), "T-api".into()))
+    );
+    p.features[0].tasks.get_mut("T-api").unwrap().state = TaskState::Checkpointed;
+    assert!(next_job(&p, &HashSet::new()).is_none());
+    p.features[0].tasks.get_mut("T-ui").unwrap().state = TaskState::Checkpointed;
+    assert_eq!(
+        next_job(&p, &HashSet::new()),
+        Some(Job::Task("F-scores".into(), "T-wire".into()))
+    );
+    p.features[0].tasks.get_mut("T-wire").unwrap().state = TaskState::Checkpointed;
+    assert_eq!(
+        next_job(&p, &HashSet::new()),
+        Some(Job::Candidate("F-scores".into()))
+    );
+    let mut next = draft("F-next");
+    next.depends_on = vec!["F-scores".into()];
+    p.features.push(work(next, fake_workspace()));
+    p.features[0].state = FeatureState::Review;
+    assert!(next_job(&p, &HashSet::new()).is_none());
+    p.features[0].state = FeatureState::Done;
+    assert_eq!(
+        next_job(&p, &HashSet::new()),
+        Some(Job::Task("F-next".into(), "T-ui".into()))
+    );
+    p.features[1].state = FeatureState::Idea;
+    assert_eq!(next_job(&p, &HashSet::new()), Some(Job::Final)); // Saved ideas do not block finishing the current run.
+    p.state = RunState::Paused;
+    assert!(next_job(&p, &HashSet::new()).is_none());
+}
+#[tokio::test]
+async fn saving_plan_is_optional_isolated_and_does_not_dispatch() {
+    let (_tmp, state, root) = fixture().await;
+    assert!(!load(&state, &root).unwrap().enabled);
+    assert!(!Path::new(&root).join("plan").exists());
+    enable(&state, &root, true).await.unwrap();
+    update_draft(&state, &root, proposal()).unwrap();
+    let expected = serde_json::to_string(&proposal()).unwrap();
+    accept_plan(state.clone(), root.clone(), expected, false)
+        .await
+        .unwrap();
+    let p = load(&state, &root).unwrap();
+    assert_eq!(p.features[0].state, FeatureState::Idea);
+    assert!(p.features[0].tasks.values().all(|t| t.workspace.is_none()));
+    assert!(!Path::new(&root).join("plan").exists());
+    assert!(Path::new(&p.features[0].seed.path)
+        .join("plan/features/F-scores.md")
+        .exists());
+    assert!(state.worktrees.is_clean(Path::new(&root)).await.unwrap());
+    assert!(state.project_work.driving.lock().unwrap().is_empty());
+    let restarted = ProjectWorkService::new(state.persistence.clone());
+    assert_eq!(restarted.load(&root).unwrap().features.len(), 1);
+}
+async fn reviewed(state: &Arc<AppState>, root: &str) -> FeatureWork {
+    let w = integration::create_workspace(state, root, "main", "candidate-test")
+        .await
+        .unwrap();
+    let base = integration::head(&w.path).await.unwrap();
+    std::fs::write(Path::new(&w.path).join("scores.txt"), "1. Player").unwrap();
+    let head = integration::checkpoint(state, &w, "Scores").await.unwrap();
+    let mut f = work(draft("F-scores"), w.clone());
+    f.candidate = Some(w);
+    f.candidate_base = Some(base.clone());
+    f.state = FeatureState::Review;
+    f.approved_head = Some(head.clone());
+    f.review = Some(ReviewEvidence {
+        candidate: head,
+        base,
+        document: f.document.clone(),
+        summary: "Sorted scores reviewed.".into(),
+        criteria: vec![bomb_foundry::CriterionResult {
+            criterion: 0,
+            status: "passed".into(),
+            evidence: vec!["Inspected score sorting.".into()],
+        }],
+        checks: vec![],
+        reviewer: assignment(),
+        thread: uuid::Uuid::new_v4(),
+        at: now(),
+    });
+    change(state, root, |p| {
+        p.enabled = true;
+        p.state = RunState::Running;
+        p.features = vec![f.clone()];
+        Ok(())
+    })
+    .unwrap();
+    f
+}
+#[tokio::test]
+async fn landing_preserves_dirty_checkout_and_rejects_changed_candidate() {
+    let (_tmp, state, root) = fixture().await;
+    let f = reviewed(&state, &root).await;
+    std::fs::write(Path::new(&root).join("my-work.txt"), "keep this").unwrap();
+    assert!(integration::land(&state, &root, &f.id)
+        .await
+        .unwrap_err()
+        .contains("local edits"));
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&root).join("my-work.txt")).unwrap(),
+        "keep this"
+    );
+    assert!(!Path::new(&root).join("scores.txt").exists());
+    std::fs::write(
+        Path::new(&f.candidate.unwrap().path).join("scores.txt"),
+        "changed after review",
+    )
+    .unwrap();
+    assert!(integration::land(&state, &root, &f.id)
+        .await
+        .unwrap_err()
+        .contains("changed after review"));
+}
+#[tokio::test]
+async fn target_advance_invalidates_review_and_approval() {
+    let (_tmp, state, root) = fixture().await;
+    let f = reviewed(&state, &root).await;
+    std::fs::write(Path::new(&root).join("other.txt"), "another feature").unwrap();
+    state
+        .worktrees
+        .commit_all(Path::new(&root), "Another feature")
+        .await
+        .unwrap();
+    integration::land(&state, &root, &f.id).await.unwrap();
+    let p = load(&state, &root).unwrap();
+    assert_eq!(p.features[0].state, FeatureState::Queued);
+    assert!(p.features[0].review.is_none());
+    assert!(p.features[0].approved_head.is_none());
+    assert!(!Path::new(&root).join("scores.txt").exists());
+}
+#[tokio::test]
+async fn exact_reviewed_commit_lands_and_crash_reconciliation_is_idempotent() {
+    let (_tmp, state, root) = fixture().await;
+    let f = reviewed(&state, &root).await;
+    let head = f.review.as_ref().unwrap().candidate.clone();
+    change(&state, &root, |p| {
+        p.state = RunState::Paused;
+        Ok(())
+    })
+    .unwrap();
+    integration::land(&state, &root, &f.id).await.unwrap();
+    assert!(!Path::new(&root).join("scores.txt").exists());
+    change(&state, &root, |p| {
+        p.state = RunState::Running;
+        Ok(())
+    })
+    .unwrap();
+    integration::land(&state, &root, &f.id).await.unwrap();
+    assert_eq!(integration::head(&root).await.unwrap(), head);
+    change(&state, &root, |p| {
+        p.features[0].state = FeatureState::Landing;
+        Ok(())
+    })
+    .unwrap();
+    integration::land(&state, &root, &f.id).await.unwrap();
+    assert_eq!(integration::head(&root).await.unwrap(), head);
+    assert_eq!(
+        load(&state, &root).unwrap().features[0].state,
+        FeatureState::Done
+    );
+}
+#[tokio::test]
+async fn restart_paused_active_work_requires_inspection_without_resending() {
+    let (_tmp, state, root) = fixture().await;
+    let mut f = work(draft("F-scores"), fake_workspace());
+    f.state = FeatureState::Working;
+    f.tasks.get_mut("T-ui").unwrap().state = TaskState::Running;
+    change(&state, &root, |p| {
+        p.enabled = true;
+        p.state = RunState::Paused;
+        p.features = vec![f];
+        Ok(())
+    })
+    .unwrap();
+    let recovered = ProjectWorkService::new(state.persistence.clone())
+        .load(&root)
+        .unwrap();
+    assert_eq!(recovered.state, RunState::Interrupted);
+    assert_eq!(recovered.features[0].state, FeatureState::NeedsInput);
+    assert_eq!(
+        recovered.features[0].tasks["T-ui"].state,
+        TaskState::Interrupted
+    );
+    assert!(next_job(&recovered, &HashSet::new()).is_none());
+}
+#[tokio::test]
+async fn actual_check_exit_output_and_stop_are_observed() {
+    let (_tmp, state, root) = fixture().await;
+    change(&state, &root, |p| {
+        p.enabled = true;
+        p.state = RunState::Running;
+        Ok(())
+    })
+    .unwrap();
+    let result = integration::check(
+        &state,
+        &root,
+        &root,
+        &CheckCommand {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "echo failed-check; exit 7".into()],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.exit_code, Some(7));
+    assert!(result.output.contains("failed-check"));
+    let check = tokio::spawn({
+        let state = state.clone();
+        let root = root.clone();
+        async move {
+            integration::check(
+                &state,
+                &root,
+                &root,
+                &CheckCommand {
+                    program: "/bin/sh".into(),
+                    args: vec!["-c".into(), "sleep 30".into()],
+                },
+            )
+            .await
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        command(state.clone(), root.clone(), "stop"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(3), check)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.is_err() || result.unwrap().exit_code != Some(0));
+    assert!(state
+        .project_work
+        .checks
+        .lock()
+        .unwrap()
+        .get(&root)
+        .unwrap()
+        .is_empty());
+}
+#[tokio::test]
+async fn feedback_cannot_race_checking_and_stale_approval_is_rejected() {
+    let (_tmp, state, root) = fixture().await;
+    let f = reviewed(&state, &root).await;
+    assert!(
+        approve(state.clone(), root.clone(), f.id.clone(), "stale".into())
+            .await
+            .is_err()
+    );
+    change(&state, &root, |p| {
+        p.features[0].state = FeatureState::Checking;
+        Ok(())
+    })
+    .unwrap();
+    assert!(
+        keep_working(state.clone(), root.clone(), f.id, "change scores".into())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn correlated_turn_finishes_without_treating_silence_as_completion() {
+    let (_tmp, state, root) = fixture().await;
+    change(&state, &root, |p| {
+        p.enabled = true;
+        p.state = RunState::Running;
+        Ok(())
+    })
+    .unwrap();
+    let w = integration::create_workspace(&state, &root, "main", "turn-test")
+        .await
+        .unwrap();
+    let sid = uuid::Uuid::new_v4();
+    execution::spawn(&state, &root, &w, sid, &assignment(), false)
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        execution::turn(
+            &state,
+            &root,
+            sid,
+            &assignment(),
+            "Exercise an offline turn.",
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(result.0.contains("mock"));
+    assert!(!result.1.is_empty());
+    assert_eq!(
+        state
+            .registry
+            .get_snapshot(sid)
+            .unwrap()
+            .metadata
+            .approval_mode,
+        grok_control_core::ApprovalMode::Ask
+    );
+    state.registry.retire_session(sid).await.unwrap();
+}
+
+#[tokio::test]
+async fn successive_saved_plans_share_their_document_history() {
+    let (_tmp, state, root) = fixture().await;
+    enable(&state, &root, true).await.unwrap();
+    for id in ["F-first", "F-second"] {
+        let mut p = proposal();
+        p.features[0].id = id.into();
+        let expected = serde_json::to_string(&p).unwrap();
+        update_draft(&state, &root, p).unwrap();
+        accept_plan(state.clone(), root.clone(), expected, false)
+            .await
+            .unwrap();
+    }
+    let p = load(&state, &root).unwrap();
+    run_git(
+        Path::new(&root),
+        &[
+            "merge-base",
+            "--is-ancestor",
+            &p.features[0].seed_head,
+            &p.features[1].seed_head,
+        ],
+    )
+    .await
+    .unwrap();
+    assert!(Path::new(&p.features[1].seed.path)
+        .join("plan/features/F-first.md")
+        .exists());
+    assert!(!Path::new(&root).join("plan").exists());
+}
+#[tokio::test]
+async fn combined_candidate_contains_both_workers_and_requires_valid_review_evidence() {
+    let (_tmp, state, root) = fixture().await;
+    let mut d = draft("F-combined");
+    d.tasks.truncate(2);
+    let seed = integration::create_workspace(&state, &root, "main", "plan")
+        .await
+        .unwrap();
+    let document = features::encode(&d.feature()).unwrap();
+    let record = features::documents::feature_path(Path::new(&seed.path), &d.id).unwrap();
+    features::documents::write_atomic(&record, &document).unwrap();
+    let seed_head = integration::checkpoint(&state, &seed, "Plan")
+        .await
+        .unwrap();
+    let mut f = work(d, seed);
+    f.seed_head = seed_head.clone();
+    for (id, file) in [("T-ui", "ui.txt"), ("T-api", "api.txt")] {
+        let w = integration::create_workspace(&state, &root, &seed_head, "worker")
+            .await
+            .unwrap();
+        std::fs::write(Path::new(&w.path).join(file), file).unwrap();
+        let head = integration::checkpoint(&state, &w, "Task").await.unwrap();
+        let t = f.tasks.get_mut(id).unwrap();
+        t.workspace = Some(w);
+        t.head = Some(head);
+        t.state = TaskState::Checkpointed;
+    }
+    change(&state, &root, |p| {
+        p.enabled = true;
+        p.state = RunState::Running;
+        p.policy.max_repairs = 0;
+        p.features = vec![f];
+        Ok(())
+    })
+    .unwrap();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        integration::candidate(state.clone(), root.clone(), "F-combined".into()),
+    )
+    .await
+    .unwrap();
+    assert!(result.is_err()); // The offline mock is not a structured review.
+    let p = load(&state, &root).unwrap();
+    let f = &p.features[0];
+    let w = f.candidate.as_ref().unwrap();
+    assert!(Path::new(&w.path).join("ui.txt").exists());
+    assert!(Path::new(&w.path).join("api.txt").exists());
+    assert!(Path::new(&w.path)
+        .join("plan/results/F-combined.md")
+        .exists());
+    assert_eq!(f.checks[0].exit_code, Some(0));
+    assert!(f.review.is_none());
+    assert!(f.approved_head.is_none());
+    assert!(!Path::new(&root).join("ui.txt").exists());
+}
+#[tokio::test]
+async fn final_project_checks_gate_completion_at_the_integrated_commit() {
+    let (_tmp, state, root) = fixture().await;
+    let f = reviewed(&state, &root).await;
+    integration::land(&state, &root, &f.id).await.unwrap();
+    execution::final_check(&state, &root).await.unwrap();
+    let p = load(&state, &root).unwrap();
+    assert_eq!(p.state, RunState::Complete);
+    assert_eq!(
+        p.completed_head,
+        Some(integration::head(&root).await.unwrap())
+    );
+    assert_eq!(p.final_checks[0].exit_code, Some(0));
+    change(&state, &root, |p| {
+        p.state = RunState::Running;
+        let mut spec = p.features[0].feature()?;
+        spec.verification.as_mut().unwrap().checks = vec![CheckCommand {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "echo final-failed; exit 9".into()],
+        }];
+        p.features[0].document = features::encode(&spec)?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(execution::final_check(&state, &root).await.is_err());
+    let p = load(&state, &root).unwrap();
+    assert_ne!(p.state, RunState::Complete);
+    assert_eq!(p.final_checks[0].exit_code, Some(9));
+    assert!(p.final_checks[0].output.contains("final-failed"));
+}
+
+#[tokio::test]
+async fn dependency_conflict_is_preserved_and_feedback_allows_scoped_repair() {
+    let (_tmp, state, root) = fixture().await;
+    let mut inputs = Vec::new();
+    for label in ["frontend", "backend"] {
+        let w = integration::create_workspace(&state, &root, "main", label)
+            .await
+            .unwrap();
+        std::fs::write(Path::new(&w.path).join("shared.txt"), label).unwrap();
+        inputs.push(
+            integration::checkpoint(&state, &w, "Shared interface")
+                .await
+                .unwrap(),
+        );
+    }
+    let w = integration::create_workspace(&state, &root, "main", "wiring")
+        .await
+        .unwrap();
+    assert!(execution::combine_inputs(&state, &w, &inputs, false)
+        .await
+        .is_err());
+    run_git(Path::new(&w.path), &["rev-parse", "--verify", "MERGE_HEAD"])
+        .await
+        .unwrap();
+    assert!(execution::combine_inputs(&state, &w, &inputs, true)
+        .await
+        .unwrap()
+        .is_some());
+    std::fs::write(
+        Path::new(&w.path).join("shared.txt"),
+        "Combined frontend and backend contract",
+    )
+    .unwrap();
+    run_git(Path::new(&w.path), &["add","shared.txt"]).await.unwrap();
+    let head = integration::checkpoint(&state, &w, "Resolve approved inputs")
+        .await
+        .unwrap();
+    for input in &inputs {
+        run_git(
+            Path::new(&w.path),
+            &["merge-base", "--is-ancestor", input, &head],
+        )
+        .await
+        .unwrap();
+    }
+    assert!(execution::combine_inputs(&state, &w, &inputs, false)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(!Path::new(&root).join("shared.txt").exists());
+}

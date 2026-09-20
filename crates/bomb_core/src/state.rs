@@ -22,6 +22,7 @@ use crate::devserver::DevServerManager;
 use crate::explainer::ExplainerService;
 
 pub struct AppState {
+    pub project_work: Arc<crate::services::project_work::ProjectWorkService>,
     /// Serializes explicit project record edits and task launch reservations.
     pub feature_gate: Arc<tokio::sync::Mutex<()>>,
     pub foundry: Arc<crate::foundry::FoundryService>,
@@ -223,7 +224,10 @@ impl AppState {
         };
 
         let foundry = Arc::new(crate::foundry::FoundryService::open(&paths.sessions_dir.join("foundry.db")).map_err(anyhow::Error::msg)?);
+        let project_work=Arc::new(crate::services::project_work::ProjectWorkService::new(persistence.clone()));
+        for workspace in persistence.list_workspaces().unwrap_or_default() {let _=project_work.load(&workspace.project_root);}
         Ok(Self {
+            project_work,
             feature_gate: Arc::new(tokio::sync::Mutex::new(())),
             foundry,
             workspace_turns: Arc::new(std::sync::Mutex::new(Default::default())),

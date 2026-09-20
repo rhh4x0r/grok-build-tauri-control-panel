@@ -11,7 +11,7 @@ use std::{
 use uuid::Uuid;
 
 #[path = "feature_documents.rs"]
-mod documents;
+pub(crate) mod documents;
 pub use documents::{decode, encode};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -69,6 +69,28 @@ pub struct Feature {
     #[serde(skip)]
     pub brief: String,
     pub tasks: Vec<FeatureTask>,
+    /// Version 2 metadata for approved project runs. Dependencies name features;
+    /// task-local checkpoint dependencies retain the version 1 semantics.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<Verification>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct Verification {
+    pub criteria: Vec<String>,
+    pub checks: Vec<CheckCommand>,
+    pub test_steps: String,
+    pub reviewer: Assignment,
+}
+
+/// Exact argv approved with the plan; never interpolated into a shell command.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CheckCommand {
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 impl Feature {
     pub fn new() -> Self {
@@ -77,6 +99,8 @@ impl Feature {
             title: String::new(),
             brief: String::new(),
             tasks: vec![],
+            depends_on: vec![],
+            verification: None,
         }
     }
 }
@@ -314,7 +338,7 @@ pub fn validate(feature: &Feature) -> Result<(), String> {
     }
     Ok(())
 }
-fn validate_assignment(a: &Assignment) -> Result<(), String> {
+pub(crate) fn validate_assignment(a: &Assignment) -> Result<(), String> {
     let efforts: &[&str] = match a.backend.as_str() {
         "grok" => &["low", "medium", "high"],
         "codex" => &["minimal", "low", "medium", "high"],

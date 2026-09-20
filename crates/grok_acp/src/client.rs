@@ -1424,7 +1424,7 @@ impl AcpClient {
                     }
                     bus.emit(ControlEvent::Raw {
                         session_id: Some(sid),
-                        payload: json!({"turn_complete":true}),
+                        payload: json!({"turn_complete":true,"correlation":correlation}),
                     });
                     bus.emit_status(sid, SessionStatus::Idle).await;
                 });

@@ -6,6 +6,7 @@ use std::{
 };
 use uuid::Uuid;
 const HEADER: &str = "<!-- bomb-feature/1\n";
+const HEADER_V2: &str = "<!-- bomb-feature/2\n";
 const TASK: &str = "<!-- bomb-task:";
 
 pub fn valid_id(id: &str) -> Result<(), String> {
@@ -51,8 +52,9 @@ pub fn encode(feature: &Feature) -> Result<String, String> {
     let meta = serde_json::to_string_pretty(feature)
         .map_err(err)?
         .replace('>', "\\u003e");
+    let header = if feature.verification.is_some() || !feature.depends_on.is_empty() { HEADER_V2 } else { HEADER };
     let mut result = format!(
-        "{HEADER}{meta}\n-->\n# {}\n\n{}\n",
+        "{header}{meta}\n-->\n# {}\n\n{}\n",
         feature.title,
         feature.brief.trim()
     );
@@ -72,7 +74,8 @@ pub fn decode(content: &str) -> Result<Feature, String> {
     }
     let rest = content
         .strip_prefix(HEADER)
-        .ok_or("Not a Bomb Code feature document (version 1).")?;
+        .or_else(|| content.strip_prefix(HEADER_V2))
+        .ok_or("Not a supported Bomb Code feature document (version 1 or 2).")?;
     let (json, body) = rest
         .split_once("\n-->\n")
         .ok_or("Feature metadata is incomplete.")?;
@@ -138,13 +141,13 @@ pub fn load(root: &Path) -> Result<Vec<Record>, String> {
             .ok_or("Invalid record filename")?;
         let path = safe_path(root, &["plan", "features", name])?;
         let content = std::fs::read_to_string(&path).map_err(err)?;
-        if content.starts_with("<!-- bomb-feature/") && !content.starts_with(HEADER) {
+        if content.starts_with("<!-- bomb-feature/") && !content.starts_with(HEADER) && !content.starts_with(HEADER_V2) {
             return Err(format!(
                 "{} uses an unsupported feature document version.",
                 path.display()
             ));
         }
-        if content.starts_with(HEADER) {
+        if content.starts_with(HEADER) || content.starts_with(HEADER_V2) {
             records.push(read(&path).map_err(|e| format!("{}: {e}", path.display()))?);
         }
     }

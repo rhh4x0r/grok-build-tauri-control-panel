@@ -31,6 +31,7 @@ pub struct RootView {
     settings_open: bool,
     foundry: Option<Entity<crate::views::foundry::FoundryView>>,
     foundry_open: bool,
+    project_work: Entity<crate::views::project_work::ProjectWorkView>,
     features: Entity<crate::views::features::FeaturesView>,
     _mode_shortcut: Subscription,
 }
@@ -48,6 +49,7 @@ impl RootView {
             if close { this.foundry_open = false; }
             cx.notify();
         }).detach();
+        let project_work = cx.new(|cx| crate::views::project_work::ProjectWorkView::new(model.clone(), window, cx));
         let features = cx.new(|cx| crate::views::features::FeaturesView::new(model.clone(), window, cx));
         let sidebar = cx.new(|cx| SidebarView::new(model.clone(), window, cx));
         let thread = cx.new(|cx| ThreadView::new(model.clone(), window, cx));
@@ -88,7 +90,15 @@ impl RootView {
             foundry: None,
             foundry_open: false,
             features,
+            project_work,
         }
+    }
+
+    fn open_project_work(&mut self, board: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.model.read(cx).active_project.is_none() { return; }
+        self.settings_open=false; self.foundry_open=false; self.preview_open=false;
+        self.model.update(cx,|m,cx| {m.features_open=false;m.review_open=false;m.selected=None;m.active_workspace=None;m.new_thread_open=false;cx.notify();});
+        self.project_work.update(cx,|v,cx|v.open(board,window,cx));cx.notify();
     }
 
     fn open_features(&mut self, new: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -123,7 +133,7 @@ impl RootView {
         let title = selected
             .as_ref()
             .map(|t| t.read(cx).title())
-            .unwrap_or_else(|| "New thread".to_string());
+            .unwrap_or_else(|| if model.active_project.is_some() && !model.new_thread_open {"Project".into()}else{"New thread".into()});
         let title = if self.settings_open { "Settings".to_string() } else if model.features_open { "Features".to_string() } else { title };
         let project = model
             .active_project
@@ -205,6 +215,10 @@ impl Render for RootView {
         crate::theme::follow_system(window, cx);
         self.drain_toasts(window, cx);
         let ui = Ui::of(cx);
+        if let Some(id)=self.model.update(cx,|m,_|m.project_feature_request.take()) {
+            self.open_project_work(false,window,cx);
+            self.project_work.update(cx,|v,cx|v.inspect(id,cx));
+        }
         if let Some(text) = self.model.update(cx, |m,_| m.foundry_insert.take()) {
             self.foundry_open = false;
             self.thread.update(cx, |t,cx|t.set_foundry_prompt(text,window,cx));
@@ -272,9 +286,12 @@ impl Render for RootView {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &crate::actions::NewFeature, window, cx| {
-                this.open_features(true, window, cx);
+                this.open_project_work(false, window, cx);
             }))
             .on_action(cx.listener(|this, _: &crate::actions::OpenFeatures, window, cx| {
+                this.open_project_work(true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &crate::actions::ManualFeature, window, cx| {
                 this.open_features(false, window, cx);
             }))
             .on_action(cx.listener(|this, _: &OpenCommandPalette, window, cx| {
@@ -383,7 +400,7 @@ impl Render for RootView {
                                 .child(self.sidebar.clone()),
                         )
                     })
-                    .child(resizable_panel().child(if self.model.read(cx).features_open { self.features.clone().into_any_element() } else if self.foundry_open { self.foundry.clone().unwrap().into_any_element() } else { self.thread.clone().into_any_element() }))
+                    .child(resizable_panel().child(if self.model.read(cx).features_open { self.features.clone().into_any_element() } else if self.foundry_open { self.foundry.clone().unwrap().into_any_element() } else if self.model.read(cx).active_project.is_some() && self.model.read(cx).selected.is_none() && self.model.read(cx).active_workspace.is_none() && !self.model.read(cx).new_thread_open { self.project_work.clone().into_any_element() } else { self.thread.clone().into_any_element() }))
                     .when(self.model.read(cx).review_open, |el| {
                         el.child(resizable_panel().size(px(640.)).size_range(px(400.)..px(1100.)).child(self.review.clone()))
                     })

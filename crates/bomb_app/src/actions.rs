@@ -11,6 +11,7 @@ gpui_kit::actions!(
         OpenHome,
         NewThread,
         NewFeature,
+        ManualFeature,
         OpenFeatures,
         NewWorkspaceConversation,
         NewMockSession,

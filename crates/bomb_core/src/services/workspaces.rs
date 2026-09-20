@@ -143,6 +143,7 @@ pub fn workspace(state: &AppState, id: &str) -> Result<WorkspaceRecord, String> 
 }
 
 pub fn ensure_idle(state: &AppState, w: &WorkspaceRecord) -> Result<(), String> {
+    if state.project_work.owns_cwd(&w.path) {return Err("Project work owns this workspace. Use Keep working on its feature to request changes.".into());}
     if state.foundry.owns_cwd(&w.path) {return Err("A Foundry run owns this thread folder. Stop it before changing the workspace.".into());}
     if state
         .workspace_turns

@@ -1,5 +1,7 @@
 # Optional project features
 
+For conversational planning, the kanban board and automatic project execution, see [PROJECT_WORKFLOW.md](PROJECT_WORKFLOW.md). The manual workflow below remains available under Workflow settings.
+
 Open a project, then use **⌘K → New feature** (or **⌘⌥N**). **Project features** in the command palette and **Features** on the project overview open the board. This is a native center pane using the same card frame/provider identities as Smart Model Routing; it does not open another window.
 
 Feature tracking starts **off for every project**. Importing a repo or opening the board creates no records or model sessions. Enable it explicitly. Ordinary threads always remain available. Turning tracking off preserves documents and existing threads, including running work.
