@@ -3,6 +3,12 @@ use super::*;
 impl FeaturesView {
     fn record_card(&self, record: &Record, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
         let feature = &record.feature;
+        if let Some(managed)=services(cx).project_work.snapshot(&self.project).and_then(|p|p.features.into_iter().find(|f|f.id==feature.id)) {
+            let model=self.model.clone();let fid=managed.id.clone();
+            return crate::views::brand::handoff_card(ui).gap_2().child(div().font_weight(FontWeight::SEMIBOLD).child(managed.title()))
+                .child(div().text_sm().child(format!("{} · tracked by the project workflow",managed.status_label())))
+                .child(Button::new(SharedString::from(format!("managed-feature-{fid}"))).outline().small().label("Open tracked result").on_click(move|_,_,cx|model.update(cx,|m,cx|{m.features_open=false;m.project_feature_request=Some(fid.clone());cx.notify();}))).into_any_element();
+        }
         let edit = record.clone();
         let enabled = self.board.settings.enabled;
         let disposition = self

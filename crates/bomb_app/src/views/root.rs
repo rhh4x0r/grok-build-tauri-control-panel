@@ -115,6 +115,14 @@ impl RootView {
     }
 
     fn drain_toasts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let notices:Vec<_>=self.model.update(cx,|m,_|m.project_notices.drain(..).collect());
+        for (project,feature,message) in notices {
+            let model=self.model.clone();
+            window.push_notification(Notification::info(format!("{} · {message}",crate::models::app::project_name(&project))).on_click(move|_,window,cx| {
+                model.update(cx,|m,cx|{m.set_active_project(project.clone(),cx);m.project_feature_request=feature.clone();});
+                if feature.is_none() {window.dispatch_action(Box::new(crate::actions::OpenFeatures),cx);}
+            }),cx);
+        }
         let toasts: Vec<(ToastKind, String)> = self.model.update(cx, |m, _| m.toasts.drain(..).collect());
         for (kind, msg) in toasts {
             let note = match kind {
@@ -290,6 +298,15 @@ impl Render for RootView {
             }))
             .on_action(cx.listener(|this, _: &crate::actions::OpenFeatures, window, cx| {
                 this.open_project_work(true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &crate::actions::NextProjectDecision, window, cx| {
+                this.open_project_work(true,window,cx);this.project_work.update(cx,|v,cx|v.next_decision(window,cx));
+            }))
+            .on_action(cx.listener(|this, _: &crate::actions::PauseProject, window, cx| {
+                this.open_project_work(true,window,cx);this.project_work.update(cx,|v,cx|v.command("pause",cx));
+            }))
+            .on_action(cx.listener(|this, _: &crate::actions::StopProject, window, cx| {
+                this.open_project_work(true,window,cx);this.project_work.update(cx,|v,cx|v.command("stop",cx));
             }))
             .on_action(cx.listener(|this, _: &crate::actions::ManualFeature, window, cx| {
                 this.open_features(false, window, cx);

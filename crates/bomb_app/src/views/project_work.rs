@@ -24,15 +24,23 @@ enum Choice {
     Planner,
     Task(usize, usize),
     Reviewer(usize),
+    ExistingTask(usize, usize),
+    ExistingReviewer(usize),
+    Role(usize),
 }
+type ViewContext = (&'static str, Option<String>, Point<Pixels>, bool);
 pub struct ProjectWorkView {
     model: Entity<AppModel>,
     project: String,
     input: Entity<TextareaState>,
-    feedback: Entity<TextareaState>,
+    decision: Entity<super::feature_decision::FeatureDecisionView>,
+    guidelines: Entity<TextareaState>,
+    defaults: svc::features::ProjectSettings,
+    sync_guidelines: Option<String>,
+    attention_cursor: usize,
     tab: &'static str,
     selected: Option<String>,
-    feedback_context: Option<String>,
+
     detail: &'static str,
     settings: bool,
     needs_only: bool,
@@ -45,6 +53,22 @@ pub struct ProjectWorkView {
     scroll: ScrollHandle,
     last_message: Option<String>,
     pin_frames: u8,
+    generation: u64,
+    submission: Option<String>,
+    clear_submission: Option<String>,
+    preview_busy: bool,
+    preview_message: Option<String>,
+    preview_switch: bool,
+    preview_generation: u64,
+    expanded_plan: bool,
+    show_checks: bool,
+    history_limit: usize,
+    new_activity: bool,
+    list_board: bool,
+    selected_file: Option<String>,
+    excluded: std::collections::HashSet<String>,
+    board_offset: Point<Pixels>,
+    contexts: std::collections::HashMap<String, ViewContext>,
 }
 impl ProjectWorkView {
     pub fn new(model: Entity<AppModel>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -55,15 +79,21 @@ impl ProjectWorkView {
                 .auto_grow(2, 6)
                 .submit_on_enter(true)
         });
-        let feedback = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .placeholder(
-                    "What should change? Describe what you saw or answer the agent’s question…",
-                )
-                .auto_grow(2, 5)
-        });
+        let guidelines=cx.new(|cx|TextareaState::new(window,cx).placeholder("e.g. Fable for frontend, Codex for backend, Grok for review. Explain any preferences here…").auto_grow(2,4));
+        let decision = cx
+            .new(|cx| super::feature_decision::FeatureDecisionView::new(model.clone(), window, cx));
         cx.observe(&input, |_, _, cx| cx.notify()).detach();
         cx.subscribe_in(&input, window, |v, _, event: &InputEvent, window, cx| {
+            if matches!(event, InputEvent::Change) && !v.project.is_empty() {
+                if let Err(e) = work::save_draft_text(
+                    &services(cx),
+                    &v.project,
+                    "project",
+                    &v.input.read(cx).value(),
+                ) {
+                    v.message = Some(e);
+                }
+            }
             if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
                 v.describe(window, cx);
             }
@@ -74,10 +104,14 @@ impl ProjectWorkView {
             model,
             project: String::new(),
             input,
-            feedback,
+            decision,
+            guidelines,
+            defaults: Default::default(),
+            sync_guidelines: None,
+            attention_cursor: 0,
             tab: "Conversation",
             selected: None,
-            feedback_context: None,
+
             detail: "Result",
             settings: false,
             needs_only: false,
@@ -90,12 +124,28 @@ impl ProjectWorkView {
             scroll: ScrollHandle::new(),
             last_message: None,
             pin_frames: 0,
+            generation: 0,
+            submission: None,
+            clear_submission: None,
+            preview_busy: false,
+            preview_message: None,
+            preview_switch: false,
+            preview_generation: 0,
+            expanded_plan: false,
+            show_checks: false,
+            history_limit: 60,
+            new_activity: false,
+            list_board: false,
+            selected_file: None,
+            excluded: Default::default(),
+            board_offset: point(px(0.), px(0.)),
+            contexts: Default::default(),
         }
     }
     pub fn open(&mut self, board: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync(window, cx);
         self.tab = if board { "Board" } else { "Conversation" };
         self.selected = None;
-        self.sync(window, cx);
         if !board {
             self.input.update(cx, |s, cx| s.focus(window, cx));
         }
@@ -111,13 +161,49 @@ impl ProjectWorkView {
         if project == self.project {
             return;
         }
+        if !self.project.is_empty() {
+            let _ = work::save_draft_text(
+                &services(cx),
+                &self.project,
+                "project",
+                &self.input.read(cx).value(),
+            );
+            self.contexts.insert(
+                self.project.clone(),
+                (
+                    self.tab,
+                    self.selected.clone(),
+                    self.scroll.offset(),
+                    self.needs_only,
+                ),
+            );
+        }
         self.project = project.clone();
-        self.selected = None;
+        let context = self.contexts.get(&project).cloned().unwrap_or((
+            "Conversation",
+            None,
+            point(px(0.), px(0.)),
+            false,
+        ));
+        self.tab = context.0;
+        self.selected = context.1;
+        self.scroll.set_offset(context.2);
+        self.needs_only = context.3;
+        self.generation += 1;
+        self.preview_generation += 1;
+        self.preview_busy = false;
+        self.preview_message = None;
+        self.preview_switch = false;
+        self.submission = None;
+        self.clear_submission = None;
+        self.excluded.clear();
         self.diff = None;
         self.message = None;
         self.planner = None;
         self.busy = false;
-        self.input.update(cx, |s, cx| s.set_value("", window, cx));
+        let draft = work::draft_text(&services(cx), &project, "project");
+        self.input
+            .update(cx, |s, cx| s.set_value(draft, window, cx));
         if project.is_empty() {
             return;
         }
@@ -127,7 +213,12 @@ impl ProjectWorkView {
         spawn_service(
             cx,
             async move {
-                let result = work::load(&state, &project);
+                let result = async {
+                    let p = work::load(&state, &project)?;
+                    let settings = svc::features::load(&state, &project).await?.settings;
+                    Ok::<_, String>((p, settings))
+                }
+                .await;
                 (project, result)
             },
             move |(project, result), cx| {
@@ -137,7 +228,11 @@ impl ProjectWorkView {
                     }
                     v.loading = false;
                     match result {
-                        Ok(p) => v.planner = p.planner,
+                        Ok((p, settings)) => {
+                            v.planner = p.planner;
+                            v.sync_guidelines = Some(settings.guidelines.clone());
+                            v.defaults = settings;
+                        }
                         Err(e) => v.message = Some(e),
                     }
                     cx.notify();
@@ -200,14 +295,26 @@ impl ProjectWorkView {
     {
         self.busy = true;
         self.message = None;
+        self.generation += 1;
+        let generation = self.generation;
+        let submission = self.submission.take();
         let project = self.project.clone();
         let weak = cx.entity().downgrade();
         spawn_service(cx, f, move |result, cx| {
+            if result.is_ok() {
+                if let Some(sent) = &submission {
+                    let state = services(cx);
+                    if work::draft_text(&state, &project, "project") == *sent {
+                        let _ = work::save_draft_text(&state, &project, "project", "");
+                    }
+                }
+            }
             let _ = weak.update(cx, |v, cx| {
-                if v.project == project {
+                if v.project == project && v.generation == generation {
                     v.busy = false;
-                    if let Err(e) = result {
-                        v.message = Some(e);
+                    match result {
+                        Err(e) => v.message = Some(e),
+                        Ok(()) => v.clear_submission = submission,
                     }
                 }
                 v.model.update(cx, |m, cx| {
@@ -219,7 +326,7 @@ impl ProjectWorkView {
         });
         cx.notify();
     }
-    fn describe(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn describe(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let p = self.snapshot(cx);
         if self.busy || p.planning || !p.enabled {
             return;
@@ -235,7 +342,7 @@ impl ProjectWorkView {
         let catalog = self.candidates(cx);
         let state = services(cx);
         let project = self.project.clone();
-        self.input.update(cx, |s, cx| s.set_value("", window, cx));
+        self.submission = Some(text.clone());
         self.operation(
             async move { work::describe(state, project, text, planner, catalog).await },
             cx,
@@ -268,12 +375,18 @@ impl ProjectWorkView {
         let expected = serde_json::to_string(&draft).unwrap_or_default();
         let state = services(cx);
         let project = self.project.clone();
+        let selected = draft
+            .features
+            .iter()
+            .filter(|f| !self.excluded.contains(&f.id))
+            .map(|f| f.id.clone())
+            .collect();
         self.operation(
-            async move { work::accept_plan(state, project, expected, start).await },
+            async move { work::accept_selected_plan(state, project, expected, start, selected).await },
             cx,
         );
     }
-    fn command(&mut self, command: &'static str, cx: &mut Context<Self>) {
+    pub fn command(&mut self, command: &'static str, cx: &mut Context<Self>) {
         let state = services(cx);
         let project = self.project.clone();
         self.operation(
@@ -301,7 +414,41 @@ impl ProjectWorkView {
             cx.notify();
             return;
         }
-        if let Some(mut draft) = self.snapshot(cx).draft {
+        if let Choice::Role(index) = choice {
+            if let Some(role) = ["Frontend", "Backend", "Build", "Review"].get(index) {
+                self.defaults.roles.insert((*role).into(), a);
+            }
+            cx.notify();
+            return;
+        }
+        let p = self.snapshot(cx);
+        if let Choice::ExistingTask(fi, ti) = choice {
+            if let Some(f) = p.features.get(fi) {
+                if let Ok(spec) = f.feature() {
+                    if let Some(t) = spec.tasks.get(ti) {
+                        if let Err(e) =
+                            work::replace_assignment(&services(cx), &self.project, &f.id, &t.id, a)
+                        {
+                            self.message = Some(e);
+                        }
+                    }
+                }
+            }
+            cx.notify();
+            return;
+        }
+        if let Choice::ExistingReviewer(fi) = choice {
+            if let Some(f) = p.features.get(fi) {
+                if let Err(e) =
+                    work::replace_assignment(&services(cx), &self.project, &f.id, "reviewer", a)
+                {
+                    self.message = Some(e);
+                }
+            }
+            cx.notify();
+            return;
+        }
+        if let Some(mut draft) = p.draft {
             match choice {
                 Choice::Task(f, t) => draft.features[f].tasks[t].assignment = a,
                 Choice::Reviewer(f) => draft.features[f].verification.reviewer = a,
@@ -322,6 +469,13 @@ impl ProjectWorkView {
     ) -> AnyElement {
         let name = self.model.read(cx).model_name(&a.backend, &a.model);
         let catalog = self.candidates(cx);
+        let p=self.snapshot(cx);
+        let immutable=match choice {
+            Choice::ExistingTask(fi,ti)=>p.features.get(fi).is_none_or(|f|f.feature().ok().and_then(|s|s.tasks.get(ti).and_then(|t|f.tasks.get(&t.id)).map(|t|matches!(t.state,TaskState::Running|TaskState::Checkpointed))).unwrap_or(true)),
+            Choice::ExistingReviewer(fi)=>p.features.get(fi).is_none_or(|f|f.state==FeatureState::Done||p.active_jobs.iter().any(|k|k==&f.id||k.starts_with(&format!("{}/",f.id)))),
+            _=>false,
+        };
+        let name=if catalog.iter().any(|c|c.backend==a.backend&&c.model==a.model) {name} else {format!("{name} · unavailable")};
         let weak = cx.entity().downgrade();
         let weak2 = weak.clone();
         let selected = a.clone();
@@ -336,7 +490,7 @@ impl ProjectWorkView {
                 Button::new(SharedString::from(format!("{key}-model")))
                     .ghost()
                     .small()
-                    .disabled(self.busy)
+                    .disabled(self.busy || immutable)
                     .label(name)
                     .dropdown_caret(true)
                     .dropdown_menu(move |mut menu, _, _| {
@@ -362,7 +516,7 @@ impl ProjectWorkView {
                 Button::new(SharedString::from(format!("{key}-effort")))
                     .ghost()
                     .small()
-                    .disabled(self.busy)
+                    .disabled(self.busy || immutable)
                     .label(format!(
                         "Reasoning: {}",
                         super::brand::effort_label(&a.effort)
@@ -391,7 +545,15 @@ impl ProjectWorkView {
             .into_any_element()
     }
     pub fn inspect(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.selected.is_none() {
+            self.board_offset = self.scroll.offset();
+        }
         self.scroll.set_offset(point(px(0.), px(0.)));
+        self.preview_generation += 1;
+        self.preview_busy = false;
+        self.preview_message = None;
+        self.preview_switch = false;
+        self.selected_file = None;
         self.selected = Some(id);
         self.detail = "Result";
         self.diff = None;
@@ -430,73 +592,136 @@ impl ProjectWorkView {
         cx.notify();
     }
     fn preview(&mut self, cx: &mut Context<Self>) {
+        self.start_preview(false, cx);
+    }
+    fn start_preview(&mut self, switch: bool, cx: &mut Context<Self>) {
+        self.detail = "Preview";
+        if self.preview_busy {
+            return;
+        }
         let Some(id) = self.selected.clone() else {
             return;
         };
         let state = services(cx);
         let project = self.project.clone();
-        let Ok(path) = work::candidate_path(&state, &project, &id) else {
-            return;
+        let path = match work::candidate_path(&state, &project, &id) {
+            Ok(p) => p,
+            Err(e) => {
+                self.preview_message = Some(e);
+                cx.notify();
+                return;
+            }
         };
-        self.detail = "Preview";
         self.preview
             .update(cx, |p, cx| p.set_project_root(path.clone(), cx));
+        self.preview_busy = true;
+        self.preview_switch = false;
+        self.preview_message = Some("Starting preview…".into());
+        self.preview_generation += 1;
+        let generation = self.preview_generation;
         let weak = cx.entity().downgrade();
         spawn_service(
             cx,
             async move {
                 let current = state.dev_server.status().await;
-                if current.running && current.cwd.as_deref() != path.to_str() {
-                    return Err(
-                        "Another preview is running. Stop it before previewing this candidate."
-                            .to_string(),
-                    );
-                }
-                svc::start_dev_server(
-                    &state,
-                    Some(path.to_string_lossy().into_owned()),
-                    None,
-                    Some(false),
-                )
-                .await
+                let result = if current.running && current.cwd.as_deref() == path.to_str() {
+                    Ok(current)
+                } else if current.running && !switch {
+                    return (project,id,generation,Err("Another feature's preview is running. Switch preview to stop it and open this feature.".into()),true);
+                } else {
+                    state
+                        .dev_server
+                        .preview(&path, if switch { current.cwd } else { None })
+                        .await
+                };
+                (project, id, generation, result, false)
             },
-            move |result, cx| {
-                let _ = weak.update(cx, |v, cx| {
-                    match result {
-                        Ok(status) => v.model.update(cx, |m, cx| {
-                            m.dev_server = Some(status);
-                            cx.notify();
-                        }),
-                        Err(e) => v.message = Some(e),
-                    }
-                    cx.notify();
-                });
+            move |(project, id, generation, result, needs_switch), cx| {
+                let _=weak.update(cx,|v,cx| {
+                if v.project!=project || v.selected.as_ref()!=Some(&id) || v.preview_generation!=generation {return;}
+                v.preview_busy=false;v.preview_switch=needs_switch;
+                match result {Ok(status)=>{v.preview_message=Some("Preview ready · this feature's working copy. Follow the test steps and verify connected services; fixtures may still be in use.".into());v.model.update(cx,|m,cx|{m.dev_server=Some(status);cx.notify();});},Err(e)=>v.preview_message=Some(e)}
+                cx.notify();
+            });
             },
         );
         cx.notify();
     }
-    fn approve(&mut self, f: FeatureWork, cx: &mut Context<Self>) {
-        let Some(review) = f.review else {
+    pub fn next_decision(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let p = self.snapshot(cx);
+        let mut targets: Vec<(Option<String>, Option<Uuid>)> = Vec::new();
+        if !p.questions.is_empty() {
+            targets.push((Some("questions".into()), None));
+        }
+        if p.final_blocker.is_some() {
+            targets.push((Some("final".into()), None));
+        }
+        for f in &p.features {
+            if f.state == FeatureState::NeedsInput
+                || (f.state == FeatureState::Review && f.approved_head.is_none())
+            {
+                targets.push((Some(f.id.clone()), None));
+            }
+        }
+        for (sid, t) in &self.model.read(cx).threads {
+            let t = t.read(cx);
+            if t.meta.live && t.meta.project_root.as_deref() == Some(&self.project) {
+                for _ in t.thread.open_approvals() {
+                    targets.push((None, Some(*sid)));
+                }
+            }
+        }
+        if targets.is_empty() {
+            self.message = Some("No unresolved decisions in this project.".into());
+            cx.notify();
             return;
-        };
+        }
+        let (feature, thread) = targets[self.attention_cursor % targets.len()].clone();
+        self.attention_cursor += 1;
+        if let Some(sid) = thread {
+            self.open_thread(sid, cx);
+        } else if let Some(id) = feature {
+            if id == "questions" {
+                self.selected = None;
+                self.tab = "Conversation";
+                self.input.update(cx, |s, cx| s.focus(window, cx));
+            } else if id == "final" {
+                self.selected = None;
+                self.needs_only = true;
+                self.tab = "Board";
+                self.scroll.set_offset(point(px(0.), px(0.)));
+            } else {
+                self.inspect(id, cx);
+            }
+        }
+        cx.notify();
+    }
+    fn save_defaults(&mut self, cx: &mut Context<Self>) {
         let state = services(cx);
         let project = self.project.clone();
+        let mut settings = self.defaults.clone();
+        settings.enabled = self.snapshot(cx).enabled;
+        settings.guidelines = self.guidelines.read(cx).value().to_string();
         self.operation(
-            async move { work::approve(state, project, f.id, review.candidate).await },
+            async move { svc::features::save_settings(&state, &project, settings).await },
             cx,
         );
     }
-    fn revise(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.selected.clone() else {
+    fn discard(&mut self, cx: &mut Context<Self>) {
+        if let Err(e) = work::discard_proposal(&services(cx), &self.project) {
+            self.message = Some(e);
+        }
+        self.excluded.clear();
+        cx.notify();
+    }
+    fn retry_final(&mut self, cx: &mut Context<Self>) {
+        let Some(b) = self.snapshot(cx).final_blocker else {
             return;
         };
-        let feedback = self.feedback.read(cx).value().to_string();
         let state = services(cx);
         let project = self.project.clone();
-        self.feedback
-            .update(cx, |s, cx| s.set_value("", window, cx));
         self.operation(
-            async move { work::keep_working(state, project, id, feedback).await },
+            async move { work::retry_final(state, project, b.id).await },
             cx,
         );
     }

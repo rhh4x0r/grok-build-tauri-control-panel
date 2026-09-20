@@ -244,16 +244,33 @@ pub enum TaskState {
 impl TaskState {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Queued => "Waiting", Self::Running => "Building", Self::Checkpointed => "Build finished",
-            Self::NeedsInput => "Needs you", Self::Interrupted => "Interrupted",
+            Self::Queued => "Waiting",
+            Self::Running => "Building",
+            Self::Checkpointed => "Build finished",
+            Self::NeedsInput => "Needs you",
+            Self::Interrupted => "Interrupted",
         }
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum WorkStage { Build, Combine, Checks, Review, Merge, Final }
+pub enum WorkStage {
+    Build,
+    Combine,
+    Checks,
+    Review,
+    Merge,
+    Final,
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum BlockerKind { Access, Environment, Provider, Interrupted, Revision, Unknown }
+pub enum BlockerKind {
+    Access,
+    Environment,
+    Provider,
+    Interrupted,
+    Revision,
+    Unknown,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Blocker {
     pub id: String,
@@ -267,15 +284,57 @@ impl Blocker {
     pub fn new(stage: WorkStage, message: impl Into<String>, task: Option<String>) -> Self {
         let message = message.into();
         let kind = Self::classify(&message);
-        Self { id: id("decision"), stage, kind, message, task, at: now() }
+        Self {
+            id: id("decision"),
+            stage,
+            kind,
+            message,
+            task,
+            at: now(),
+        }
     }
     pub fn classify(message: &str) -> BlockerKind {
         let s = message.to_lowercase();
-        if ["permission", "access", "credential", "sign in", "unauthorized", "authentication", "policy"].iter().any(|v|s.contains(v)) {BlockerKind::Access}
-        else if ["model", "provider", "rate limit", "quota"].iter().any(|v|s.contains(v)) {BlockerKind::Provider}
-        else if ["network", "enotfound", "econn", "dns", "fetch failed", "not found", "no such file", "timed out"].iter().any(|v|s.contains(v)) {BlockerKind::Environment}
-        else if ["interrupt", "cancel", "stopped", "lost provider events"].iter().any(|v|s.contains(v)) {BlockerKind::Interrupted}
-        else {BlockerKind::Unknown}
+        if [
+            "permission",
+            "access",
+            "credential",
+            "sign in",
+            "unauthorized",
+            "authentication",
+            "policy",
+        ]
+        .iter()
+        .any(|v| s.contains(v))
+        {
+            BlockerKind::Access
+        } else if ["model", "provider", "rate limit", "quota"]
+            .iter()
+            .any(|v| s.contains(v))
+        {
+            BlockerKind::Provider
+        } else if [
+            "network",
+            "enotfound",
+            "econn",
+            "dns",
+            "fetch failed",
+            "not found",
+            "no such file",
+            "timed out",
+        ]
+        .iter()
+        .any(|v| s.contains(v))
+        {
+            BlockerKind::Environment
+        } else if ["interrupt", "cancel", "stopped", "lost provider events"]
+            .iter()
+            .any(|v| s.contains(v))
+        {
+            BlockerKind::Interrupted
+        } else {
+            BlockerKind::Unknown
+        }
     }
     pub fn label(&self) -> &'static str {
         match (&self.stage, &self.kind) {
@@ -291,8 +350,10 @@ impl Blocker {
     }
     pub fn retry_label(&self) -> &'static str {
         match self.stage {
-            WorkStage::Build => "Continue task", WorkStage::Combine => "Retry combining",
-            WorkStage::Checks | WorkStage::Final => "Retry checks", WorkStage::Review => "Retry review",
+            WorkStage::Build => "Continue task",
+            WorkStage::Combine => "Retry combining",
+            WorkStage::Checks | WorkStage::Final => "Retry checks",
+            WorkStage::Review => "Retry review",
             WorkStage::Merge => "Retry merge",
         }
     }
@@ -420,14 +481,25 @@ impl FeatureWork {
             .unwrap_or_else(|_| self.id.clone())
     }
     pub fn decision_key(&self) -> String {
-        self.blocker.as_ref().map(|b|b.id.clone())
-            .or_else(||self.review.as_ref().map(|r|r.candidate.clone()))
-            .unwrap_or_else(||format!("{}:{:?}",self.id,self.state))
+        self.blocker
+            .as_ref()
+            .map(|b| b.id.clone())
+            .or_else(|| self.review.as_ref().map(|r| r.candidate.clone()))
+            .unwrap_or_else(|| format!("{}:{:?}", self.id, self.state))
     }
     pub fn status_label(&self) -> &str {
-        self.blocker.as_ref().filter(|_|self.state==FeatureState::NeedsInput)
-            .map(|b|b.label()).unwrap_or_else(||self.state.label())
+        self.blocker
+            .as_ref()
+            .filter(|_| self.state == FeatureState::NeedsInput)
+            .map(|b| b.label())
+            .unwrap_or_else(|| self.state.label())
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RoutingSuggestion {
+    pub assignment: Assignment,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -450,42 +522,99 @@ pub struct ProjectWork {
     pub final_blocker: Option<Blocker>,
     pub questions: Vec<String>,
     pub routing: Option<bool>,
+    pub routing_suggestions: BTreeMap<String, RoutingSuggestion>,
     /// Runtime reservations, never restored as executing after a restart.
     #[serde(skip)]
     pub active_jobs: std::collections::BTreeSet<String>,
 }
 impl ProjectWork {
-    pub fn has_activity(&self) -> bool { self.planning || !self.active_jobs.is_empty() }
+    pub fn has_activity(&self) -> bool {
+        self.planning || !self.active_jobs.is_empty()
+    }
     pub fn needs_attention(&self) -> usize {
-        self.features.iter().filter(|f|matches!(f.state,FeatureState::NeedsInput|FeatureState::Review) && f.approved_head.is_none()).count()
-            + usize::from(self.final_blocker.is_some()) + usize::from(!self.questions.is_empty())
+        self.features
+            .iter()
+            .filter(|f| {
+                f.state == FeatureState::NeedsInput
+                    || (f.state == FeatureState::Review && f.approved_head.is_none())
+            })
+            .count()
+            + usize::from(self.final_blocker.is_some())
+            + usize::from(!self.questions.is_empty())
     }
     pub fn activity_label(&self) -> String {
-        let active=self.active_jobs.len();let needs=self.needs_attention();
-        if self.planning {return "Planning your work…".into();}
-        if active>0 {return format!("{} · {active} active jobs · {needs} need you",match self.state {RunState::Paused=>"Paused; finishing active work",RunState::Stopped=>"Stopping",_=>"Working"});}
-        if needs>0 {return format!("Waiting for you · {needs} decision(s) · no jobs running");}
+        let active = self.active_jobs.len();
+        let needs = self.needs_attention();
+        if self.planning {
+            return "Planning your work…".into();
+        }
+        if active > 0 {
+            return format!(
+                "{} · {active} active jobs · {needs} need you",
+                match self.state {
+                    RunState::Paused => "Paused; finishing active work",
+                    RunState::Stopped => "Stopping",
+                    _ => "Working",
+                }
+            );
+        }
+        if needs > 0 {
+            return format!("Waiting for you · {needs} decision(s) · no jobs running");
+        }
         match self.state {
-            RunState::Complete=>"Started work merged · final checks passed".into(),
-            RunState::Paused=>"Paused · no jobs running".into(),
-            RunState::Stopped=>"Stopped · work saved".into(),
-            RunState::Interrupted=>"Interrupted · inspect saved work before continuing".into(),
-            RunState::Running=>"Waiting for ready work · no jobs running".into(),
-            RunState::Idle=>"Ready when you are".into(),
+            RunState::Complete => "Started work merged · final checks passed".into(),
+            RunState::Paused => "Paused · no jobs running".into(),
+            RunState::Stopped => "Stopped · work saved".into(),
+            RunState::Interrupted => "Interrupted · inspect saved work before continuing".into(),
+            RunState::Running => "Waiting for ready work · no jobs running".into(),
+            RunState::Idle => "Ready when you are".into(),
         }
     }
     pub fn waiting_reason(&self, f: &FeatureWork) -> String {
-        let deps=f.feature().map(|s|s.depends_on).unwrap_or_default();
-        let pending=deps.iter().filter_map(|id|self.features.iter().find(|d|&d.id==id&&d.state!=FeatureState::Done)).map(|d|d.title()).collect::<Vec<_>>();
-        if !pending.is_empty() {return format!("Waiting for {} to merge",pending.join(", "));}
-        if f.state==FeatureState::Idea {return "Saved for later · start explicitly when ready".into();}
-        if f.approved_head.is_some() {return if self.state==RunState::Running {"Approved · merge queued"} else {"Approved · resume to merge"}.into();}
-        if f.state==FeatureState::Queued {
-            return if self.state!=RunState::Running {"Waiting for Resume"} else if self.active_jobs.len()>=self.policy.concurrency {"Waiting for an execution slot"} else {"Ready to start"}.into();
+        let deps = f.feature().map(|s| s.depends_on).unwrap_or_default();
+        let pending = deps
+            .iter()
+            .filter_map(|id| {
+                self.features
+                    .iter()
+                    .find(|d| &d.id == id && d.state != FeatureState::Done)
+            })
+            .map(|d| d.title())
+            .collect::<Vec<_>>();
+        if !pending.is_empty() {
+            return format!("Waiting for {} to merge", pending.join(", "));
+        }
+        if f.state == FeatureState::Idea {
+            return "Saved for later · start explicitly when ready".into();
+        }
+        if f.approved_head.is_some() {
+            return if self.state == RunState::Running {
+                "Approved · merge queued"
+            } else {
+                "Approved · resume to merge"
+            }
+            .into();
+        }
+        if f.state == FeatureState::Queued {
+            return if self.state != RunState::Running {
+                "Waiting for Resume"
+            } else if self.active_jobs.len() >= self.policy.concurrency {
+                "Waiting for an execution slot"
+            } else {
+                "Ready to start"
+            }
+            .into();
         }
         f.note.clone()
     }
     pub fn unblocks(&self, id: &str) -> usize {
-        self.features.iter().filter(|f|f.state!=FeatureState::Done && f.feature().is_ok_and(|s|s.depends_on.iter().any(|d|d==id))).count()
+        self.features
+            .iter()
+            .filter(|f| {
+                f.state != FeatureState::Done
+                    && f.feature()
+                        .is_ok_and(|s| s.depends_on.iter().any(|d| d == id))
+            })
+            .count()
     }
 }

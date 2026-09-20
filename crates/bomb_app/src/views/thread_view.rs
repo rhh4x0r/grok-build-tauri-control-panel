@@ -26,6 +26,7 @@ pub struct ThreadView {
     transcript: Option<(String, Entity<TranscriptView>)>,
     composer: Entity<ComposerView>,
     review_loop: Entity<super::review_loop::ReviewLoopView>,
+    feature_decision: Entity<super::feature_decision::FeatureDecisionView>,
     search_open: bool,
     terminals: std::collections::HashMap<String, Entity<super::terminal::TerminalPanel>>,
     terminals_open: std::collections::HashSet<String>,
@@ -42,6 +43,7 @@ impl ThreadView {
         let composer = cx.new(|cx| ComposerView::new(model.clone(), window, cx));
         cx.observe(&composer, |_, _, cx| cx.notify()).detach();
         let review_loop = cx.new(|cx|super::review_loop::ReviewLoopView::new(model.clone(),window,cx));
+        let feature_decision=cx.new(|cx|super::feature_decision::FeatureDecisionView::new(model.clone(),window,cx));
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find in conversation"));
         cx.subscribe(&search, |this, _, ev: &InputEvent, cx| match ev {
             InputEvent::Change => this.push_search(cx),
@@ -60,6 +62,7 @@ impl ThreadView {
             transcript: None,
             composer,
             review_loop,
+            feature_decision,
             search_open: false,
             terminals: std::collections::HashMap::new(),
             terminals_open: std::collections::HashSet::new(),
@@ -567,7 +570,7 @@ impl ThreadView {
 }
 
 impl Render for ThreadView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = Ui::of(cx);
         let thread = self.model.read(cx).selected_thread();
         let composer = self.composer.clone();
@@ -662,6 +665,8 @@ impl Render for ThreadView {
             p.features.into_iter().find(|f| f.tasks.values().any(|t|t.workspace.as_ref().and_then(|w|w.session).is_some_and(|id|id.to_string()==tid)) || f.reviewer_thread.is_some_and(|id|id.to_string()==tid) || f.candidate.as_ref().and_then(|w|w.session).is_some_and(|id|id.to_string()==tid))
         });
 
+        let managed=project_feature.is_some();
+        if let Some(f)=&project_feature {if let Some(root)=thread.read(cx).meta.project_root.clone() {self.feature_decision.update(cx,|v,cx|v.set_context(root,f.id.clone(),window,cx));}}
         div()
             .size_full()
             .min_w_0()
@@ -711,7 +716,7 @@ impl Render for ThreadView {
                                     },
                                     &ui,
                                 ))
-                                .when_some(retry_prompt, |el, prompt| {
+                                .when_some(retry_prompt.filter(|_|!managed), |el, prompt| {
                                     el.child(Button::new("retry-failed-turn").ghost().small().icon(Lucide::RotateCcw).label("Retry last prompt")
                                         .disabled(!self.composer.read(cx).can_retry(&prompt, cx))
                                         .tooltip("Resend the last failed prompt with your selected model. Reconnects if startup failed. Clear a different draft first.")
@@ -723,7 +728,7 @@ impl Render for ThreadView {
                     ),
             )
             .when(!crate::runtime::services(cx).foundry.for_thread(&tid).is_some_and(|r| matches!(r.status,bomb_foundry::RunStatus::Completed|bomb_foundry::RunStatus::Stopped)), |el|el.child(self.review_loop.clone()))
-            .child(composer)
+            .child(if managed {div().id("thread-feature-decision").max_h(px(330.)).overflow_y_scroll().px_6().py_2().child(self.feature_decision.clone()).into_any_element()} else {composer.into_any_element()})
             .when(self.terminals_open.contains(&tid), |el| {
                 if let Some(panel) = self.terminals.get(&tid) {
                     el.child(

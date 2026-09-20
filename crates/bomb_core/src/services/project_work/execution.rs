@@ -473,7 +473,7 @@ pub(super) fn drive(state: Arc<AppState>, project: String) {
                                 }
                                 Ok(())
                             });
-                            announce(&state, &project, format!("Project work needs you: {error}"));
+                            announce_feature(&state, &project, job.feature(), format!("Project work needs you: {error}"));
                         }
                     }
                     Err(error) => {

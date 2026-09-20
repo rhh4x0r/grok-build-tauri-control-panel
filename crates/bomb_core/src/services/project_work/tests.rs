@@ -164,6 +164,58 @@ fn infrastructure_failures_are_not_code_findings() {
     assert_eq!(Blocker::classify("provider model unavailable"),BlockerKind::Provider);
     assert_eq!(Blocker::classify("session cancelled"),BlockerKind::Interrupted);
 }
+
+#[test]
+fn asking_about_a_plan_preserves_its_scope_and_assignments() {
+    let mut p=ProjectWork {draft:Some(proposal()),..Default::default()};
+    let before=serde_json::to_string(p.draft.as_ref().unwrap()).unwrap();
+    planning::record_proposal(&mut p,Proposal {message:"UI can start with fixtures.".into(),..Default::default()},Default::default()).unwrap();
+    assert_eq!(serde_json::to_string(p.draft.as_ref().unwrap()).unwrap(),before);
+    planning::record_proposal(&mut p,Proposal {questions:vec!["Which Convex project?".into()],..Default::default()},Default::default()).unwrap();
+    assert_eq!(p.needs_attention(),1);
+    assert!(p.draft.is_some());
+}
+
+#[tokio::test]
+async fn selected_plan_cannot_omit_a_required_backlog_prerequisite() {
+    let (_temp,state,root)=fixture().await;
+    enable(&state,&root,true).await.unwrap();
+    let mut child=draft("F-child");child.depends_on=vec!["F-parent".into()];
+    let proposal=Proposal {features:vec![draft("F-parent"),child],..Default::default()};
+    update_draft(&state,&root,proposal.clone()).unwrap();
+    let error=accept_selected_plan(state.clone(),root.clone(),serde_json::to_string(&proposal).unwrap(),true,vec!["F-child".into()]).await.unwrap_err();
+    assert!(error.contains("prerequisite"));
+    assert!(load(&state,&root).unwrap().features.is_empty());
+}
+
+#[tokio::test]
+async fn saved_feedback_is_isolated_by_project_and_feature() {
+    let (_temp,state,root)=fixture().await;
+    save_draft_text(&state,&root,"project","new idea").unwrap();
+    save_draft_text(&state,&root,"F-one","fix loading state").unwrap();
+    assert_eq!(draft_text(&state,&root,"project"),"new idea");
+    assert_eq!(draft_text(&state,&root,"F-one"),"fix loading state");
+    assert!(draft_text(&state,&root,"F-two").is_empty());
+    assert!(draft_text(&state,"another-project","F-one").is_empty());
+}
+
+#[tokio::test]
+async fn explicit_model_replacement_cannot_rewrite_finished_work() {
+    let (_temp,state,root)=fixture().await;
+    change(&state,&root,|p| {let mut f=work(draft("F-one"),fake_workspace());f.tasks.get_mut("T-ui").unwrap().state=TaskState::Checkpointed;p.features.push(f);Ok(())}).unwrap();
+    assert!(replace_assignment(&state,&root,"F-one","T-ui",assignment()).is_err());
+    replace_assignment(&state,&root,"F-one","T-api",assignment()).unwrap();
+    let p=load(&state,&root).unwrap();
+    assert_eq!(p.features[0].assignments.len(),1);
+    assert_eq!(p.features[0].tasks["T-ui"].state,TaskState::Checkpointed);
+}
+
+#[test]
+fn approval_and_final_blockers_share_the_attention_count() {
+    let mut f=work(draft("F-one"),fake_workspace());f.state=FeatureState::NeedsInput;f.approved_head=Some("approved-before-merge-blocked".into());
+    let p=ProjectWork {features:vec![f],final_blocker:Some(Blocker::new(WorkStage::Final,"integration failed",None)),questions:vec!["Which environment?".into()],..Default::default()};
+    assert_eq!(p.needs_attention(),3);
+}
 #[test]
 fn planner_contract_preserves_prose_and_rejects_dependency_cycles() {
     let p = proposal();

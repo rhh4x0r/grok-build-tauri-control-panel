@@ -724,6 +724,7 @@ impl TranscriptView {
         let first_line = r.args.lines().next().unwrap_or("").trim().to_string();
         let head = div()
             .id(("chip", id))
+            .min_w_0().overflow_hidden()
             .relative()
             .flex()
             .items_center()
@@ -786,14 +787,14 @@ impl TranscriptView {
                 blocks.push(if looks_like_diff(&r.args) {
                     diff_block(("args-diff", id), &r.args)
                 } else {
-                    mono_block(&r.args, &mono, ui.text_muted, ui)
+                    mono_block(("tool-args-scroll",id), &r.args, &mono, ui.text_muted, ui)
                 });
             }
             if let Some(res) = r.result.as_deref().filter(|s| !s.trim().is_empty()) {
                 blocks.push(if looks_like_diff(res) {
                     diff_block(("res-diff", id), res)
                 } else {
-                    mono_block(res, &mono, ui.text, ui)
+                    mono_block(("tool-result-scroll",id),res, &mono, ui.text, ui)
                 });
             }
             div()
@@ -1338,7 +1339,7 @@ fn terminal_block(
         .border_color(ui.border)
         .bg(ui.ink(0.04))
         .min_h(px(72.))
-        .overflow_hidden()
+        .min_w_0().overflow_hidden()
         .child(
             div()
                 .flex()
@@ -1390,8 +1391,9 @@ fn terminal_block(
                 .flex_col()
                 .px_3()
                 .py_2()
+                .id(("terminal-output-scroll",id))
                 .max_h(px(320.))
-                .overflow_hidden()
+                .min_w_0().overflow_y_scroll().overflow_x_hidden()
                 .text_xs()
                 .font_family(mono)
                 .when(n == 0, |el| {
@@ -1613,11 +1615,13 @@ fn looks_like_diff(text: &str) -> bool {
 
 /// Render a diff through the markdown view so tree-sitter-diff highlights it.
 fn diff_block(id: impl Into<ElementId>, text: &str) -> AnyElement {
+    let id=id.into();
     let md = format!("```diff\n{}\n```", text.trim_end());
     div()
-        .text_xs()
+        .id(id.clone())
+        .text_xs().min_w_0()
         .max_h(px(400.))
-        .overflow_hidden()
+        .overflow_y_scroll().overflow_x_hidden()
         .child(TextView::markdown(id, md).selectable(true))
         .into_any_element()
 }
@@ -1759,8 +1763,9 @@ fn rail_tick(ui: &Ui) -> AnyElement {
         .into_any_element()
 }
 
-fn mono_block(text: &str, mono: &SharedString, color: Hsla, ui: &Ui) -> AnyElement {
-    div()
+fn mono_block(id: impl Into<ElementId>, text: &str, mono: &SharedString, color: Hsla, ui: &Ui) -> AnyElement {
+    let id=id.into();
+    div().id(id.clone()).min_w_0()
         .p_2()
         .rounded(px(6.))
         .bg(ui.ink(0.04))
@@ -1771,8 +1776,8 @@ fn mono_block(text: &str, mono: &SharedString, color: Hsla, ui: &Ui) -> AnyEleme
         .text_color(color)
         .whitespace_normal()
         .max_h(px(260.))
-        .overflow_hidden()
-        .child(text.to_string())
+        .overflow_y_scroll().overflow_x_hidden()
+        .child(TextView::markdown(id,format!("```text\n{text}\n```")).selectable(true))
         .into_any_element()
 }
 

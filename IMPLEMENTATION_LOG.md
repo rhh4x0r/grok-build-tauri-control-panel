@@ -606,3 +606,12 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 - Read-only policy refusals now report their cause; infrastructure failures no longer automatically consume code-repair attempts. User verification evidence remains a claim for independent review, never an automatic pass.
 - Late tool output no longer rewrites persisted session activity or reopens a finished transcript turn. Review attempts retain history and human-readable thread names.
 - Validation: workspace check and strict all-target Clippy passed; bomb_core tests passed (95 passed, 4 intentionally ignored live/fixture checks). Native UI validation remains for the UI phases.
+
+## 2026-09-19 — Project workflow UX repair, phase 2
+
+- Added the shared inline feature decision card to project results and managed threads, with revision-aware approve/retry actions, saved feedback, verification evidence, and explicit new-work navigation.
+- Added Needs you grouping, matching attention counts/next-decision navigation, named dependencies, feature-first sidebar navigation, compact/narrow board layouts, an adjacent inspector, active tabs, earlier history and new-activity navigation.
+- Planning now preserves proposals across questions, saves drafts across navigation/failure, supports selective start/backlog/discard and compact acceptance details, and exposes project routing/defaults. JEV recommendations no longer replace explicit assignments; users choose them in the plan.
+- Added unavailable-model replacement for unfinished work, prior review attempts, named criteria, file-based diffs, portable-record explanations, actionable final-check failures and clickable project notices.
+- Preview switching is explicit and serialized; reopening the same preview reuses it. Expanded tool/check output is contained and scrollable. Manual records redirect to their existing managed result rather than showing a separate tracking state.
+- Validation: workspace check and strict all-target Clippy passed; bomb_core tests passed (100 passed, 4 intentionally ignored) with four test threads. An earlier unconstrained parallel run timed out in the existing workspace lifecycle test; its isolated rerun and the bounded full core run passed.

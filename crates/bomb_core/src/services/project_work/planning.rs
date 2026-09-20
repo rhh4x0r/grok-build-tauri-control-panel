@@ -76,13 +76,14 @@ pub async fn describe(
         let result=execution::turn(&state,&project,sid,&planner,&prompt).await;
         let _=state.registry.retire_session(sid).await;
         let (output,_)=result?;
-        let mut proposal=Proposal::parse(&output)?;
+        let proposal=Proposal::parse(&output)?;
         proposal.validate(&before.features)?;
         for f in &proposal.features {
             for a in f.tasks.iter().map(|t|&t.assignment).chain(std::iter::once(&f.verification.reviewer)) {
                 if !candidates.iter().any(|c|c.backend==a.backend && c.model==a.model) { return Err(format!("The planner selected an unavailable model: {}. Refine the plan using a connected model.",a.model)); }
             }
         }
+        let mut routing_suggestions=std::collections::BTreeMap::new();
         if before.routing.unwrap_or(state.config.read().await.model_suggestions.enabled) {
             // Suggestions remain editable in the plan card; they never dispatch work.
             // Explicit planner/user preferences stay authoritative.
@@ -98,19 +99,14 @@ pub async fn describe(
                 }
             }
             while let Some(result)=jobs.join_next().await {
-                if let Ok((fi,ti,Ok(evaluation)))=result {if let Some(s)=evaluation.suggestion {proposal.features[fi].tasks[ti].assignment=Assignment::from_candidate(&s.candidate);}}
+                if let Ok((fi,ti,Ok(evaluation)))=result {if let Some(s)=evaluation.suggestion {
+                    routing_suggestions.insert(format!("{}/{}",proposal.features[fi].id,proposal.features[fi].tasks[ti].id),RoutingSuggestion {assignment:Assignment::from_candidate(&s.candidate),reason:evaluation.message});
+                }}
             }
         }
         // Store a proposal only: the Go card is the acceptance point for model
         // assignments, exact check commands, and scope. Planning never dispatches.
-        change(&state,&project,|p|{
-            p.messages.push(Message::new("assistant",proposal.message.clone()));
-            for q in &proposal.questions {p.messages.push(Message::new("assistant",q.clone()));}
-            p.questions=proposal.questions.clone();
-            if !proposal.features.is_empty() || !proposal.updates.is_empty() {p.draft=Some(proposal);}
-            else if p.questions.is_empty() {if let Some(d)=&mut p.draft {d.questions.clear();}}
-            Ok(())
-        })
+        change(&state,&project,|p|record_proposal(p,proposal,routing_suggestions))
     }.await;
     change(&state, &project, |p| {
         p.planning = false;
@@ -123,12 +119,26 @@ pub async fn describe(
     result
 }
 
+pub(super) fn record_proposal(p:&mut ProjectWork,proposal:Proposal,suggestions:std::collections::BTreeMap<String,RoutingSuggestion>)->Result<(),String> {
+    p.messages.push(Message::new("assistant",proposal.message.clone()));
+    for question in &proposal.questions {p.messages.push(Message::new("assistant",question.clone()));}
+    p.questions=proposal.questions.clone();
+    if !proposal.features.is_empty() || !proposal.updates.is_empty() {p.routing_suggestions=suggestions;p.draft=Some(proposal);}
+    else if p.questions.is_empty() {if let Some(draft)=&mut p.draft {draft.questions.clear();}}
+    Ok(())
+}
+
 pub async fn accept_plan(
     state: Arc<AppState>,
     project: String,
     expected: String,
     start: bool,
 ) -> Result<(), String> {
+    let selected=load(&state,&project)?.draft.as_ref().map(|d|d.features.iter().map(|f|f.id.clone()).collect()).unwrap_or_default();
+    accept_selected_plan(state,project,expected,start,selected).await
+}
+
+pub async fn accept_selected_plan(state:Arc<AppState>,project:String,expected:String,start:bool,selected:Vec<String>)->Result<(),String> {
     let project = project_root(&project)?;
     let _gate = state.feature_gate.lock().await;
     let p = load(&state, &project)?;
@@ -139,11 +149,20 @@ pub async fn accept_plan(
     if serde_json::to_string(&proposal).map_err(err)? != expected {
         return Err("The plan changed. Review its current version before starting.".into());
     }
-    if !proposal.questions.is_empty() {
+    if !proposal.questions.is_empty() || !p.questions.is_empty() {
         return Err("Answer the plan's blocking questions first.".into());
     }
     proposal.validate(&p.features)?;
     p.policy.validate()?;
+    if start {
+        if selected.is_empty() && proposal.updates.is_empty() {return Err("Select at least one feature, or save this plan to Backlog.".into());}
+        for id in &selected {
+            let f=proposal.features.iter().find(|f|&f.id==id).ok_or("Selected feature is no longer in the plan")?;
+            for dep in &f.depends_on {
+                if !selected.contains(dep) && !p.features.iter().any(|f|&f.id==dep && f.state!=FeatureState::Idea) {return Err(format!("Include prerequisite {dep} before starting {}.",f.title));}
+            }
+        }
+    }
     for update in &proposal.updates {
         let f = feature(&p, &update.feature_id)?;
         if !matches!(
@@ -178,7 +197,7 @@ pub async fn accept_plan(
                 document,
                 seed: seed.clone(),
                 seed_head: String::new(),
-                state: if start {
+                state: if start && selected.contains(&draft.id) {
                     FeatureState::Queued
                 } else {
                     FeatureState::Idea
@@ -265,6 +284,8 @@ pub async fn accept_plan(
             {
                 return Err("A feature started working while this plan was saved. Inspect its current state before applying feedback.".into());
             }
+            f.blocker=None;
+            f.checked_head=None;
             f.feedback.push(update.feedback);
             f.review = None;
             f.approved_head = None;

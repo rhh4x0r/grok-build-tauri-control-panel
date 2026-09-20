@@ -122,6 +122,8 @@ pub struct AppModel {
     pub last_error: Option<String>,
     /// Pending toasts; the root view drains them into the notification layer.
     pub toasts: VecDeque<(ToastKind, String)>,
+    pub project_notices: VecDeque<(String,Option<String>,String)>,
+    last_project_notice: std::collections::HashMap<String,String>,
     /// A prompt is in flight for a not-yet-created thread.
     pub starting: bool,
     pub start_failure_serial: u64,
@@ -169,7 +171,7 @@ impl AppModel {
             login: None,
             login_starting: false,
             last_error: None,
-            toasts: VecDeque::new(),
+            toasts: VecDeque::new(),project_notices:VecDeque::new(),last_project_notice:Default::default(),
             starting: false,
             start_failure_serial: 0,
             archived: HashSet::new(),
@@ -852,7 +854,14 @@ impl AppModel {
                 ControlEvent::Raw { payload, .. }
                     if matches!(payload.get("channel").and_then(|c| c.as_str()), Some("provider_commands" | "foundry" | "project-work")) =>
                 {
-                    if let Some(notice)=payload.get("notice").and_then(|v|v.as_str()) {self.toast(ToastKind::Info,notice.to_string());}
+                    if let Some(notice)=payload.get("notice").and_then(|v|v.as_str()) {
+                        if let Some(project)=payload["project"].as_str() {
+                            if self.last_project_notice.get(project).map(String::as_str)!=Some(notice) {
+                                self.last_project_notice.insert(project.into(),notice.into());
+                                self.project_notices.push_back((project.into(),payload["feature"].as_str().map(str::to_owned),notice.into()));
+                            }
+                        } else {self.toast(ToastKind::Info,notice.to_string());}
+                    }
                     // Project and composer surfaces observe this model.
                     cx.notify();
                 }

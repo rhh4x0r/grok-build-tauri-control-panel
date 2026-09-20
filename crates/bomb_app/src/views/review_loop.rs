@@ -91,9 +91,9 @@ impl ReviewLoopView {
 fn status(run: &Run) -> &'static str {
     match run.status {
         RunStatus::Ready | RunStatus::Running => "Review loop working",
-        RunStatus::WaitingGate => "Review complete · Awaiting your approval",
-        RunStatus::Completed if !run.gates.is_empty() => "Completed · Approved by you",
-        RunStatus::Completed => "Completed",
+        RunStatus::WaitingGate => "Stage finished · Needs your approval",
+        RunStatus::Completed if !run.gates.is_empty() => "Loop finished · Approved by you · not merged",
+        RunStatus::Completed => "Loop finished · not merged",
         RunStatus::Paused => "Review loop paused",
         RunStatus::Blocked => "Review loop needs attention",
         RunStatus::Stopped => "Review loop stopped",

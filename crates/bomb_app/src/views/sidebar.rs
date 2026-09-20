@@ -201,6 +201,28 @@ impl SidebarView {
             }
         }
         if collapsed { return group; }
+        let workflow=crate::runtime::services(cx).project_work.snapshot(&g.root).filter(|p|p.enabled);
+        let mut managed=std::collections::HashSet::new();
+        if let Some(p)=&workflow {
+            for f in &p.features {
+                managed.insert(f.seed.id.clone());
+                if let Some(w)=&f.candidate {managed.insert(w.id.clone());}
+                for t in f.tasks.values() {if let Some(w)=&t.workspace {managed.insert(w.id.clone());}}
+                let model=self.model.clone();let root=g.root.clone();let fid=f.id.clone();
+                let expand_key=format!("feature-threads-{root}-{fid}");let expanded=self.expanded.contains(&expand_key);
+                group=group.child(div().flex().items_center().gap_1().pl(px(GROUP_INDENT)).pr_2()
+                    .child(Button::new(SharedString::from(format!("feature-nav-{fid}"))).ghost().small().label(f.title()).tooltip(f.status_label().to_string()).on_click(move|_,_,cx|model.update(cx,|m,cx|{m.set_active_project(root.clone(),cx);m.project_feature_request=Some(fid.clone());cx.notify();})))
+                    .child(Button::new(SharedString::from(expand_key.clone())).ghost().small().icon(if expanded {Lucide::ChevronDown}else{Lucide::ChevronRight}).tooltip("Agent threads and review attempts").on_click(cx.listener(move|v,_,_,cx|{if !v.expanded.remove(&expand_key) {v.expanded.insert(expand_key.clone());}cx.notify();}))))
+                    .child(div().pl(px(GROUP_INDENT+8.)).text_xs().text_color(ui.text_muted).child(f.status_label().to_string()));
+                if expanded {
+                    let mut sessions=f.tasks.values().filter_map(|t|t.workspace.as_ref().and_then(|w|w.session)).collect::<Vec<_>>();
+                    sessions.extend(f.candidate.as_ref().and_then(|w|w.session));sessions.extend(f.reviewer_thread);sessions.extend(f.review_history.iter().map(|a|a.thread));
+                    sessions.sort();sessions.dedup();
+                    for sid in sessions {if let Some(t)=self.model.read(cx).threads.get(&sid).cloned() {group=group.child(div().pl_3().child(self.thread_row(sid,&t,"",self.model.read(cx).selected==Some(sid),ui,cx)));}}
+                }
+            }
+            if let Some(w)=&p.final_workspace {managed.insert(w.id.clone());}
+        }
         for archived in [false, true] {
             let archived_key = format!("archived:{}", g.root);
             let archive_open = self.expanded.contains(&archived_key);
@@ -226,7 +248,7 @@ impl SidebarView {
                 );
             }
             if archived && !archive_open { continue; }
-            for w in rows.iter().filter(|w| !w.inline && w.archived_at.is_some() == archived) {
+            for w in rows.iter().filter(|w| !w.inline && w.archived_at.is_some() == archived && !managed.contains(&w.id)) {
                 // These rows stand in for conversations. Empty workspaces remain
                 // available in the project overview; archived threads live below.
                 if !w.threads.iter().filter_map(|id| Uuid::parse_str(id).ok())

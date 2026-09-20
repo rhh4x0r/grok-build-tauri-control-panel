@@ -6,7 +6,7 @@ mod planning;
 mod recovery;
 pub use recovery::*;
 mod types;
-pub use planning::{accept_plan, describe};
+pub use planning::{accept_plan, accept_selected_plan, describe};
 pub use types::*;
 
 use super::{err, features};
@@ -147,10 +147,11 @@ fn notify(state: &AppState, project: &str) {
         payload: serde_json::json!({"channel":"project-work","project":project}),
     });
 }
-fn announce(state: &AppState, project: &str, message: String) {
+fn announce(state: &AppState, project: &str, message: String) {announce_feature(state,project,None,message);}
+fn announce_feature(state:&AppState,project:&str,feature:Option<&str>,message:String) {
     state.event_bus.emit(grok_events::ControlEvent::Raw {
         session_id: None,
-        payload: serde_json::json!({"channel":"project-work","project":project,"notice":message}),
+        payload: serde_json::json!({"channel":"project-work","project":project,"feature":feature,"notice":message}),
     });
 }
 fn change<T>(
@@ -229,6 +230,7 @@ pub fn update_draft(state: &AppState, project: &str, draft: Proposal) -> Result<
             return Err("Wait for planning to finish.".into());
         }
         draft.validate(&p.features)?;
+        p.routing_suggestions.retain(|key,_|draft.features.iter().any(|f|f.tasks.iter().any(|t|key==&format!("{}/{}",f.id,t.id))));
         p.draft = Some(draft);
         Ok(())
     })

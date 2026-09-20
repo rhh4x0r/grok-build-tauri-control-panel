@@ -385,9 +385,10 @@ pub(super) async fn candidate(
                 p.messages.push(message);
                 Ok(())
             })?;
-            announce(
+            announce_feature(
                 &state,
                 &project,
+                Some(&fid),
                 format!("{} is ready to test and approve.", spec.title),
             );
             return Ok(());

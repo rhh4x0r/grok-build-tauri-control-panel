@@ -159,12 +159,14 @@ struct RunningServer {
 
 pub struct DevServerManager {
     inner: Mutex<Option<RunningServer>>,
+    operation: Mutex<()>,
 }
 
 impl DevServerManager {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(None),
+            operation: Mutex::new(()),
         })
     }
 
@@ -207,6 +209,10 @@ impl DevServerManager {
     }
 
     pub async fn stop(&self) -> DevServerStatus {
+        let _operation=self.operation.lock().await;
+        self.stop_inner().await
+    }
+    async fn stop_inner(&self) -> DevServerStatus {
         let mut guard = self.inner.lock().await;
         if let Some(mut running) = guard.take() {
             // Kill the whole process group, not just the shell we spawned. The
@@ -367,15 +373,26 @@ impl DevServerManager {
     }
 
     pub async fn start(&self, cwd: &Path, open_browser: bool) -> Result<DevServerStatus, String> {
-        // Replace any existing server
-        let _ = self.stop().await;
-
+        let _operation=self.operation.lock().await;
+        self.start_inner(cwd,open_browser).await
+    }
+    /// Reuse this feature's server; switching another preview requires its exact cwd.
+    pub async fn preview(&self,cwd:&Path,replace:Option<String>)->Result<DevServerStatus,String> {
+        let _operation=self.operation.lock().await;
+        let current=self.status().await;
+        if current.running && current.cwd.as_deref()==cwd.to_str() {return Ok(current);}
+        if current.running && current.cwd!=replace {return Err("The running preview changed. Choose Switch preview again to replace it.".into());}
+        self.start_inner(cwd,false).await
+    }
+    async fn start_inner(&self,cwd:&Path,open_browser:bool)->Result<DevServerStatus,String> {
+        // Validate the requested project before stopping a working preview.
         let detected = Self::detect(cwd)?;
         let port = detected.suggested_port;
         let work_dir = PathBuf::from(&detected.cwd);
 
         let (program, args) = split_command(&detected.command)?;
         let cmd_display = detected.command.join(" ");
+        let _=self.stop_inner().await;
 
         let mut cmd = Command::new(&program);
         cmd.args(&args)
