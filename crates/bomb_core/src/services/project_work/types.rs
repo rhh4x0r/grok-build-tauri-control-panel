@@ -257,6 +257,7 @@ impl TaskState {
 pub enum WorkStage {
     Build,
     Combine,
+    Repair,
     Checks,
     Review,
     Merge,
@@ -264,6 +265,7 @@ pub enum WorkStage {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum BlockerKind {
+    Input,
     Access,
     Environment,
     Provider,
@@ -338,12 +340,14 @@ impl Blocker {
     }
     pub fn label(&self) -> &'static str {
         match (&self.stage, &self.kind) {
+            (_, BlockerKind::Input) => "Question needs your answer",
             (_, BlockerKind::Access) => "Access or evidence needed",
             (_, BlockerKind::Provider) => "Model unavailable",
             (_, BlockerKind::Interrupted) => "Interrupted",
             (WorkStage::Merge, _) => "Merge blocked",
             (WorkStage::Checks | WorkStage::Final, _) => "Checks need attention",
             (WorkStage::Review, _) => "Review needs attention",
+            (WorkStage::Repair, _) => "Repair needs attention",
             (WorkStage::Combine, _) => "Inputs need combining",
             _ => "Needs your input",
         }
@@ -352,6 +356,7 @@ impl Blocker {
         match self.stage {
             WorkStage::Build => "Continue task",
             WorkStage::Combine => "Retry combining",
+            WorkStage::Repair => "Retry repair",
             WorkStage::Checks | WorkStage::Final => "Retry checks",
             WorkStage::Review => "Retry review",
             WorkStage::Merge => "Retry merge",
@@ -459,6 +464,8 @@ pub struct FeatureWork {
     pub note: String,
     pub feedback: Vec<String>,
     pub repairs: usize,
+    #[serde(default)]
+    pub pending_repair: Option<String>,
     pub reviewer_thread: Option<Uuid>,
     #[serde(default)]
     pub blocker: Option<Blocker>,
@@ -474,6 +481,21 @@ pub struct FeatureWork {
 impl FeatureWork {
     pub fn feature(&self) -> Result<Feature, String> {
         features::decode(&self.document)
+    }
+    pub fn repair_assignment(&self) -> Option<Assignment> {
+        if let Some(a) = self.assignments.get("repair") {
+            return Some(a.clone());
+        }
+        let spec = self.feature().ok()?;
+        let task = spec
+            .tasks
+            .iter()
+            .find(|t| t.role == "Build")
+            .or_else(|| spec.tasks.first())?;
+        self.assignments
+            .get(&task.id)
+            .cloned()
+            .or_else(|| task.assignment.clone())
     }
     pub fn title(&self) -> String {
         self.feature()
@@ -559,7 +581,13 @@ impl ProjectWork {
             );
         }
         if needs > 0 {
-            return format!("Waiting for you · {needs} decision(s) · no jobs running");
+            let label = match self.state {
+                RunState::Stopped => "Stopped",
+                RunState::Paused => "Paused",
+                RunState::Interrupted => "Interrupted",
+                _ => "Waiting for you",
+            };
+            return format!("{label} · {needs} decision(s) · no jobs running");
         }
         match self.state {
             RunState::Complete => "Started work merged · final checks passed".into(),
@@ -571,6 +599,16 @@ impl ProjectWork {
         }
     }
     pub fn waiting_reason(&self, f: &FeatureWork) -> String {
+        if f.state == FeatureState::Done {
+            return "Merged locally · included in final project verification".into();
+        }
+        if f.state == FeatureState::NeedsInput {
+            return f
+                .blocker
+                .as_ref()
+                .map(|b| b.message.clone())
+                .unwrap_or_else(|| f.note.clone());
+        }
         let deps = f.feature().map(|s| s.depends_on).unwrap_or_default();
         let pending = deps
             .iter()

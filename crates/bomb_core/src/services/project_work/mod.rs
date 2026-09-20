@@ -53,7 +53,10 @@ impl ProjectWorkService {
             || work.features.iter().any(|f| {
                 matches!(
                     f.state,
-                    FeatureState::Working | FeatureState::Checking | FeatureState::Reviewing | FeatureState::Landing
+                    FeatureState::Working
+                        | FeatureState::Checking
+                        | FeatureState::Reviewing
+                        | FeatureState::Landing
                 ) || f.tasks.values().any(|t| t.state == TaskState::Running)
             })
         {
@@ -71,10 +74,23 @@ impl ProjectWorkService {
                 }
                 if matches!(
                     f.state,
-                    FeatureState::Working | FeatureState::Checking | FeatureState::Reviewing | FeatureState::Landing
+                    FeatureState::Working
+                        | FeatureState::Checking
+                        | FeatureState::Reviewing
+                        | FeatureState::Landing
                 ) {
-                    let stage = match f.state { FeatureState::Landing => WorkStage::Merge, FeatureState::Reviewing => WorkStage::Review, FeatureState::Checking => WorkStage::Checks, _ => WorkStage::Build };
-                    f.blocker = Some(Blocker::new(stage, "Execution was interrupted. Completed checkpoints are saved.", None));
+                    let stage = match f.state {
+                        _ if f.pending_repair.is_some() => WorkStage::Repair,
+                        FeatureState::Landing => WorkStage::Merge,
+                        FeatureState::Reviewing => WorkStage::Review,
+                        FeatureState::Checking => WorkStage::Checks,
+                        _ => WorkStage::Build,
+                    };
+                    f.blocker = Some(Blocker::new(
+                        stage,
+                        "Execution was interrupted. Completed checkpoints are saved.",
+                        None,
+                    ));
                     f.state = FeatureState::NeedsInput;
                     f.note = "Execution was interrupted; inspect and continue this feature.".into();
                 }
@@ -147,8 +163,10 @@ fn notify(state: &AppState, project: &str) {
         payload: serde_json::json!({"channel":"project-work","project":project}),
     });
 }
-fn announce(state: &AppState, project: &str, message: String) {announce_feature(state,project,None,message);}
-fn announce_feature(state:&AppState,project:&str,feature:Option<&str>,message:String) {
+fn announce(state: &AppState, project: &str, message: String) {
+    announce_feature(state, project, None, message);
+}
+fn announce_feature(state: &AppState, project: &str, feature: Option<&str>, message: String) {
     state.event_bus.emit(grok_events::ControlEvent::Raw {
         session_id: None,
         payload: serde_json::json!({"channel":"project-work","project":project,"feature":feature,"notice":message}),
@@ -230,7 +248,12 @@ pub fn update_draft(state: &AppState, project: &str, draft: Proposal) -> Result<
             return Err("Wait for planning to finish.".into());
         }
         draft.validate(&p.features)?;
-        p.routing_suggestions.retain(|key,_|draft.features.iter().any(|f|f.tasks.iter().any(|t|key==&format!("{}/{}",f.id,t.id))));
+        p.routing_suggestions.retain(|key, _| {
+            draft
+                .features
+                .iter()
+                .any(|f| f.tasks.iter().any(|t| key == &format!("{}/{}", f.id, t.id)))
+        });
         p.draft = Some(draft);
         Ok(())
     })
@@ -241,6 +264,11 @@ pub async fn command(state: Arc<AppState>, project: String, command: &str) -> Re
     change(&state, &project, |p| {
         if !p.enabled {
             return Err("Enable project work first.".into());
+        }
+        if command == "status" {
+            p.messages
+                .push(Message::new("assistant", p.activity_label()));
+            return Ok(());
         }
         p.state = match command {
             "go" | "resume" => RunState::Running,

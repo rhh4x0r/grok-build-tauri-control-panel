@@ -2,6 +2,18 @@
 use super::*;
 use features::Assignment;
 
+/// Only unambiguous controls are executed directly; other messages go to planning.
+pub fn project_control(text: &str) -> Option<&'static str> {
+    let normalized = text.trim().trim_end_matches(['.', '!', '?']).to_lowercase();
+    match normalized.strip_prefix("please ").unwrap_or(&normalized) {
+        "pause" | "pause project" | "pause the project" => Some("pause"),
+        "stop" | "stop project" | "stop the project" => Some("stop"),
+        "resume" | "resume project" | "resume the project" => Some("resume"),
+        "status" | "project status" | "what is happening" => Some("status"),
+        _ => None,
+    }
+}
+
 pub fn draft_text(state: &AppState, project: &str, context: &str) -> String {
     state
         .persistence
@@ -97,7 +109,7 @@ pub fn replace_assignment(
         if f.state == FeatureState::Done {
             return Err("This feature is already merged.".into());
         }
-        if task != "reviewer" {
+        if !matches!(task, "reviewer" | "repair") {
             let t = f.tasks.get(task).ok_or("Task not found")?;
             if matches!(t.state, TaskState::Running | TaskState::Checkpointed) {
                 return Err("Only unfinished tasks can change model.".into());
@@ -139,7 +151,9 @@ pub async fn retry_stage(
             .as_ref()
             .map(|b| b.stage.clone())
             .unwrap_or_else(|| {
-                if f.review.is_some() {
+                if f.pending_repair.is_some() {
+                    WorkStage::Repair
+                } else if f.review.is_some() {
                     WorkStage::Merge
                 } else if f.tasks.values().all(|t| t.state == TaskState::Checkpointed) {
                     WorkStage::Review

@@ -16,12 +16,8 @@ pub async fn describe(
     if text.trim().is_empty() || text.len() > 32000 {
         return Err("Describe the work in 1–32,000 characters.".into());
     }
-    match text.trim().trim_end_matches(['.','!']).to_lowercase().as_str() {
-        "pause" | "pause project" | "pause the project" => return command(state,project,"pause").await,
-        "stop" | "stop project" | "stop the project" => return command(state,project,"stop").await,
-        "resume" | "resume project" | "resume the project" => return command(state,project,"resume").await,
-        "status" | "project status" | "what is happening?" => return change(&state,&project,|p|{p.messages.push(Message::new("assistant",p.activity_label()));Ok(())}),
-        _ => {}
+    if let Some(control) = project_control(&text) {
+        return command(state, project, control).await;
     }
     features::validate_assignment(&planner)?;
     if !candidates
@@ -119,12 +115,25 @@ pub async fn describe(
     result
 }
 
-pub(super) fn record_proposal(p:&mut ProjectWork,proposal:Proposal,suggestions:std::collections::BTreeMap<String,RoutingSuggestion>)->Result<(),String> {
-    p.messages.push(Message::new("assistant",proposal.message.clone()));
-    for question in &proposal.questions {p.messages.push(Message::new("assistant",question.clone()));}
-    p.questions=proposal.questions.clone();
-    if !proposal.features.is_empty() || !proposal.updates.is_empty() {p.routing_suggestions=suggestions;p.draft=Some(proposal);}
-    else if p.questions.is_empty() {if let Some(draft)=&mut p.draft {draft.questions.clear();}}
+pub(super) fn record_proposal(
+    p: &mut ProjectWork,
+    proposal: Proposal,
+    suggestions: std::collections::BTreeMap<String, RoutingSuggestion>,
+) -> Result<(), String> {
+    p.messages
+        .push(Message::new("assistant", proposal.message.clone()));
+    for question in &proposal.questions {
+        p.messages.push(Message::new("assistant", question.clone()));
+    }
+    p.questions = proposal.questions.clone();
+    if !proposal.features.is_empty() || !proposal.updates.is_empty() {
+        p.routing_suggestions = suggestions;
+        p.draft = Some(proposal);
+    } else if p.questions.is_empty() {
+        if let Some(draft) = &mut p.draft {
+            draft.questions.clear();
+        }
+    }
     Ok(())
 }
 
@@ -134,11 +143,21 @@ pub async fn accept_plan(
     expected: String,
     start: bool,
 ) -> Result<(), String> {
-    let selected=load(&state,&project)?.draft.as_ref().map(|d|d.features.iter().map(|f|f.id.clone()).collect()).unwrap_or_default();
-    accept_selected_plan(state,project,expected,start,selected).await
+    let selected = load(&state, &project)?
+        .draft
+        .as_ref()
+        .map(|d| d.features.iter().map(|f| f.id.clone()).collect())
+        .unwrap_or_default();
+    accept_selected_plan(state, project, expected, start, selected).await
 }
 
-pub async fn accept_selected_plan(state:Arc<AppState>,project:String,expected:String,start:bool,selected:Vec<String>)->Result<(),String> {
+pub async fn accept_selected_plan(
+    state: Arc<AppState>,
+    project: String,
+    expected: String,
+    start: bool,
+    selected: Vec<String>,
+) -> Result<(), String> {
     let project = project_root(&project)?;
     let _gate = state.feature_gate.lock().await;
     let p = load(&state, &project)?;
@@ -155,11 +174,27 @@ pub async fn accept_selected_plan(state:Arc<AppState>,project:String,expected:St
     proposal.validate(&p.features)?;
     p.policy.validate()?;
     if start {
-        if selected.is_empty() && proposal.updates.is_empty() {return Err("Select at least one feature, or save this plan to Backlog.".into());}
+        if selected.is_empty() && proposal.updates.is_empty() {
+            return Err("Select at least one feature, or save this plan to Backlog.".into());
+        }
         for id in &selected {
-            let f=proposal.features.iter().find(|f|&f.id==id).ok_or("Selected feature is no longer in the plan")?;
+            let f = proposal
+                .features
+                .iter()
+                .find(|f| &f.id == id)
+                .ok_or("Selected feature is no longer in the plan")?;
             for dep in &f.depends_on {
-                if !selected.contains(dep) && !p.features.iter().any(|f|&f.id==dep && f.state!=FeatureState::Idea) {return Err(format!("Include prerequisite {dep} before starting {}.",f.title));}
+                if !selected.contains(dep)
+                    && !p
+                        .features
+                        .iter()
+                        .any(|f| &f.id == dep && f.state != FeatureState::Idea)
+                {
+                    return Err(format!(
+                        "Include prerequisite {dep} before starting {}.",
+                        f.title
+                    ));
+                }
             }
         }
     }
@@ -216,8 +251,13 @@ pub async fn accept_selected_plan(state:Arc<AppState>,project:String,expected:St
                 note: String::new(),
                 feedback: vec![],
                 repairs: 0,
+                pending_repair: None,
                 reviewer_thread: None,
-                blocker: None, checked_head: None, verification_notes: vec![], review_history: vec![], assignments: Default::default(),
+                blocker: None,
+                checked_head: None,
+                verification_notes: vec![],
+                review_history: vec![],
+                assignments: Default::default(),
             });
         }
         let status = features::documents::safe_path(Path::new(&seed.path), &["plan", "STATUS.md"])?;
@@ -284,8 +324,8 @@ pub async fn accept_selected_plan(state:Arc<AppState>,project:String,expected:St
             {
                 return Err("A feature started working while this plan was saved. Inspect its current state before applying feedback.".into());
             }
-            f.blocker=None;
-            f.checked_head=None;
+            f.blocker = None;
+            f.checked_head = None;
             f.feedback.push(update.feedback);
             f.review = None;
             f.approved_head = None;

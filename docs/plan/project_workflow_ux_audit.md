@@ -2,7 +2,7 @@
 
 Date: September 19, 2026 (America/Denver)  
 Code reviewed: `gpui-rewrite`, including the conversational project workflow introduced in `d2cc218`.  
-Status: proposal only; no application behavior or live project state changed.
+Status at audit: proposal only. Max subsequently authorized repair; implementation coverage and remaining validation limits are recorded below. The incident evidence describes the pre-fix build.
 
 ## Main finding
 
@@ -255,3 +255,21 @@ The audit's functional findings come from Bomb Code's state and source. External
 - Preserving context while inspecting a work item is an established pattern; the proposed inline inspector adapts that principle to Bomb Code's existing components: [Linear, Peek preview](https://linear.app/docs/peek).
 
 No app fixes, session retries, approvals, merges or project-state changes were performed as part of this audit.
+
+
+## Authorized repair coverage — September 19, 2026
+
+The source changes implement the recommendations across the existing workflow. This is implementation coverage, not a claim that the native usability exit gate has passed.
+
+| Findings | Implemented changes |
+|---|---|
+| 01–05, 08 | Actual active-job summaries, distinct Needs you, terminal late-event handling, explicit policy blockers, stage retries, preserved checks, infrastructure/repair separation, interrupted-repair scope, Pause/Stop recovery. |
+| 06–07, 14 | Explicit selected start/backlog, Resume preserves unstarted scope, named waiting dependencies, capacity and downstream impact; planner instructions distinguish real prerequisites from fixture-based parallel UI/API work. |
+| 09–13 | Durable scoped drafts, retained proposals across questions, selective compact plan approval and visible policy, deterministic conversation controls, project routing/defaults and explicit advisory suggestions, unfinished model/effort replacement. |
+| 15–20 | Feature-first sidebar with nested agent history; shared project/thread decisions; matching decision navigation/count categories; contextual feedback; compact/list board and adjacent inspector; visible selected tabs and scoped completion vocabulary. |
+| 21–24 | Explicit reusable/switchable preview, local/reviewed-revision context, test instructions and named criteria, grouped file diffs and review history, approval-preserving merge retry, final-check decision and repair-proposal entry. |
+| 25–26 | Optional normal project home, records explanation, bounded tool/check/diff output and clipped transcript regions, preserved context/history and isolated native smoke fixture. |
+
+Recovery regressions cover unchanged-candidate review retries, exact approved merge after checkout cleanup, stale retry rejection, interrupted repair persistence/model replacement, paused-check cancellation, no-model conversation commands and preview reuse/failed-switch preservation. Existing real Git and mock ACP tests continue to cover dependencies, final checks, conflicts, restart and ownership.
+
+Native validation remains incomplete: an isolated smoke launch could not connect to macOS UI services in this environment and was stopped. No render-path success, screenshot/overlap, keyboard-focus, accessibility or live-provider/JEV end-to-end result is claimed. Earlier Computer Use access was unavailable and was not retried. The normal app is unchanged by the fixture's temporary database and repository; the user's live project was not resumed, retried, approved or merged during this repair.

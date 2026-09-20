@@ -15,7 +15,7 @@ use grok_extensions::ExtensionsService;
 use grok_mcp::McpManager;
 use grok_memory::MemoryService;
 use grok_persistence::Persistence;
-use grok_scheduler::{JobHandler, Scheduler, ScheduledJob};
+use grok_scheduler::{JobHandler, ScheduledJob, Scheduler};
 use grok_worktree::WorktreeManager;
 
 use crate::devserver::DevServerManager;
@@ -49,8 +49,29 @@ impl AppState {
         // Critical for macOS .app launches from Finder/Dock.
         grok_config::bootstrap_process_env();
 
-        let paths = GrokPaths::discover(std::env::current_dir().ok().as_deref())
-            .context("path discovery")?;
+        let paths = if std::env::var("BOMB_SMOKE").ok().as_deref() == Some("1") {
+            // Smoke runs must never load/recover the user's live workflow database.
+            let home =
+                std::env::temp_dir().join(format!("bomb-code-smoke-{}", uuid::Uuid::new_v4()));
+            let grok = home.join("grok");
+            let panel = grok.join("panel");
+            info!(path=%home.display(),"isolated smoke storage");
+            GrokPaths {
+                home_dir: home.clone(),
+                grok_dir: grok.clone(),
+                config_file: panel.join("config.toml"),
+                grok_cli_config_file: grok.join("config.toml"),
+                worktrees_dir: home.join("worktrees"),
+                memory_dir: panel.join("memory"),
+                sessions_dir: panel.join("sessions"),
+                panel_dir: panel,
+                project_config_file: None,
+                project_root: None,
+            }
+        } else {
+            GrokPaths::discover(std::env::current_dir().ok().as_deref())
+                .context("path discovery")?
+        };
         Self::initialize_with_paths(paths).await
     }
 
@@ -129,7 +150,12 @@ impl AppState {
         // One-time compatibility migration; ordinary evaluations read SQLite only.
         let routing = config.read().await.model_suggestions.clone();
         if routing.enabled {
-            if let Err(error) = crate::services::model_suggestions::migrate_legacy_key(persistence.clone(), routing.connection).await {
+            if let Err(error) = crate::services::model_suggestions::migrate_legacy_key(
+                persistence.clone(),
+                routing.connection,
+            )
+            .await
+            {
                 warn!(%error, "routing credential migration incomplete");
             }
         }
@@ -165,18 +191,14 @@ impl AppState {
 
                     match registry.spawn_agent(&cwd, opts).await {
                         Ok(id) => {
-                            let _ = persistence.set_kv(
-                                &format!("last_job_{}", job.id),
-                                &id.to_string(),
-                            );
+                            let _ = persistence
+                                .set_kv(&format!("last_job_{}", job.id), &id.to_string());
                         }
                         Err(e) => {
                             // Offline / no binary: record intent only
                             warn!(error = %e, "scheduler could not spawn agent");
-                            let _ = persistence.set_kv(
-                                &format!("last_job_error_{}", job.id),
-                                &e.to_string(),
-                            );
+                            let _ = persistence
+                                .set_kv(&format!("last_job_error_{}", job.id), &e.to_string());
                         }
                     }
                 }
@@ -223,9 +245,16 @@ impl AppState {
             )
         };
 
-        let foundry = Arc::new(crate::foundry::FoundryService::open(&paths.sessions_dir.join("foundry.db")).map_err(anyhow::Error::msg)?);
-        let project_work=Arc::new(crate::services::project_work::ProjectWorkService::new(persistence.clone()));
-        for workspace in persistence.list_workspaces().unwrap_or_default() {let _=project_work.load(&workspace.project_root);}
+        let foundry = Arc::new(
+            crate::foundry::FoundryService::open(&paths.sessions_dir.join("foundry.db"))
+                .map_err(anyhow::Error::msg)?,
+        );
+        let project_work = Arc::new(crate::services::project_work::ProjectWorkService::new(
+            persistence.clone(),
+        ));
+        for workspace in persistence.list_workspaces().unwrap_or_default() {
+            let _ = project_work.load(&workspace.project_root);
+        }
         Ok(Self {
             project_work,
             feature_gate: Arc::new(tokio::sync::Mutex::new(())),

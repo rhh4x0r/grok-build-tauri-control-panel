@@ -146,4 +146,4 @@ Measure time to find the next action, time to understand a result, navigation/ba
 
 Test busy and failure states too: many simultaneous tasks, a missing provider, stale preview, denied tool, conflicting merge, changed plan, restart, and a small window. Pay particular attention to whether the user can distinguish “agent finished,” “checks passed,” “I accepted,” and “merged.”
 
-Implementation of this workflow remains deferred at Max's request. The separately reported status-text overlap is a rendering bug and is handled independently.
+This document records the original design proposal. Max subsequently authorized implementation and the follow-up UX repair. See [the current workflow guide](../PROJECT_WORKFLOW.md), [the UX audit](project_workflow_ux_audit.md), and IMPLEMENTATION_LOG.md for implemented behavior and validation. Usability targets above still require a native walkthrough.

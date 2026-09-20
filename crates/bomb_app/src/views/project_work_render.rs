@@ -87,8 +87,8 @@ impl ProjectWorkView {
                         )),
                 );
                 if !t.waits_for.is_empty() {
-                    feature = feature.child(
-                        div().text_xs().text_color(ui.text_muted).child(format!(
+                    feature =
+                        feature.child(div().text_xs().text_color(ui.text_muted).child(format!(
                             "Waits for {}",
                             t.waits_for
                                 .iter()
@@ -100,12 +100,12 @@ impl ProjectWorkView {
                                     .unwrap_or_else(|| id.clone()))
                                 .collect::<Vec<_>>()
                                 .join(", ")
-                        )),
-                    );
+                        )));
                 }
                 if let Some(suggestion) = project
                     .routing_suggestions
                     .get(&format!("{}/{}", f.id, t.id))
+                    .filter(|s| s.assignment != t.assignment)
                 {
                     let a = suggestion.assignment.clone();
                     feature = feature
@@ -137,8 +137,7 @@ impl ProjectWorkView {
                     cx,
                 ));
             if self.expanded_plan {
-                feature = feature.child(
-                    div().text_sm().child(format!(
+                feature = feature.child(div().text_sm().child(format!(
                         "Done when:\n{}\nHow to test: {}",
                         f.verification
                             .criteria
@@ -147,8 +146,7 @@ impl ProjectWorkView {
                             .collect::<Vec<_>>()
                             .join("\n"),
                         f.verification.test_steps
-                    )),
-                );
+                    )));
                 for command in &f.verification.checks {
                     feature = feature.child(
                         div()
@@ -551,16 +549,14 @@ impl ProjectWorkView {
                                 f.assignments.get(&t.id).cloned().or(t.assignment.clone())
                             {
                                 card = card
-                                    .child(
-                                        div().text_sm().child(format!(
+                                    .child(div().text_sm().child(format!(
                                             "{} · {}",
                                             t.title,
                                             f.tasks
                                                 .get(&t.id)
                                                 .map(|t| t.state.label())
                                                 .unwrap_or("Waiting")
-                                        )),
-                                    )
+                                        )))
                                     .child(self.picker(
                                         format!("existing-{fi}-{ti}"),
                                         Choice::ExistingTask(fi, ti),
@@ -568,6 +564,16 @@ impl ProjectWorkView {
                                         cx,
                                     ));
                             }
+                        }
+                        if let Some(a) = f.repair_assignment() {
+                            card = card.child(div().text_sm().child("Repair writer")).child(
+                                self.picker(
+                                    format!("existing-repair-{fi}"),
+                                    Choice::Repair(fi),
+                                    a,
+                                    cx,
+                                ),
+                            );
                         }
                         if let Some(v) = &spec.verification {
                             card = card
@@ -635,6 +641,10 @@ impl ProjectWorkView {
             }
             "Preview" => {
                 card = card
+                    .child(div().text_xs().child(match &f.review {
+                        Some(r) => format!("Reviewed revision {} · local candidate preview. Use the test steps and evidence to verify whether external services are connected.", &r.candidate[..8.min(r.candidate.len())]),
+                        None => "Unreviewed local candidate · not yet verified. Fixtures or missing external services may affect behavior.".into(),
+                    }))
                     .when_some(self.preview_message.clone(), |d, message| {
                         d.child(div().text_sm().child(message))
                     })
@@ -754,8 +764,7 @@ impl ProjectWorkView {
                                 review.candidate
                             )));
                     for criterion in &review.criteria {
-                        card = card.child(
-                            div().text_sm().child(format!(
+                        card = card.child(div().text_sm().child(format!(
                                 "{}: {}\n{}",
                                 spec.as_ref()
                                     .and_then(|s| s.verification.as_ref())
@@ -767,8 +776,7 @@ impl ProjectWorkView {
                                     )),
                                 criterion.status,
                                 criterion.evidence.join("\n")
-                            )),
-                        );
+                            )));
                     }
                 }
                 card = card.child(
@@ -896,7 +904,9 @@ impl Render for ProjectWorkView {
                 && (self.scroll.max_offset().y + self.scroll.offset().y < px(80.))
             {
                 self.pin_frames = 2;
-            } else {self.new_activity=true;}
+            } else {
+                self.new_activity = true;
+            }
         }
         if self.pin_frames > 0 {
             self.scroll
@@ -1035,7 +1045,21 @@ impl Render for ProjectWorkView {
             );
         }
         top = top.child(tabs);
-        if self.new_activity {top=top.child(Button::new("project-new-activity").ghost().small().label("New activity ↓").on_click(cx.listener(|v,_,_,cx|{v.new_activity=false;v.selected=None;v.tab="Conversation";v.pin_frames=2;cx.notify();})));}
+        if self.new_activity {
+            top = top.child(
+                Button::new("project-new-activity")
+                    .ghost()
+                    .small()
+                    .label("New activity ↓")
+                    .on_click(cx.listener(|v, _, _, cx| {
+                        v.new_activity = false;
+                        v.selected = None;
+                        v.tab = "Conversation";
+                        v.pin_frames = 2;
+                        cx.notify();
+                    })),
+            );
+        }
         let mut body = div()
             .id("project-work-content")
             .track_scroll(&self.scroll)
@@ -1380,21 +1404,29 @@ impl Render for ProjectWorkView {
         if let Some(a) = self.planner(cx) {
             controls = controls.child(self.picker("planner".into(), Choice::Planner, a, cx));
         }
-        let routing_ready=services(cx).config.try_read().ok().is_some_and(|c|c.model_suggestions.enabled);
+        let routing_ready = services(cx)
+            .config
+            .try_read()
+            .ok()
+            .is_some_and(|c| c.model_suggestions.enabled);
         controls=controls.child(Button::new("composer-smart-routing").ghost().small().label("Smart Model Routing").selected(p.routing.unwrap_or(routing_ready)).disabled(!routing_ready).tooltip(if routing_ready {"Toggle routing suggestions for this project's future plans. Model choices remain yours."} else {"Enable JEV in Settings to use Smart Model Routing."}).on_click(cx.listener(move|v,_,_,cx|{let enabled=v.snapshot(cx).routing.unwrap_or(routing_ready);if let Err(e)=work::set_routing(&services(cx),&v.project,Some(!enabled)){v.message=Some(e);}cx.notify();})));
         controls = controls.child(div().flex_1()).child(
             Button::new("describe-project-work")
                 .primary()
                 .small()
-                .label(if p.planning {
-                    "Planning…"
-                } else {
-                    "Plan this"
-                })
+                .label(
+                    if work::project_control(&self.input.read(cx).value()).is_some() {
+                        "Send command"
+                    } else if p.planning {
+                        "Planning…"
+                    } else {
+                        "Plan this"
+                    },
+                )
                 .disabled(
                     !p.enabled
-                        || self.busy
-                        || p.planning
+                        || ((self.busy || p.planning)
+                            && work::project_control(&self.input.read(cx).value()).is_none())
                         || self.input.read(cx).value().trim().is_empty(),
                 )
                 .on_click(cx.listener(|v, _, window, cx| v.describe(window, cx))),

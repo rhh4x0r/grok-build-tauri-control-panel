@@ -217,6 +217,10 @@ impl SidebarView {
                 if expanded {
                     let mut sessions=f.tasks.values().filter_map(|t|t.workspace.as_ref().and_then(|w|w.session)).collect::<Vec<_>>();
                     sessions.extend(f.candidate.as_ref().and_then(|w|w.session));sessions.extend(f.reviewer_thread);sessions.extend(f.review_history.iter().map(|a|a.thread));
+                    sessions.extend(self.model.read(cx).threads.iter().filter_map(|(sid,t)| {
+                        let cwd=&t.read(cx).meta.cwd;
+                        (f.tasks.values().any(|t|t.workspace.as_ref().is_some_and(|w|&w.path==cwd)) || f.candidate.as_ref().is_some_and(|w|&w.path==cwd)).then_some(*sid)
+                    }));
                     sessions.sort();sessions.dedup();
                     for sid in sessions {if let Some(t)=self.model.read(cx).threads.get(&sid).cloned() {group=group.child(div().pl_3().child(self.thread_row(sid,&t,"",self.model.read(cx).selected==Some(sid),ui,cx)));}}
                 }

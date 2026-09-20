@@ -26,6 +26,7 @@ enum Choice {
     Reviewer(usize),
     ExistingTask(usize, usize),
     ExistingReviewer(usize),
+    Repair(usize),
     Role(usize),
 }
 type ViewContext = (&'static str, Option<String>, Point<Pixels>, bool);
@@ -328,11 +329,16 @@ impl ProjectWorkView {
     }
     fn describe(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let p = self.snapshot(cx);
-        if self.busy || p.planning || !p.enabled {
+        let text = self.input.read(cx).value().to_string();
+        if !p.enabled || text.trim().is_empty() {
             return;
         }
-        let text = self.input.read(cx).value().to_string();
-        if text.trim().is_empty() {
+        if let Some(control) = work::project_control(&text) {
+            self.submission = Some(text);
+            self.command(control, cx);
+            return;
+        }
+        if self.busy || p.planning {
             return;
         }
         let Some(planner) = self.planner(cx) else {
@@ -437,11 +443,19 @@ impl ProjectWorkView {
             cx.notify();
             return;
         }
-        if let Choice::ExistingReviewer(fi) = choice {
+        if let Choice::ExistingReviewer(fi) | Choice::Repair(fi) = choice {
             if let Some(f) = p.features.get(fi) {
-                if let Err(e) =
-                    work::replace_assignment(&services(cx), &self.project, &f.id, "reviewer", a)
-                {
+                if let Err(e) = work::replace_assignment(
+                    &services(cx),
+                    &self.project,
+                    &f.id,
+                    if matches!(choice, Choice::Repair(_)) {
+                        "repair"
+                    } else {
+                        "reviewer"
+                    },
+                    a,
+                ) {
                     self.message = Some(e);
                 }
             }
@@ -469,13 +483,36 @@ impl ProjectWorkView {
     ) -> AnyElement {
         let name = self.model.read(cx).model_name(&a.backend, &a.model);
         let catalog = self.candidates(cx);
-        let p=self.snapshot(cx);
-        let immutable=match choice {
-            Choice::ExistingTask(fi,ti)=>p.features.get(fi).is_none_or(|f|f.feature().ok().and_then(|s|s.tasks.get(ti).and_then(|t|f.tasks.get(&t.id)).map(|t|matches!(t.state,TaskState::Running|TaskState::Checkpointed))).unwrap_or(true)),
-            Choice::ExistingReviewer(fi)=>p.features.get(fi).is_none_or(|f|f.state==FeatureState::Done||p.active_jobs.iter().any(|k|k==&f.id||k.starts_with(&format!("{}/",f.id)))),
-            _=>false,
+        let p = self.snapshot(cx);
+        let immutable = match choice {
+            Choice::ExistingTask(fi, ti) => p.features.get(fi).is_none_or(|f| {
+                f.feature()
+                    .ok()
+                    .and_then(|s| {
+                        s.tasks.get(ti).and_then(|t| f.tasks.get(&t.id)).map(|t| {
+                            matches!(t.state, TaskState::Running | TaskState::Checkpointed)
+                        })
+                    })
+                    .unwrap_or(true)
+            }),
+            Choice::ExistingReviewer(fi) | Choice::Repair(fi) => {
+                p.features.get(fi).is_none_or(|f| {
+                    f.state == FeatureState::Done
+                        || p.active_jobs
+                            .iter()
+                            .any(|k| k == &f.id || k.starts_with(&format!("{}/", f.id)))
+                })
+            }
+            _ => false,
         };
-        let name=if catalog.iter().any(|c|c.backend==a.backend&&c.model==a.model) {name} else {format!("{name} · unavailable")};
+        let name = if catalog
+            .iter()
+            .any(|c| c.backend == a.backend && c.model == a.model)
+        {
+            name
+        } else {
+            format!("{name} · unavailable")
+        };
         let weak = cx.entity().downgrade();
         let weak2 = weak.clone();
         let selected = a.clone();

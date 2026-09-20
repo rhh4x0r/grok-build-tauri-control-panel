@@ -176,6 +176,10 @@ impl Render for FeatureDecisionView {
             .active_jobs
             .iter()
             .any(|k| k == &id || k.starts_with(&format!("{id}/")));
+        let answering = f
+            .blocker
+            .as_ref()
+            .is_some_and(|b| b.kind == work::BlockerKind::Input);
         let actionable =
             matches!(f.state, FeatureState::Review | FeatureState::NeedsInput) && !active;
         let mut card = super::brand::handoff_card(&ui)
@@ -224,16 +228,14 @@ impl Render for FeatureDecisionView {
         if let Some(review) = &f.review {
             card = card
                 .child(div().text_sm().child(review.summary.clone()))
-                .child(
-                    div().text_xs().text_color(ui.text_muted).child(format!(
+                .child(div().text_xs().text_color(ui.text_muted).child(format!(
                         "AI review passed · revision {} · {} · {}",
                         &review.candidate[..8.min(review.candidate.len())],
                         self.model
                             .read(cx)
                             .model_name(&review.reviewer.backend, &review.reviewer.model),
                         super::brand::effort_label(&review.reviewer.effort)
-                    )),
-                );
+                    )));
         }
         let mut actions = div().flex().flex_wrap().gap_2();
         if f.state == FeatureState::Idea {
@@ -301,7 +303,11 @@ impl Render for FeatureDecisionView {
                 Button::new("decision-feedback")
                     .ghost()
                     .small()
-                    .label("Request changes")
+                    .label(if answering {
+                        "Answer question"
+                    } else {
+                        "Request changes"
+                    })
                     .on_click(cx.listener(|v, _, w, cx| {
                         v.editing = true;
                         v.evidence = false;
@@ -326,13 +332,25 @@ impl Render for FeatureDecisionView {
                     })
                 }),
         );
-        let model=self.model.clone();let root=project.clone();
-        actions=actions.child(Button::new("decision-new-work").ghost().small().label("Add new project work").on_click(move|_,w,cx|{model.update(cx,|m,cx|m.set_active_project(root.clone(),cx));w.dispatch_action(Box::new(crate::actions::NewFeature),cx);}));
+        let model = self.model.clone();
+        let root = project.clone();
+        actions = actions.child(
+            Button::new("decision-new-work")
+                .ghost()
+                .small()
+                .label("Add new project work")
+                .on_click(move |_, w, cx| {
+                    model.update(cx, |m, cx| m.set_active_project(root.clone(), cx));
+                    w.dispatch_action(Box::new(crate::actions::NewFeature), cx);
+                }),
+        );
         card = card.child(actions);
         if self.editing {
             card = card
                 .child(div().text_xs().child(if self.evidence {
                     "Verification evidence · this feature"
+                } else if answering {
+                    "Your answer · this feature"
                 } else {
                     "Requested changes · this feature"
                 }))
@@ -342,7 +360,9 @@ impl Render for FeatureDecisionView {
                         .primary()
                         .small()
                         .label(if self.evidence {
-                            "Save evidence & retry review"
+                            "Save evidence & retry verification"
+                        } else if answering {
+                            "Send answer"
                         } else {
                             "Send requested changes"
                         })

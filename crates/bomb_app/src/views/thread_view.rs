@@ -42,8 +42,10 @@ impl ThreadView {
         .detach();
         let composer = cx.new(|cx| ComposerView::new(model.clone(), window, cx));
         cx.observe(&composer, |_, _, cx| cx.notify()).detach();
-        let review_loop = cx.new(|cx|super::review_loop::ReviewLoopView::new(model.clone(),window,cx));
-        let feature_decision=cx.new(|cx|super::feature_decision::FeatureDecisionView::new(model.clone(),window,cx));
+        let review_loop =
+            cx.new(|cx| super::review_loop::ReviewLoopView::new(model.clone(), window, cx));
+        let feature_decision = cx
+            .new(|cx| super::feature_decision::FeatureDecisionView::new(model.clone(), window, cx));
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find in conversation"));
         cx.subscribe(&search, |this, _, ev: &InputEvent, cx| match ev {
             InputEvent::Change => this.push_search(cx),
@@ -93,7 +95,8 @@ impl ThreadView {
     }
 
     pub fn set_foundry_prompt(&self, text: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.composer.update(cx, |c,cx| c.set_text(&text,window,cx));
+        self.composer
+            .update(cx, |c, cx| c.set_text(&text, window, cx));
     }
 
     pub fn focus_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -483,7 +486,7 @@ impl ThreadView {
                     .child(crate::views::brand::brand_mark(&backend, 13., true, ui))
                     .child(if model.is_empty() { backend } else { model }),
             )
-            .child(super::workspaces::branch_control(self.model.clone(),cx))
+            .child(super::workspaces::branch_control(self.model.clone(), cx))
             .child(div().flex_1())
             .child(
                 action("new-workspace-thread", "New chat", Lucide::Plus)
@@ -540,12 +543,22 @@ impl ThreadView {
                     action("thread-more", "", Lucide::Ellipsis)
                         .tooltip("More thread actions")
                         .dropdown_menu(move |mut menu, _, cx| {
-                            if crate::runtime::services(cx).foundry.for_thread(&thread_id.to_string()).is_some() {
+                            if crate::runtime::services(cx)
+                                .foundry
+                                .for_thread(&thread_id.to_string())
+                                .is_some()
+                            {
                                 let app = app.clone();
-                                menu = menu.item(PopupMenuItem::new("Review loop results…").on_click(move |_, window, cx| {
-                                    app.update(cx, |m, _| m.foundry_show_runs = true);
-                                    window.dispatch_action(Box::new(crate::actions::OpenFoundry), cx);
-                                }));
+                                menu =
+                                    menu.item(PopupMenuItem::new("Review loop results…").on_click(
+                                        move |_, window, cx| {
+                                            app.update(cx, |m, _| m.foundry_show_runs = true);
+                                            window.dispatch_action(
+                                                Box::new(crate::actions::OpenFoundry),
+                                                cx,
+                                            );
+                                        },
+                                    ));
                             }
                             if has_worktree {
                                 let app = app.clone();
@@ -647,26 +660,78 @@ impl Render for ThreadView {
             )
         };
         let retry_prompt = if presence.phase == bomb_core::presence::Phase::Error {
-            thread.read(cx).thread.entries.iter().rev().find(|e|e.role==bomb_core::transcript::Role::You)
-                .filter(|e|e.images.is_empty()).and_then(|e|e.text()).map(str::to_owned)
-        } else {None};
+            thread
+                .read(cx)
+                .thread
+                .entries
+                .iter()
+                .rev()
+                .find(|e| e.role == bomb_core::transcript::Role::You)
+                .filter(|e| e.images.is_empty())
+                .and_then(|e| e.text())
+                .map(str::to_owned)
+        } else {
+            None
+        };
         let meter = presence.meter(now);
         let loop_run = crate::runtime::services(cx).foundry.for_thread(&tid);
         let has_loop = loop_run.is_some();
         let normal_turn = loop_run.as_ref().is_some_and(|r| {
-            if !matches!(r.status,bomb_foundry::RunStatus::Completed|bomb_foundry::RunStatus::Stopped) {return false;}
-            let end=r.gates.last().and_then(|g|g["at"].as_str()).or_else(||r.attempts.last().and_then(|a|a.finished_at.as_deref())).unwrap_or(&r.created_at);
-            chrono::DateTime::parse_from_rfc3339(end).ok().is_some_and(|end|thread.read(cx).thread.entries.iter().any(|e|e.role==bomb_core::transcript::Role::You && e.at>end))
+            if !matches!(
+                r.status,
+                bomb_foundry::RunStatus::Completed | bomb_foundry::RunStatus::Stopped
+            ) {
+                return false;
+            }
+            let end = r
+                .gates
+                .last()
+                .and_then(|g| g["at"].as_str())
+                .or_else(|| r.attempts.last().and_then(|a| a.finished_at.as_deref()))
+                .unwrap_or(&r.created_at);
+            chrono::DateTime::parse_from_rfc3339(end)
+                .ok()
+                .is_some_and(|end| {
+                    thread
+                        .read(cx)
+                        .thread
+                        .entries
+                        .iter()
+                        .any(|e| e.role == bomb_core::transcript::Role::You && e.at > end)
+                })
         });
         let show_status = presence.visible() && (!has_loop || normal_turn);
         let thread_for_toggle = thread.clone();
-        let project_feature=thread.read(cx).meta.project_root.as_ref().and_then(|root| {
-            let p=crate::runtime::services(cx).project_work.snapshot(root)?;
-            p.features.into_iter().find(|f| f.tasks.values().any(|t|t.workspace.as_ref().and_then(|w|w.session).is_some_and(|id|id.to_string()==tid)) || f.reviewer_thread.is_some_and(|id|id.to_string()==tid) || f.candidate.as_ref().and_then(|w|w.session).is_some_and(|id|id.to_string()==tid))
+        let project_feature = thread.read(cx).meta.project_root.as_ref().and_then(|root| {
+            let p = crate::runtime::services(cx).project_work.snapshot(root)?;
+            let cwd = &thread.read(cx).meta.cwd;
+            p.features.into_iter().find(|f| {
+                f.tasks
+                    .values()
+                    .any(|t| t.workspace.as_ref().is_some_and(|w| &w.path == cwd))
+                    || f.candidate.as_ref().is_some_and(|w| &w.path == cwd)
+                    || f.tasks.values().any(|t| {
+                        t.workspace
+                            .as_ref()
+                            .and_then(|w| w.session)
+                            .is_some_and(|id| id.to_string() == tid)
+                    })
+                    || f.review_history.iter().any(|a| a.thread.to_string() == tid)
+                    || f.reviewer_thread.is_some_and(|id| id.to_string() == tid)
+                    || f.candidate
+                        .as_ref()
+                        .and_then(|w| w.session)
+                        .is_some_and(|id| id.to_string() == tid)
+            })
         });
 
-        let managed=project_feature.is_some();
-        if let Some(f)=&project_feature {if let Some(root)=thread.read(cx).meta.project_root.clone() {self.feature_decision.update(cx,|v,cx|v.set_context(root,f.id.clone(),window,cx));}}
+        let managed = project_feature.is_some();
+        if let Some(f) = &project_feature {
+            if let Some(root) = thread.read(cx).meta.project_root.clone() {
+                self.feature_decision
+                    .update(cx, |v, cx| v.set_context(root, f.id.clone(), window, cx));
+            }
+        }
         div()
             .size_full()
             .min_w_0()
@@ -677,7 +742,7 @@ impl Render for ThreadView {
             .when_some(project_feature,|el,f|{
                 let app=self.model.clone();let id=f.id.clone();
                 el.child(div().px_6().py_2().flex().items_center().gap_2().border_b_1().border_color(ui.border)
-                    .child(div().flex_1().min_w_0().text_sm().child(format!("{} · {}",f.title(),f.state.label())))
+                    .child(div().flex_1().min_w_0().text_sm().child(format!("{} · {}",f.title(),f.status_label())))
                     .child(Button::new("thread-feature-result").outline().small().label("Result · test · approve / keep working").on_click(move|_,_,cx|app.update(cx,|m,cx|{m.project_feature_request=Some(id.clone());cx.notify();}))))
             })
             .when(self.search_open, |el| el.child(self.find_bar(&ui, cx)))

@@ -209,7 +209,7 @@ impl DevServerManager {
     }
 
     pub async fn stop(&self) -> DevServerStatus {
-        let _operation=self.operation.lock().await;
+        let _operation = self.operation.lock().await;
         self.stop_inner().await
     }
     async fn stop_inner(&self) -> DevServerStatus {
@@ -260,7 +260,11 @@ impl DevServerManager {
                     // reads the URL it actually prints.
                     if has_dep(&deps, "next") || (has_dev && raw.contains("next")) {
                         let port = if pinned { 0 } else { free_port(3000) };
-                        let args = if pinned { String::new() } else { format!("--port {port}") };
+                        let args = if pinned {
+                            String::new()
+                        } else {
+                            format!("--port {port}")
+                        };
                         return Ok(DetectedProject {
                             cwd: cwd.display().to_string(),
                             kind: DevServerKind::Npm,
@@ -373,18 +377,28 @@ impl DevServerManager {
     }
 
     pub async fn start(&self, cwd: &Path, open_browser: bool) -> Result<DevServerStatus, String> {
-        let _operation=self.operation.lock().await;
-        self.start_inner(cwd,open_browser).await
+        let _operation = self.operation.lock().await;
+        self.start_inner(cwd, open_browser).await
     }
     /// Reuse this feature's server; switching another preview requires its exact cwd.
-    pub async fn preview(&self,cwd:&Path,replace:Option<String>)->Result<DevServerStatus,String> {
-        let _operation=self.operation.lock().await;
-        let current=self.status().await;
-        if current.running && current.cwd.as_deref()==cwd.to_str() {return Ok(current);}
-        if current.running && current.cwd!=replace {return Err("The running preview changed. Choose Switch preview again to replace it.".into());}
-        self.start_inner(cwd,false).await
+    pub async fn preview(
+        &self,
+        cwd: &Path,
+        replace: Option<String>,
+    ) -> Result<DevServerStatus, String> {
+        let _operation = self.operation.lock().await;
+        let current = self.status().await;
+        if current.running && current.cwd.as_deref() == cwd.to_str() {
+            return Ok(current);
+        }
+        if current.running && current.cwd != replace {
+            return Err(
+                "The running preview changed. Choose Switch preview again to replace it.".into(),
+            );
+        }
+        self.start_inner(cwd, false).await
     }
-    async fn start_inner(&self,cwd:&Path,open_browser:bool)->Result<DevServerStatus,String> {
+    async fn start_inner(&self, cwd: &Path, open_browser: bool) -> Result<DevServerStatus, String> {
         // Validate the requested project before stopping a working preview.
         let detected = Self::detect(cwd)?;
         let port = detected.suggested_port;
@@ -392,7 +406,7 @@ impl DevServerManager {
 
         let (program, args) = split_command(&detected.command)?;
         let cmd_display = detected.command.join(" ");
-        let _=self.stop_inner().await;
+        let _ = self.stop_inner().await;
 
         let mut cmd = Command::new(&program);
         cmd.args(&args)
@@ -481,7 +495,10 @@ impl DevServerManager {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
         if url.is_none() && port != 0 && port_is_bound(port) {
-            warn!(port, "dev server printed no URL; falling back to the requested port");
+            warn!(
+                port,
+                "dev server printed no URL; falling back to the requested port"
+            );
             url = Some(format!("http://localhost:{port}"));
         }
 
@@ -509,7 +526,8 @@ impl DevServerManager {
             *guard = Some(RunningServer {
                 child,
                 kind: detected.kind.clone(),
-                cwd: work_dir,
+                // Ownership is the requested workspace, even when static files are served from public/ or dist/.
+                cwd: cwd.to_path_buf(),
                 url: url.clone(),
                 port: bound_port,
                 command: cmd_display,
@@ -632,9 +650,9 @@ fn port_is_bound(port: u16) -> bool {
     ("localhost", port)
         .to_socket_addrs()
         .map(|addrs| {
-            addrs
-                .into_iter()
-                .any(|a| std::net::TcpStream::connect_timeout(&a, Duration::from_millis(200)).is_ok())
+            addrs.into_iter().any(|a| {
+                std::net::TcpStream::connect_timeout(&a, Duration::from_millis(200)).is_ok()
+            })
         })
         .unwrap_or(false)
         || std::net::TcpStream::connect_timeout(
@@ -737,7 +755,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("bomb-code-pnpm-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("package.json"), r#"{"scripts":{"dev":"astro dev"}}"#).unwrap();
+        fs::write(
+            dir.join("package.json"),
+            r#"{"scripts":{"dev":"astro dev"}}"#,
+        )
+        .unwrap();
         fs::write(dir.join("pnpm-lock.yaml"), "lockfileVersion: 9").unwrap();
 
         let d = DevServerManager::detect(&dir).unwrap();
@@ -787,7 +809,10 @@ mod tests {
         let squat = TcpListener::bind(("127.0.0.1", 5173)).expect("bind 5173");
 
         let mgr = DevServerManager::new();
-        let st = mgr.start(&dir, false).await.expect("dev server should start");
+        let st = mgr
+            .start(&dir, false)
+            .await
+            .expect("dev server should start");
         println!("url={:?} port={:?}", st.url, st.port);
 
         let url = st.url.clone().expect("a URL");
@@ -817,7 +842,11 @@ mod tests {
         let d = DevServerManager::detect(&dir).unwrap();
         let cmd = d.command.join(" ");
         // We add no port at all: the script already carries `--port 3000`.
-        assert_eq!(cmd.matches("--port").count(), 0, "we must add no port: {cmd}");
+        assert_eq!(
+            cmd.matches("--port").count(),
+            0,
+            "we must add no port: {cmd}"
+        );
         assert!(cmd.ends_with("npm run dev"), "got {cmd}");
         assert_eq!(d.suggested_port, 0, "the script decides; we read the URL");
         let _ = fs::remove_dir_all(&dir);
@@ -859,4 +888,38 @@ mod tests {
         // ...and a remote host is never our dev server.
         assert!(extract_local_url("fetching https://registry.npmjs.org:443/x").is_none());
     }
+}
+#[tokio::test]
+#[cfg(unix)]
+async fn preview_reuses_its_process_and_failed_switch_preserves_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let mgr = DevServerManager::new();
+    let mut command = Command::new("sleep");
+    command.arg("30").process_group(0).kill_on_drop(true);
+    let child = command.spawn().unwrap();
+    let pid = child.id();
+    *mgr.inner.lock().await = Some(RunningServer {
+        child,
+        kind: DevServerKind::Static,
+        cwd: dir.path().to_path_buf(),
+        url: "http://localhost:12345".into(),
+        port: 12345,
+        command: "smoke placeholder".into(),
+        log_tail: Arc::new(Mutex::new(vec![])),
+    });
+    assert!(mgr.preview(dir.path(), None).await.unwrap().running);
+    assert_eq!(mgr.inner.lock().await.as_ref().unwrap().child.id(), pid);
+    assert!(mgr.preview(other.path(), None).await.is_err());
+    assert!(mgr
+        .preview(
+            &other.path().join("missing"),
+            Some(dir.path().display().to_string())
+        )
+        .await
+        .is_err());
+    assert!(mgr.status().await.running);
+    assert_eq!(mgr.inner.lock().await.as_ref().unwrap().child.id(), pid);
+    mgr.stop().await;
+    assert!(!mgr.status().await.running);
 }

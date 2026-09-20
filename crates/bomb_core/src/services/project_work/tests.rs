@@ -103,8 +103,13 @@ fn work(d: FeatureDraft, w: Workspace) -> FeatureWork {
         note: String::new(),
         feedback: vec![],
         repairs: 0,
+        pending_repair: None,
         reviewer_thread: None,
-                blocker: None, checked_head: None, verification_notes: vec![], review_history: vec![], assignments: Default::default(),
+        blocker: None,
+        checked_head: None,
+        verification_notes: vec![],
+        review_history: vec![],
+        assignments: Default::default(),
     }
 }
 fn fake_workspace() -> Workspace {
@@ -125,96 +130,195 @@ fn proposal() -> Proposal {
 
 #[test]
 fn blocked_project_reports_attention_and_named_dependency() {
-    let mut foundation=work(draft("F-foundation"),fake_workspace());
-    foundation.state=FeatureState::NeedsInput;
-    foundation.blocker=Some(Blocker::new(WorkStage::Review,"Read-only policy blocked permission",None));
-    let mut child=draft("F-child");child.depends_on=vec![foundation.id.clone()];
-    let child=work(child,fake_workspace());
-    let p=ProjectWork {state:RunState::Running,features:vec![foundation,child],..Default::default()};
+    let mut foundation = work(draft("F-foundation"), fake_workspace());
+    foundation.state = FeatureState::NeedsInput;
+    foundation.blocker = Some(Blocker::new(
+        WorkStage::Review,
+        "Read-only policy blocked permission",
+        None,
+    ));
+    let mut child = draft("F-child");
+    child.depends_on = vec![foundation.id.clone()];
+    let child = work(child, fake_workspace());
+    let p = ProjectWork {
+        state: RunState::Running,
+        features: vec![foundation, child],
+        ..Default::default()
+    };
     assert!(p.activity_label().contains("Waiting for you"));
     assert!(p.activity_label().contains("no jobs running"));
-    assert_eq!(p.features[0].state.column(),"Needs you");
-    assert_eq!(p.waiting_reason(&p.features[1]),"Waiting for Scores to merge");
-    assert_eq!(p.unblocks("F-foundation"),1);
-    assert!(next_job(&p,&HashSet::new()).is_none());
+    assert_eq!(p.features[0].state.column(), "Needs you");
+    assert_eq!(
+        p.waiting_reason(&p.features[1]),
+        "Waiting for Scores to merge"
+    );
+    assert_eq!(p.unblocks("F-foundation"), 1);
+    assert!(next_job(&p, &HashSet::new()).is_none());
 }
 
 #[tokio::test]
 async fn resume_never_dispatches_saved_backlog() {
-    let (_temp,state,root)=fixture().await;
-    change(&state,&root,|p|{p.enabled=true;let mut f=work(draft("F-later"),fake_workspace());f.state=FeatureState::Idea;p.features.push(f);Ok(())}).unwrap();
-    command(state.clone(),root.clone(),"resume").await.unwrap();
-    let p=load(&state,&root).unwrap();
-    assert_eq!(p.features[0].state,FeatureState::Idea);
-    assert!(next_job(&p,&HashSet::new()).is_none());
+    let (_temp, state, root) = fixture().await;
+    change(&state, &root, |p| {
+        p.enabled = true;
+        let mut f = work(draft("F-later"), fake_workspace());
+        f.state = FeatureState::Idea;
+        p.features.push(f);
+        Ok(())
+    })
+    .unwrap();
+    command(state.clone(), root.clone(), "resume")
+        .await
+        .unwrap();
+    let p = load(&state, &root).unwrap();
+    assert_eq!(p.features[0].state, FeatureState::Idea);
+    assert!(next_job(&p, &HashSet::new()).is_none());
 }
 
 #[tokio::test]
 async fn stale_recovery_cannot_repeat_a_stage() {
-    let (_temp,state,root)=fixture().await;
-    change(&state,&root,|p| {p.enabled=true;let mut f=work(draft("F-work"),fake_workspace());f.state=FeatureState::NeedsInput;f.blocker=Some(Blocker::new(WorkStage::Build,"Interrupted",None));p.features.push(f);Ok(())}).unwrap();
-    assert!(retry_stage(state.clone(),root.clone(),"F-work".into(),"stale-id".into(),None).await.is_err());
-    assert_eq!(load(&state,&root).unwrap().features[0].state,FeatureState::NeedsInput);
+    let (_temp, state, root) = fixture().await;
+    change(&state, &root, |p| {
+        p.enabled = true;
+        let mut f = work(draft("F-work"), fake_workspace());
+        f.state = FeatureState::NeedsInput;
+        f.blocker = Some(Blocker::new(WorkStage::Build, "Interrupted", None));
+        p.features.push(f);
+        Ok(())
+    })
+    .unwrap();
+    assert!(retry_stage(
+        state.clone(),
+        root.clone(),
+        "F-work".into(),
+        "stale-id".into(),
+        None
+    )
+    .await
+    .is_err());
+    assert_eq!(
+        load(&state, &root).unwrap().features[0].state,
+        FeatureState::NeedsInput
+    );
 }
 
 #[test]
 fn infrastructure_failures_are_not_code_findings() {
-    assert_eq!(Blocker::classify("getaddrinfo ENOTFOUND api.convex.dev"),BlockerKind::Environment);
-    assert_eq!(Blocker::classify("Review policy blocked permission"),BlockerKind::Access);
-    assert_eq!(Blocker::classify("provider model unavailable"),BlockerKind::Provider);
-    assert_eq!(Blocker::classify("session cancelled"),BlockerKind::Interrupted);
+    assert_eq!(
+        Blocker::classify("getaddrinfo ENOTFOUND api.convex.dev"),
+        BlockerKind::Environment
+    );
+    assert_eq!(
+        Blocker::classify("Review policy blocked permission"),
+        BlockerKind::Access
+    );
+    assert_eq!(
+        Blocker::classify("provider model unavailable"),
+        BlockerKind::Provider
+    );
+    assert_eq!(
+        Blocker::classify("session cancelled"),
+        BlockerKind::Interrupted
+    );
 }
 
 #[test]
 fn asking_about_a_plan_preserves_its_scope_and_assignments() {
-    let mut p=ProjectWork {draft:Some(proposal()),..Default::default()};
-    let before=serde_json::to_string(p.draft.as_ref().unwrap()).unwrap();
-    planning::record_proposal(&mut p,Proposal {message:"UI can start with fixtures.".into(),..Default::default()},Default::default()).unwrap();
-    assert_eq!(serde_json::to_string(p.draft.as_ref().unwrap()).unwrap(),before);
-    planning::record_proposal(&mut p,Proposal {questions:vec!["Which Convex project?".into()],..Default::default()},Default::default()).unwrap();
-    assert_eq!(p.needs_attention(),1);
+    let mut p = ProjectWork {
+        draft: Some(proposal()),
+        ..Default::default()
+    };
+    let before = serde_json::to_string(p.draft.as_ref().unwrap()).unwrap();
+    planning::record_proposal(
+        &mut p,
+        Proposal {
+            message: "UI can start with fixtures.".into(),
+            ..Default::default()
+        },
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_string(p.draft.as_ref().unwrap()).unwrap(),
+        before
+    );
+    planning::record_proposal(
+        &mut p,
+        Proposal {
+            questions: vec!["Which Convex project?".into()],
+            ..Default::default()
+        },
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(p.needs_attention(), 1);
     assert!(p.draft.is_some());
 }
 
 #[tokio::test]
 async fn selected_plan_cannot_omit_a_required_backlog_prerequisite() {
-    let (_temp,state,root)=fixture().await;
-    enable(&state,&root,true).await.unwrap();
-    let mut child=draft("F-child");child.depends_on=vec!["F-parent".into()];
-    let proposal=Proposal {features:vec![draft("F-parent"),child],..Default::default()};
-    update_draft(&state,&root,proposal.clone()).unwrap();
-    let error=accept_selected_plan(state.clone(),root.clone(),serde_json::to_string(&proposal).unwrap(),true,vec!["F-child".into()]).await.unwrap_err();
+    let (_temp, state, root) = fixture().await;
+    enable(&state, &root, true).await.unwrap();
+    let mut child = draft("F-child");
+    child.depends_on = vec!["F-parent".into()];
+    let proposal = Proposal {
+        features: vec![draft("F-parent"), child],
+        ..Default::default()
+    };
+    update_draft(&state, &root, proposal.clone()).unwrap();
+    let error = accept_selected_plan(
+        state.clone(),
+        root.clone(),
+        serde_json::to_string(&proposal).unwrap(),
+        true,
+        vec!["F-child".into()],
+    )
+    .await
+    .unwrap_err();
     assert!(error.contains("prerequisite"));
-    assert!(load(&state,&root).unwrap().features.is_empty());
+    assert!(load(&state, &root).unwrap().features.is_empty());
 }
 
 #[tokio::test]
 async fn saved_feedback_is_isolated_by_project_and_feature() {
-    let (_temp,state,root)=fixture().await;
-    save_draft_text(&state,&root,"project","new idea").unwrap();
-    save_draft_text(&state,&root,"F-one","fix loading state").unwrap();
-    assert_eq!(draft_text(&state,&root,"project"),"new idea");
-    assert_eq!(draft_text(&state,&root,"F-one"),"fix loading state");
-    assert!(draft_text(&state,&root,"F-two").is_empty());
-    assert!(draft_text(&state,"another-project","F-one").is_empty());
+    let (_temp, state, root) = fixture().await;
+    save_draft_text(&state, &root, "project", "new idea").unwrap();
+    save_draft_text(&state, &root, "F-one", "fix loading state").unwrap();
+    assert_eq!(draft_text(&state, &root, "project"), "new idea");
+    assert_eq!(draft_text(&state, &root, "F-one"), "fix loading state");
+    assert!(draft_text(&state, &root, "F-two").is_empty());
+    assert!(draft_text(&state, "another-project", "F-one").is_empty());
 }
 
 #[tokio::test]
 async fn explicit_model_replacement_cannot_rewrite_finished_work() {
-    let (_temp,state,root)=fixture().await;
-    change(&state,&root,|p| {let mut f=work(draft("F-one"),fake_workspace());f.tasks.get_mut("T-ui").unwrap().state=TaskState::Checkpointed;p.features.push(f);Ok(())}).unwrap();
-    assert!(replace_assignment(&state,&root,"F-one","T-ui",assignment()).is_err());
-    replace_assignment(&state,&root,"F-one","T-api",assignment()).unwrap();
-    let p=load(&state,&root).unwrap();
-    assert_eq!(p.features[0].assignments.len(),1);
-    assert_eq!(p.features[0].tasks["T-ui"].state,TaskState::Checkpointed);
+    let (_temp, state, root) = fixture().await;
+    change(&state, &root, |p| {
+        let mut f = work(draft("F-one"), fake_workspace());
+        f.tasks.get_mut("T-ui").unwrap().state = TaskState::Checkpointed;
+        p.features.push(f);
+        Ok(())
+    })
+    .unwrap();
+    assert!(replace_assignment(&state, &root, "F-one", "T-ui", assignment()).is_err());
+    replace_assignment(&state, &root, "F-one", "T-api", assignment()).unwrap();
+    let p = load(&state, &root).unwrap();
+    assert_eq!(p.features[0].assignments.len(), 1);
+    assert_eq!(p.features[0].tasks["T-ui"].state, TaskState::Checkpointed);
 }
 
 #[test]
 fn approval_and_final_blockers_share_the_attention_count() {
-    let mut f=work(draft("F-one"),fake_workspace());f.state=FeatureState::NeedsInput;f.approved_head=Some("approved-before-merge-blocked".into());
-    let p=ProjectWork {features:vec![f],final_blocker:Some(Blocker::new(WorkStage::Final,"integration failed",None)),questions:vec!["Which environment?".into()],..Default::default()};
-    assert_eq!(p.needs_attention(),3);
+    let mut f = work(draft("F-one"), fake_workspace());
+    f.state = FeatureState::NeedsInput;
+    f.approved_head = Some("approved-before-merge-blocked".into());
+    let p = ProjectWork {
+        features: vec![f],
+        final_blocker: Some(Blocker::new(WorkStage::Final, "integration failed", None)),
+        questions: vec!["Which environment?".into()],
+        ..Default::default()
+    };
+    assert_eq!(p.needs_attention(), 3);
 }
 #[test]
 fn planner_contract_preserves_prose_and_rejects_dependency_cycles() {
@@ -474,6 +578,8 @@ async fn actual_check_exit_output_and_stop_are_observed() {
         }
     });
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    command(state.clone(), root.clone(), "pause").await.unwrap();
+    assert_eq!(load(&state, &root).unwrap().state, RunState::Paused);
     tokio::time::timeout(
         std::time::Duration::from_secs(3),
         command(state.clone(), root.clone(), "stop"),
@@ -643,6 +749,26 @@ async fn combined_candidate_contains_both_workers_and_requires_valid_review_evid
     assert!(f.review.is_none());
     assert!(f.approved_head.is_none());
     assert!(!Path::new(&root).join("ui.txt").exists());
+    let checked = f.checked_head.clone();
+    let check_time = f.checks[0].at.clone();
+    let attempts = f.review_history.len();
+    assert!(
+        integration::candidate(state.clone(), root.clone(), "F-combined".into())
+            .await
+            .is_err()
+    );
+    let p = load(&state, &root).unwrap();
+    let f = &p.features[0];
+    assert_eq!(f.checked_head, checked);
+    assert_eq!(
+        f.checks[0].at, check_time,
+        "retrying unchanged review must preserve passing checks"
+    );
+    assert_eq!(f.review_history.len(), attempts + 1);
+    assert_eq!(
+        f.repairs, 0,
+        "a malformed review is not an implementation defect"
+    );
 }
 #[tokio::test]
 async fn final_project_checks_gate_completion_at_the_integrated_commit() {
@@ -708,7 +834,9 @@ async fn dependency_conflict_is_preserved_and_feedback_allows_scoped_repair() {
         "Combined frontend and backend contract",
     )
     .unwrap();
-    run_git(Path::new(&w.path), &["add","shared.txt"]).await.unwrap();
+    run_git(Path::new(&w.path), &["add", "shared.txt"])
+        .await
+        .unwrap();
     let head = integration::checkpoint(&state, &w, "Resolve approved inputs")
         .await
         .unwrap();
@@ -725,4 +853,136 @@ async fn dependency_conflict_is_preserved_and_feedback_allows_scoped_repair() {
         .unwrap()
         .is_none());
     assert!(!Path::new(&root).join("shared.txt").exists());
+}
+
+#[test]
+fn conversational_controls_do_not_consume_feature_requests() {
+    assert_eq!(project_control("Please pause."), Some("pause"));
+    assert_eq!(project_control("status?"), Some("status"));
+    assert_eq!(project_control("stop"), Some("stop"));
+    assert_eq!(project_control("add a pause button"), None);
+    assert_eq!(
+        project_control("resume leaderboard after fixing scores"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn merge_retry_retains_exact_approval_after_checkout_cleanup() {
+    let (_tmp, state, root) = fixture().await;
+    let f = reviewed(&state, &root).await;
+    let reviewed_head = f.approved_head.clone().unwrap();
+    let scratch = Path::new(&root).join("local-draft.txt");
+    std::fs::write(&scratch, "user draft").unwrap();
+    let error = integration::land(&state, &root, &f.id).await.unwrap_err();
+    change(&state, &root, |p| {
+        p.features[0].state = FeatureState::NeedsInput;
+        p.features[0].blocker = Some(Blocker::new(WorkStage::Merge, error, None));
+        Ok(())
+    })
+    .unwrap();
+    let blocked = load(&state, &root).unwrap();
+    assert!(blocked
+        .waiting_reason(&blocked.features[0])
+        .contains("local edits"));
+    let expected = blocked.features[0].decision_key();
+    std::fs::remove_file(scratch).unwrap();
+    // Reserve the test's driver so retry can be inspected before dispatch.
+    state
+        .project_work
+        .driving
+        .lock()
+        .unwrap()
+        .insert(root.clone());
+    retry_stage(
+        state.clone(),
+        root.clone(),
+        f.id.clone(),
+        expected.clone(),
+        None,
+    )
+    .await
+    .unwrap();
+    let current = load(&state, &root).unwrap();
+    assert_eq!(
+        current.features[0].approved_head.as_deref(),
+        Some(reviewed_head.as_str())
+    );
+    assert_eq!(
+        current.features[0].review.as_ref().unwrap().candidate,
+        reviewed_head
+    );
+    assert!(
+        retry_stage(state.clone(), root.clone(), f.id.clone(), expected, None)
+            .await
+            .is_err()
+    );
+    integration::land(&state, &root, &f.id).await.unwrap();
+    assert_eq!(integration::head(&root).await.unwrap(), reviewed_head);
+    assert_eq!(
+        load(&state, &root).unwrap().features[0].state,
+        FeatureState::Done
+    );
+}
+
+#[tokio::test]
+async fn interrupted_repair_retains_scope_and_can_replace_its_writer() {
+    let (_tmp, state, root) = fixture().await;
+    let mut f = work(draft("F-scores"), fake_workspace());
+    f.state = FeatureState::Working;
+    f.pending_repair = Some("Fix the score tie ordering".into());
+    f.tasks
+        .values_mut()
+        .for_each(|t| t.state = TaskState::Checkpointed);
+    change(&state, &root, |p| {
+        p.enabled = true;
+        p.state = RunState::Running;
+        p.features = vec![f];
+        Ok(())
+    })
+    .unwrap();
+    let restored = ProjectWorkService::new(state.persistence.clone())
+        .load(&root)
+        .unwrap();
+    let f = &restored.features[0];
+    assert_eq!(f.blocker.as_ref().unwrap().stage, WorkStage::Repair);
+    assert_eq!(
+        f.pending_repair.as_deref(),
+        Some("Fix the score tie ordering")
+    );
+    assert!(f.tasks.values().all(|t| t.state == TaskState::Checkpointed));
+    change(&state, &root, |p| {
+        *p = restored;
+        Ok(())
+    })
+    .unwrap();
+    let replacement = Assignment {
+        model: "replacement".into(),
+        ..assignment()
+    };
+    replace_assignment(&state, &root, "F-scores", "repair", replacement.clone()).unwrap();
+    let f = load(&state, &root).unwrap().features[0].clone();
+    assert_eq!(f.repair_assignment().unwrap().model, replacement.model);
+    state
+        .project_work
+        .driving
+        .lock()
+        .unwrap()
+        .insert(root.clone());
+    retry_stage(
+        state.clone(),
+        root.clone(),
+        f.id.clone(),
+        f.decision_key(),
+        None,
+    )
+    .await
+    .unwrap();
+    let f = load(&state, &root).unwrap().features[0].clone();
+    assert_eq!(
+        f.pending_repair.as_deref(),
+        Some("Fix the score tie ordering")
+    );
+    assert_eq!(f.state, FeatureState::Checking);
+    assert!(f.tasks.values().all(|t| t.state == TaskState::Checkpointed));
 }
