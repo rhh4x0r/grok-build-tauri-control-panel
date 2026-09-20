@@ -3424,6 +3424,7 @@ dependencies = [
  "futures",
  "grok_events",
  "grok_permissions",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

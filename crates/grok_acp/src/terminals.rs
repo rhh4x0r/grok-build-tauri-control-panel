@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, BufReader};
-use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, watch};
+use tokio::process::Command;
+use tokio::sync::{watch, Mutex};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -74,7 +74,44 @@ struct ManagedTerminal {
     state: Arc<Mutex<TerminalState>>,
     /// `true` once the process has exited (watch avoids lost-wakeup races).
     finished_rx: watch::Receiver<bool>,
-    child: Arc<Mutex<Option<Child>>>,
+    /// The process owner listens while waiting for exit; cancellation never
+    /// needs a lock held by `Child::wait`.
+    cancel_tx: watch::Sender<bool>,
+}
+
+/// Each Unix terminal owns a separate process group. Stopping a shell must
+/// also stop npm/dev-server descendants, without signalling the app's group.
+#[cfg(unix)]
+struct ProcessGroup(Option<u32>);
+
+#[cfg(unix)]
+impl ProcessGroup {
+    fn kill(&mut self) {
+        if let Some(pid) = self.0.take().and_then(|id| libc::pid_t::try_from(id).ok()) {
+            if pid > 0 {
+                // SAFETY: `pid` is the process-group leader we just spawned
+                // with process_group(0). No pointers are passed to kill(2).
+                unsafe {
+                    libc::kill(-pid, libc::SIGKILL);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+async fn wait_finished(mut finished: watch::Receiver<bool>) {
+    while !*finished.borrow() {
+        if finished.changed().await.is_err() {
+            break;
+        }
+    }
 }
 
 /// In-memory terminal registry for one ACP client connection.
@@ -172,12 +209,16 @@ impl TerminalRegistry {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         debug!(%command, cwd = %cwd.display(), "terminal/create spawn");
 
         let mut child = cmd
             .spawn()
             .map_err(|e| AcpError::Protocol(format!("terminal/create spawn failed: {e}")))?;
+        #[cfg(unix)]
+        let mut process_group = ProcessGroup(child.id());
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -192,12 +233,13 @@ impl TerminalRegistry {
             finished: false,
         }));
         let (finished_tx, finished_rx) = watch::channel(false);
-        let child_slot = Arc::new(Mutex::new(Some(child)));
+        let (cancel_tx, mut cancel_rx) = watch::channel(false);
+        let mut pumps = Vec::new();
 
         // Pump stdout
         if let Some(out) = stdout {
             let st = state.clone();
-            tokio::spawn(async move {
+            pumps.push(tokio::spawn(async move {
                 let mut reader = BufReader::new(out);
                 let mut buf = [0u8; 8192];
                 loop {
@@ -210,13 +252,13 @@ impl TerminalRegistry {
                         }
                     }
                 }
-            });
+            }));
         }
 
         // Pump stderr into the same output buffer (matches shell UX).
         if let Some(err) = stderr {
             let st = state.clone();
-            tokio::spawn(async move {
+            pumps.push(tokio::spawn(async move {
                 let mut reader = BufReader::new(err);
                 let mut buf = [0u8; 8192];
                 loop {
@@ -229,31 +271,43 @@ impl TerminalRegistry {
                         }
                     }
                 }
-            });
+            }));
         }
 
-        // Wait for process exit
+        // One task owns the child and selects between exit and cancellation.
+        // Never hold a shared child mutex across wait(): Stop would then wait
+        // for the very process it is trying to kill (e.g. a preview server).
         {
             let st = state.clone();
-            let child_slot = child_slot.clone();
             tokio::spawn(async move {
-                let status = {
-                    let mut guard = child_slot.lock().await;
-                    if let Some(mut child) = guard.take() {
-                        match child.wait().await {
-                            Ok(s) => Some(s),
-                            Err(e) => {
-                                warn!(error = %e, "terminal wait failed");
-                                None
-                            }
-                        }
-                    } else {
-                        None
+                let status = tokio::select! {
+                    biased;
+                    // Closing the registry also cancels its processes.
+                    _ = cancel_rx.changed() => {
+                        #[cfg(unix)]
+                        process_group.kill();
+                        let _ = child.start_kill();
+                        child.wait().await
                     }
+                    status = child.wait() => status,
                 };
+                // Clean up descendants retaining output pipes after their
+                // shell exits. The group guard also handles task abortion.
+                #[cfg(unix)]
+                drop(process_group);
+                // Publish exit only after already-written output is drained.
+                // A detached descendant must not prevent cancellation forever.
+                for mut pump in pumps {
+                    if tokio::time::timeout(std::time::Duration::from_millis(250), &mut pump)
+                        .await
+                        .is_err()
+                    {
+                        pump.abort();
+                    }
+                }
                 {
                     let mut s = st.lock().await;
-                    if let Some(status) = status {
+                    if let Ok(status) = status {
                         s.exit_code = status.code();
                         #[cfg(unix)]
                         {
@@ -265,6 +319,7 @@ impl TerminalRegistry {
                             }
                         }
                     } else {
+                        warn!(error = %status.unwrap_err(), "terminal wait failed");
                         s.exit_code = Some(-1);
                     }
                     s.finished = true;
@@ -278,7 +333,7 @@ impl TerminalRegistry {
             ManagedTerminal {
                 state,
                 finished_rx,
-                child: child_slot,
+                cancel_tx,
             },
         );
 
@@ -297,7 +352,7 @@ impl TerminalRegistry {
 
     async fn wait_for_exit(&self, params: &Option<Value>) -> Result<Value> {
         let id = terminal_id(params)?;
-        let (mut finished_rx, state) = {
+        let (finished_rx, state) = {
             let map = self.terminals.lock().await;
             let term = map
                 .get(&id)
@@ -305,14 +360,7 @@ impl TerminalRegistry {
             (term.finished_rx.clone(), term.state.clone())
         };
 
-        // watch::Receiver already holds current value — no lost-wakeup race.
-        if !*finished_rx.borrow() {
-            while !*finished_rx.borrow() {
-                if finished_rx.changed().await.is_err() {
-                    break;
-                }
-            }
-        }
+        wait_finished(finished_rx).await;
 
         let s = state.lock().await;
         Ok(s.to_wait_result())
@@ -320,34 +368,33 @@ impl TerminalRegistry {
 
     async fn kill(&self, params: &Option<Value>) -> Result<Value> {
         let id = terminal_id(params)?;
-        // Clone the child handle out so a wedged kill doesn't stall every
-        // other terminal RPC behind the map mutex.
-        let child = {
+        let (cancel, finished) = {
             let map = self.terminals.lock().await;
-            map.get(&id)
-                .ok_or_else(|| AcpError::Protocol(format!("unknown terminalId: {id}")))?
-                .child
-                .clone()
+            let term = map
+                .get(&id)
+                .ok_or_else(|| AcpError::Protocol(format!("unknown terminalId: {id}")))?;
+            (term.cancel_tx.clone(), term.finished_rx.clone())
         };
-        let mut child_guard = child.lock().await;
-        if let Some(c) = child_guard.as_mut() {
-            let _ = c.kill().await;
-        }
+        let _ = cancel.send(true);
+        wait_finished(finished).await;
         Ok(json!({}))
     }
 
     /// Kill every live terminal child (turn cancel) — best-effort; entries
     /// stay in the map so the agent's later output/release calls still work.
     pub async fn kill_all(&self) {
-        let children: Vec<_> = {
+        let terminals: Vec<_> = {
             let map = self.terminals.lock().await;
-            map.values().map(|t| t.child.clone()).collect()
+            map.values()
+                .map(|t| (t.cancel_tx.clone(), t.finished_rx.clone()))
+                .collect()
         };
-        for child in children {
-            let mut guard = child.lock().await;
-            if let Some(c) = guard.as_mut() {
-                let _ = c.kill().await;
-            }
+        // Signal all children first; one command cannot delay stopping others.
+        for (cancel, _) in &terminals {
+            let _ = cancel.send(true);
+        }
+        for (_, finished) in terminals {
+            wait_finished(finished).await;
         }
     }
 
@@ -358,10 +405,8 @@ impl TerminalRegistry {
             map.remove(&id)
         };
         if let Some(term) = term {
-            let mut child_guard = term.child.lock().await;
-            if let Some(mut child) = child_guard.take() {
-                let _ = child.kill().await;
-            }
+            let _ = term.cancel_tx.send(true);
+            wait_finished(term.finished_rx).await;
         }
         Ok(json!({}))
     }
@@ -398,10 +443,7 @@ impl TerminalRegistry {
                 };
                 match result {
                     Ok(v) => {
-                        let id = v
-                            .get("terminalId")
-                            .and_then(|x| x.as_str())
-                            .unwrap_or("?");
+                        let id = v.get("terminalId").and_then(|x| x.as_str()).unwrap_or("?");
                         format!("$ {short}  [{id}]")
                     }
                     Err(e) => format!("$ {short}  [spawn failed: {e}]"),
@@ -509,6 +551,125 @@ fn needs_shell(command: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    async fn running_terminal(reg: &TerminalRegistry) -> String {
+        let created = reg
+            .handle(
+                "terminal/create",
+                &Some(json!({
+                    "command": "sh", "args": ["-c", "echo ready; exec sleep 30"]
+                })),
+            )
+            .await
+            .unwrap();
+        let id = created["terminalId"].as_str().unwrap().to_string();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let out = reg.output(&Some(json!({"terminalId": id}))).await.unwrap();
+                if out["output"].as_str().unwrap().contains("ready") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("terminal must be running before cancellation");
+        id
+    }
+
+    #[tokio::test]
+    async fn kill_and_release_interrupt_an_active_exit_waiter() {
+        for operation in ["terminal/kill", "terminal/release"] {
+            let reg = Arc::new(TerminalRegistry::new(std::env::temp_dir()));
+            let id = running_terminal(&reg).await;
+            // Park an actual ACP wait request before cancelling the terminal.
+            let (waiting, parked) = tokio::sync::oneshot::channel();
+            let waiter = tokio::spawn({
+                let reg = reg.clone();
+                let id = id.clone();
+                async move {
+                    let params = Some(json!({"terminalId": id}));
+                    let future = reg.wait_for_exit(&params);
+                    tokio::pin!(future);
+                    // Poll once so it captures the terminal's watch receiver.
+                    assert!(futures::poll!(&mut future).is_pending());
+                    let _ = waiting.send(());
+                    future.await
+                }
+            });
+            parked.await.unwrap();
+            tokio::time::timeout(Duration::from_secs(3), async {
+                reg.handle(operation, &Some(json!({"terminalId": id})))
+                    .await
+                    .unwrap();
+                let result = waiter.await.unwrap().unwrap();
+                assert!(result["exitCode"] != 0 || !result["signal"].is_null());
+            })
+            .await
+            .expect("Stop must not wait for a long-running process to exit on its own");
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_all_stops_only_this_sessions_terminals() {
+        let reg = TerminalRegistry::new(std::env::temp_dir());
+        let other = TerminalRegistry::new(std::env::temp_dir());
+        let first = running_terminal(&reg).await;
+        let second = running_terminal(&reg).await;
+        let unrelated = running_terminal(&other).await;
+        tokio::time::timeout(Duration::from_secs(3), reg.kill_all())
+            .await
+            .unwrap();
+        for id in [first, second] {
+            let out = reg.output(&Some(json!({"terminalId": id}))).await.unwrap();
+            assert!(out.get("exitStatus").is_some());
+        }
+        let out = other
+            .output(&Some(json!({"terminalId": unrelated})))
+            .await
+            .unwrap();
+        assert!(
+            out.get("exitStatus").is_none(),
+            "another session must keep running"
+        );
+        tokio::time::timeout(Duration::from_secs(3), other.kill_all())
+            .await
+            .unwrap();
+        // Repeated Stop after completion must also return immediately.
+        tokio::time::timeout(Duration::from_secs(1), reg.kill_all())
+            .await
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancellation_stops_shell_descendants() {
+        let dir = tempfile::tempdir().unwrap();
+        let heartbeat = dir.path().join("heartbeat");
+        let reg = TerminalRegistry::new(dir.path().to_path_buf());
+        reg.create(&Some(json!({
+            "command": "sh",
+            "args": ["-c", "(while :; do printf x >> \"$1\"; sleep 0.03; done) & wait", "sh", heartbeat],
+        }))).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while std::fs::metadata(&heartbeat).map(|m| m.len()).unwrap_or(0) < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("shell descendant started");
+        tokio::time::timeout(Duration::from_secs(3), reg.kill_all())
+            .await
+            .unwrap();
+        let stopped = std::fs::read(&heartbeat).unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            stopped,
+            std::fs::read(&heartbeat).unwrap(),
+            "descendant kept working after Stop"
+        );
+    }
 
     #[tokio::test]
     async fn create_wait_output_echo() {
@@ -527,10 +688,7 @@ mod tests {
         let id = create["terminalId"].as_str().unwrap().to_string();
 
         let wait = reg
-            .handle(
-                "terminal/wait_for_exit",
-                &Some(json!({ "terminalId": id })),
-            )
+            .handle("terminal/wait_for_exit", &Some(json!({ "terminalId": id })))
             .await
             .expect("wait");
         assert_eq!(wait["exitCode"], 0);
@@ -540,10 +698,7 @@ mod tests {
             .await
             .expect("output");
         let text = out["output"].as_str().unwrap_or("");
-        assert!(
-            text.contains("hello-acp-term"),
-            "output was: {text:?}"
-        );
+        assert!(text.contains("hello-acp-term"), "output was: {text:?}");
         assert_eq!(out["truncated"], false);
         assert_eq!(out["exitStatus"]["exitCode"], 0);
 
@@ -566,10 +721,7 @@ mod tests {
             .expect("create");
         let id = create["terminalId"].as_str().unwrap().to_string();
         let wait = reg
-            .handle(
-                "terminal/wait_for_exit",
-                &Some(json!({ "terminalId": id })),
-            )
+            .handle("terminal/wait_for_exit", &Some(json!({ "terminalId": id })))
             .await
             .expect("wait");
         assert_eq!(wait["exitCode"], 0);
