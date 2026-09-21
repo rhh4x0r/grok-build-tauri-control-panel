@@ -20,7 +20,8 @@ pub enum Incoming {
     StreamEnd { stream: u32, error: Option<String> },
 }
 
-type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
+/// `None` once the connection has ended, so a late request fails instead of waiting forever.
+type Pending = Arc<Mutex<Option<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>>;
 
 /// Cheap to clone; all clones share one connection.
 #[derive(Clone)]
@@ -61,14 +62,14 @@ where
             if tx.send(&frame).await.is_err() { break; }
         }
     });
-    let pending: Pending = Default::default();
+    let pending: Pending = Arc::new(Mutex::new(Some(HashMap::new())));
     let (incoming_tx, incoming) = mpsc::unbounded_channel();
     let reader_pending = pending.clone();
     tokio::spawn(async move {
         while let Ok(Some(frame)) = rx.recv().await {
             let delivered = match frame {
                 Frame::Message(Message::Response { id, ok, error }) => {
-                    if let Some(waiter) = reader_pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&id) {
+                    if let Some(waiter) = reader_pending.lock().unwrap_or_else(|e| e.into_inner()).as_mut().and_then(|p| p.remove(&id)) {
                         let _ = waiter.send(match error { Some(e) => Err(e), None => Ok(ok.unwrap_or(Value::Null)) });
                     }
                     true
@@ -82,7 +83,8 @@ where
             if !delivered { break; }
         }
         // Connection gone: fail everything still waiting instead of hanging it.
-        for (_, waiter) in reader_pending.lock().unwrap_or_else(|e| e.into_inner()).drain() {
+        let waiting = reader_pending.lock().unwrap_or_else(|e| e.into_inner()).take();
+        for (_, waiter) in waiting.into_iter().flatten() {
             let _ = waiter.send(Err("The connection to the server was lost.".into()));
         }
     });
@@ -93,9 +95,12 @@ impl Client {
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap_or_else(|e| e.into_inner()).insert(id, tx);
+        match self.pending.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            Some(pending) => { pending.insert(id, tx); }
+            None => return Err("The connection to the server was lost.".into()),
+        }
         if self.out.send(Frame::Message(Message::Request { id, method: method.to_string(), params })).await.is_err() {
-            self.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+            if let Some(pending) = self.pending.lock().unwrap_or_else(|e| e.into_inner()).as_mut() { pending.remove(&id); }
             return Err("The connection to the server was lost.".into());
         }
         rx.await.unwrap_or_else(|_| Err("The connection to the server was lost.".into()))
@@ -106,6 +111,6 @@ impl Client {
     }
 
     pub fn is_closed(&self) -> bool {
-        self.out.is_closed()
+        self.out.is_closed() || self.pending.lock().unwrap_or_else(|e| e.into_inner()).is_none()
     }
 }

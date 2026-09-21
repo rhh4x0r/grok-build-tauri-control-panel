@@ -1,6 +1,8 @@
 //! `bombd`: the Bomb Code core without a window.
 //!
-//! [`core`] serves one person's core over a Unix socket. The gateway (added in
-//! a later phase) authenticates devices and proxies them to that socket.
+//! [`core`] serves one person's core over a Unix socket. [`gateway`] is the one
+//! encrypted port: it authenticates devices and relays them to that socket.
 
 pub mod core;
+pub mod gateway;
+pub mod store;
