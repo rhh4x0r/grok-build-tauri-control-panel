@@ -16,6 +16,8 @@ struct Tab {
     session: Arc<TerminalSession>,
 }
 pub struct TerminalPanel {
+    /// Typed into the first terminal when it opens.
+    first_command: Option<String>,
     cwd: PathBuf,
     tabs: Vec<Tab>,
     selected: Option<u64>,
@@ -26,6 +28,12 @@ pub struct TerminalPanel {
     _poll: Task<()>,
 }
 impl TerminalPanel {
+    /// A panel whose first terminal runs `command` once it opens (a provider sign-in on a server).
+    pub fn with_command(cwd: PathBuf, command: String, cx: &mut Context<Self>) -> Self {
+        let mut panel = Self::new(cwd, cx);
+        panel.first_command = Some(command);
+        panel
+    }
     pub fn new(cwd: PathBuf, cx: &mut Context<Self>) -> Self {
         let weak = cx.entity().downgrade();
         let poll = cx.spawn(async move |_, cx| {
@@ -55,6 +63,7 @@ impl TerminalPanel {
             next_id: 1,
             error: None,
             loading: false,
+            first_command: None,
             focus: cx.focus_handle(),
             _poll: poll,
         };
@@ -93,6 +102,7 @@ impl TerminalPanel {
                     panel.loading = false;
                     match result {
                         Ok(session) => {
+                            if let Some(command) = panel.first_command.take() { let _ = session.write(format!("{command}\r").as_bytes()); }
                             let id = panel.next_id;
                             panel.next_id += 1;
                             panel.tabs.push(Tab {

@@ -30,6 +30,11 @@ impl Args {
     }
 }
 
+/// The account a one-person server registers: the login name when it is registry-safe, else `owner`.
+fn owner_name() -> String {
+    std::env::var("USER").ok().filter(|u| bomb_server::gateway::valid_user_name(u)).unwrap_or_else(|| "owner".into())
+}
+
 async fn until_stopped() {
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("signal handler");
     tokio::select! { _ = term.recv() => {}, _ = tokio::signal::ctrl_c() => {} }
@@ -63,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
             let data = PathBuf::from(args.required("--data"));
             let gateway = Gateway::open(&data, &args.required("--public")).map_err(anyhow::Error::msg)?;
             let socket = data.join("core.sock");
-            let owner = std::env::var("USER").ok().filter(|u| bomb_server::gateway::valid_user_name(u)).unwrap_or_else(|| "owner".into());
+            let owner = owner_name();
             gateway.add_user(&owner, &socket, true).map_err(anyhow::Error::msg)?;
             if gateway.store().read()?.devices.is_empty() {
                 println!("\nPair your Mac with this link (works once, for 10 minutes):\n\n  {}\n", gateway.create_invite(&owner).map_err(anyhow::Error::msg)?);
@@ -80,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
             let _ = core.await;
             let _ = bomb_core::services::shutdown_all(&state).await;
         }
+        Some("owner-name") => println!("{}", owner_name()),
         Some("add-user") => {
             let gateway = Gateway::open(&PathBuf::from(args.required("--data")), "unused:0").map_err(anyhow::Error::msg)?;
             gateway.add_user(&args.required("--name"), &PathBuf::from(args.required("--socket")), args.has("--admin")).map_err(anyhow::Error::msg)?;

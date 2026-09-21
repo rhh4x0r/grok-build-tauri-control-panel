@@ -5,6 +5,7 @@
 //! server>`, so everything that keys on a project root keeps working and
 //! [`Core`](crate::runtime::Core) can tell where a call belongs.
 
+pub mod install;
 pub mod keychain;
 pub mod live;
 pub mod sync;

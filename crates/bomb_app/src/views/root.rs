@@ -211,6 +211,27 @@ impl Render for RootView {
             self.sidebar_kept = false;
         }
         let ui = Ui::of(cx);
+        if let Some((folder, command, title)) = self.model.update(cx, |m, _| m.server_login_request.take()) {
+            use gpui_kit::component::WindowExt;
+            let panel = cx.new(|cx| crate::views::terminal::TerminalPanel::with_command(folder.into(), command, cx));
+            let app = self.model.clone();
+            window.open_dialog(cx, move |dialog, _, _| {
+                let (panel, app) = (panel.clone(), app.clone());
+                dialog
+                    .title(title.clone())
+                    .w(px(820.))
+                    .content(move |content, _, _| {
+                        content
+                            .child(div().pb_2().text_size(px(crate::theme::Type::SMALL)).child("This runs on the server. Open the link it shows in your browser, or paste the code it asks for. Close this when it says you are signed in."))
+                            .child(div().h(px(420.)).child(panel.clone()))
+                    })
+                    .on_ok(move |_, window, cx| {
+                        app.update(cx, |m, cx| m.refresh_services(cx));
+                        window.close_dialog(cx);
+                        true
+                    })
+            });
+        }
         if let Some(text) = self.model.update(cx, |m,_| m.foundry_insert.take()) {
             self.foundry_open = false;
             self.thread.update(cx, |t,cx|t.set_foundry_prompt(text,window,cx));

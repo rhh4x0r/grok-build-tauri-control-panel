@@ -166,6 +166,9 @@ pub async fn dispatch(state: &AppState, origin: &str, method: &str, p: Value) ->
         // What this core can run
         "list_backends" => out(services::list_backends(state).await?),
         "backend_auth_status" => out(services::backend_auth_status(state).await?),
+        // The command that signs a provider in on this machine; the app runs it in a terminal here so the
+        // person sees the link or code. The Mac's own login files are never sent.
+        "login_command" => { let backend: String = arg(&p, "backend")?; grok_cli_wrapper::backend_auth::login_command(&backend).map(Value::from).ok_or_else(|| format!("{backend} is not installed on this server.")) }
 
         other => Err(format!("unknown method `{other}`")),
     }

@@ -667,6 +667,24 @@ fn render_servers(cx: &mut App) -> AnyElement {
         page = page.child(card);
     }
 
+    let (install_target, install_public, install_log, installing) = {
+        let m = model.read(cx);
+        (m.install_target.clone(), m.install_public.clone(), m.install_log.clone(), m.installing)
+    };
+    let install_model = model.clone();
+    page = page.child(
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Set up a new server"))
+            .child(caption("For a Linux server you can already reach with `ssh`. The app installs Bomb Code there for your login, starts it, and pairs this Mac. SSH is only used for this step."))
+            .child(div().flex().items_center().gap_2().child(div().w(px(300.)).child(Input::new(&install_target))).child(div().w(px(300.)).child(Input::new(&install_public))))
+            .child(div().flex().child(Button::new("server-install").outline().small().label(if installing { "Setting up…" } else { "Install and pair" }).disabled(installing).on_click(move |_, _, cx| {
+                install_model.update(cx, |s, cx| s.install_server(cx));
+            })))
+            .children(install_log.into_iter().map(|line| div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(line))),
+    );
     page.child(
         div()
             .flex()

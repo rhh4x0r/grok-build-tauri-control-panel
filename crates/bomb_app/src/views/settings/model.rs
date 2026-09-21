@@ -40,6 +40,11 @@ pub struct SettingsModel {
     pub cred_value: Entity<InputState>,
     pub wt_name: Entity<InputState>,
     pub server_link: Entity<InputState>,
+    pub install_target: Entity<InputState>,
+    pub install_public: Entity<InputState>,
+    /// What the installer is doing or last said, and whether it is still running.
+    pub install_log: Vec<String>,
+    pub installing: bool,
     pub server_name: Entity<InputState>,
     pub server_project: Entity<InputState>,
     pub server_invitee: Entity<InputState>,
@@ -85,6 +90,10 @@ impl SettingsModel {
             wt_name: mk("new worktree name", window, cx),
             server_link: mk("bomb://pair?…  (pairing link from your server)", window, cx),
             server_name: mk("Name for this server, e.g. My VPS", window, cx),
+            install_target: mk("SSH login, e.g. you@203.0.113.7", window, cx),
+            install_public: mk("Address Macs will use, e.g. 203.0.113.7:7443", window, cx),
+            install_log: Vec::new(),
+            installing: false,
             server_project: mk("new project name", window, cx),
             server_invitee: mk("Who is this for? e.g. Sam", window, cx),
             server_devices: Default::default(),
@@ -143,6 +152,51 @@ impl SettingsModel {
     }
 
     /// Push the current permission rule text into the textareas once per load.
+    /// Install the server over SSH, then pair this Mac with the link it returns.
+    pub fn install_server(&mut self, cx: &mut Context<Self>) {
+        if self.installing { return; }
+        let target = self.install_target.read(cx).value().trim().to_string();
+        let mut public = self.install_public.read(cx).value().trim().to_string();
+        if target.is_empty() { return; }
+        // Default to the SSH host on the standard port.
+        if public.is_empty() { public = format!("{}:{}", target.rsplit('@').next().unwrap_or(&target), crate::remote::install::DEFAULT_PORT); }
+        if !public.contains(':') { public = format!("{public}:{}", crate::remote::install::DEFAULT_PORT); }
+        self.installing = true;
+        self.install_log = vec!["Connecting over SSH…".into()];
+        cx.notify();
+        let (progress_tx, progress_rx) = async_channel::unbounded::<String>();
+        let weak = cx.entity().downgrade();
+        let listener = weak.clone();
+        cx.spawn(async move |_, cx| {
+            while let Ok(line) = progress_rx.recv().await {
+                if listener.update(cx, |s, cx| { s.install_log.push(line); cx.notify(); }).is_err() { break; }
+            }
+        }).detach();
+        let name = target.rsplit('@').next().unwrap_or("Server").to_string();
+        crate::runtime::spawn_service(cx, async move {
+            crate::remote::install::install(&target, &public, |line| { let _ = progress_tx.try_send(line.to_string()); }).await
+        }, move |res, cx| {
+            let _ = weak.update(cx, |s, cx| {
+                s.installing = false;
+                match res {
+                    Ok(outcome) => {
+                        s.install_log.extend(outcome.notes);
+                        if !outcome.missing.is_empty() {
+                            s.install_log.push(format!("Not installed on the server yet: {}. Threads need git, Node and at least one agent (claude, codex or grok). Install them, then use “Sign in” from a server project.", outcome.missing.join(", ")));
+                        }
+                        s.install_log.push("Server is running. Pairing this Mac…".into());
+                        if let Some(link) = outcome.link {
+                            let app = cx.global::<crate::models::app::AppModelHandle>().0.clone();
+                            app.update(cx, |m, cx| m.pair_server(link, name, cx));
+                        }
+                    }
+                    Err(e) => s.install_log.push(e),
+                }
+                cx.notify();
+            });
+        });
+    }
+
     pub fn pair_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let link = self.server_link.read(cx).value().trim().to_string();
         let name = self.server_name.read(cx).value().trim().to_string();

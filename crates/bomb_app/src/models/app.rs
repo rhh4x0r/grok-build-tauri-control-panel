@@ -163,6 +163,8 @@ pub struct AppModel {
     pub project_links: Vec<crate::remote::sync::Link>,
     /// A dev server running on a paired server, reached through a forwarded local port.
     server_preview: Option<ServerPreview>,
+    /// A provider sign-in to show in a server terminal: (folder on the server, command, title). The root view opens it.
+    pub server_login_request: Option<(String, String, String)>,
     /// A send, download or sync is running.
     pub syncing: bool,
     /// A pairing attempt is in flight.
@@ -230,6 +232,7 @@ impl AppModel {
             server_lists: HashMap::new(),
             project_links: Vec::new(),
             server_preview: None,
+            server_login_request: None,
             syncing: false,
             pairing: false,
             sidebar_sort: SidebarSort::default(),
@@ -2037,6 +2040,23 @@ impl AppModel {
 
     /// Grok signs in inside the app (device code); other CLIs open a terminal.
     pub fn sign_in(&mut self, backend: &str, cx: &mut Context<Self>) {
+        // A server project uses the server's own sign-ins: run the provider's login there, in a terminal
+        // shown here, so the link or code can be approved in this Mac's browser.
+        if let Some(folder) = self.active_project.clone().filter(|r| crate::remote::is_server_root(r)) {
+            let Some(remote) = crate::runtime::servers(cx).for_root(&folder) else { return; };
+            let this = cx.entity().downgrade();
+            let (name, b) = (remote.config.name.clone(), backend.to_string());
+            spawn_service(cx, async move { remote.call::<String>("login_command", serde_json::json!({ "backend": b })).await }, move |res, cx| {
+                let _ = this.update(cx, |m, cx| {
+                    match res {
+                        Ok(command) => m.server_login_request = Some((folder, command, format!("Sign in on {name}"))),
+                        Err(e) => m.fail(e, cx),
+                    }
+                    cx.notify();
+                });
+            });
+            return;
+        }
         if backend == "grok" {
             self.start_grok_login(cx);
             return;

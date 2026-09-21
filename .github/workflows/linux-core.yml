@@ -20,3 +20,25 @@ jobs:
           git config --global init.defaultBranch main
       - run: cargo build -p bomb_server --locked
       - run: cargo test -p bomb_proto -p bomb_core -p bomb_server --locked -- --test-threads=1
+
+  # Server builds the desktop app uploads when it installs a server (Settings → Servers).
+  bombd:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            name: bombd-linux-x86_64
+          - runner: ubuntu-22.04-arm
+            name: bombd-linux-aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p bomb_server --locked
+      - run: cp target/release/bombd ${{ matrix.name }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.name }}
