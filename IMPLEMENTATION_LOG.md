@@ -780,3 +780,10 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 - `bombd owner-name` prints the account a one-person server registers, so the script and `bombd up` agree. The Linux workflow gained a job that builds release `bombd` for x86_64 and aarch64 and uploads them as artifacts.
 - Validation: tests cover target and address validation (option injection, command substitution, quotes, newlines, bad ports), build selection, and parsing of the server's report. Serial suites all passing: bomb_app 22, bomb_core 75 (+4 ignored), bomb_server 9, bomb_proto 2, bomb_link 2; clippy clean on the three new crates.
 - NOT verified: the installer has never run against a real server, the CI workflow has never run, and the aarch64 runner label is a guess. No server binary exists yet, so "Install and pair" will stop with its "put the build here" message until CI produces one or `bombd` is built on a Linux machine. The sign-in dialog was not seen on screen. Codex's default login uses a browser callback on localhost, which may not work from a server; check for a device-code option there.
+
+
+## 2026-09-21 — Server-first projects: Linux build confirmed, handoff note
+
+- Pushed `server-projects` to the fork. The `linux-core` workflow passed on its first run: the server crates build and their tests pass on Ubuntu, and release `bombd` binaries for x86_64 and aarch64 were produced (the ARM runner label was right). Both are in `~/.bombcode/server/` on Max's Mac for the in-app installer; they need glibc 2.35 or newer.
+- Work paused here at Max's request. `docs/SERVER_PROJECTS_NEXT.md` records what is built, what has and has not been checked, and the next steps in order (look at the screens, one-person VPS trial, real flow, provider sign-ins, shared-server trial, merge decision). The approved plan is now in the repo at `docs/plan/server_first_projects_plan.md`.
+- Still true: nothing has run on a real server and none of the new screens has been seen.
