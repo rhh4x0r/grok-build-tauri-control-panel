@@ -6,6 +6,7 @@ use crate::{
 };
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::ButtonVariants;
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{Disableable, Icon, Sizable};
 use gpui_kit::{prelude::FluentBuilder as _, *};
 
@@ -15,6 +16,8 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
     let loading = m.overview_loading.contains(&root);
     let data = m.project_overviews.get(&root);
     let refresh = model.clone();
+    // Only a project with Git history can be sent.
+    let overview_ready = data.is_some_and(|d| d.as_ref().is_ok_and(|o| o.git_detected && !o.branches.is_empty()));
     let reveal = model.clone();
     let mut page = div()
         .id("project-overview")
@@ -54,6 +57,44 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                     div()
                         .flex()
                         .gap_2()
+                        // Where this project lives, and how to take it across.
+                        .child({
+                            let servers = crate::runtime::servers(cx).all();
+                            let on_server = crate::remote::is_server_root(&root);
+                            let linked = m.linked_project(&root).is_some();
+                            let busy = m.syncing;
+                            let app = model.clone();
+                            if linked {
+                                Button::new("project-sync").outline().small().icon(Lucide::RefreshCw)
+                                    .label(if busy { "Syncing…" } else if on_server { "Sync with this Mac’s copy" } else { "Sync with server" })
+                                    .disabled(busy)
+                                    .tooltip("Sends new work each way. Nothing is overwritten: if both sides changed the same branch, it is kept for a merge.")
+                                    .on_click(move |_, _, cx| app.update(cx, |m, cx| m.sync_project(cx)))
+                                    .into_any_element()
+                            } else if on_server {
+                                Button::new("project-download").outline().small().icon(Lucide::ArrowDown)
+                                    .label(if busy { "Copying…" } else { "Download a copy to this Mac" })
+                                    .disabled(busy)
+                                    .tooltip("A normal copy in Documents/BombCode for working offline. Sync sends your offline work back.")
+                                    .on_click(move |_, _, cx| app.update(cx, |m, cx| m.download_project_copy(cx)))
+                                    .into_any_element()
+                            } else if !servers.is_empty() && overview_ready {
+                                Button::new("project-send").outline().small().icon(Lucide::Server)
+                                    .label(if busy { "Sending…" } else { "Put on a server" })
+                                    .disabled(busy)
+                                    .dropdown_caret(true)
+                                    .dropdown_menu(move |mut menu, _, _| {
+                                        for server in &servers {
+                                            let (app, id) = (app.clone(), server.config.id.clone());
+                                            menu = menu.item(PopupMenuItem::new(format!("Send to {}", server.config.name)).on_click(move |_, _, cx| app.update(cx, |m, cx| m.send_project_to_server(id.clone(), cx))));
+                                        }
+                                        menu
+                                    })
+                                    .into_any_element()
+                            } else {
+                                div().into_any_element()
+                            }
+                        })
                         .child(
                             Button::new("project-refresh")
                                 .ghost()

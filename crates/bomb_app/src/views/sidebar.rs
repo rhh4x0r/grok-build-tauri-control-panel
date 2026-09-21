@@ -885,10 +885,15 @@ impl Render for SidebarView {
                     } else {
                         let app = self.model.clone();
                         button.dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+                            let self_app = app.clone();
                             for server in &servers {
                                 let (app, id, name) = (app.clone(), server.config.id.clone(), server.config.name.clone());
                                 menu = menu.item(PopupMenuItem::new(format!("New project on {}…", server.config.name)).on_click(move |_, window, cx| {
                                     open_server_project_dialog(app.clone(), id.clone(), name.clone(), window, cx)
+                                }));
+                                let (app, id, name) = (self_app.clone(), server.config.id.clone(), server.config.name.clone());
+                                menu = menu.item(PopupMenuItem::new(format!("Clone from GitHub onto {}…", server.config.name)).on_click(move |_, window, cx| {
+                                    open_server_clone_dialog(app.clone(), id.clone(), name.clone(), window, cx)
                                 }));
                             }
                             let create = app.clone();
@@ -1189,6 +1194,33 @@ pub fn open_server_project_dialog(model: Entity<AppModel>, server: String, serve
                 let name = input.read(cx).value().trim().to_string();
                 if !name.is_empty() {
                     model.update(cx, |m, cx| m.create_server_project(server.clone(), name, cx));
+                }
+                window.close_dialog(cx);
+                true
+            })
+    });
+}
+
+/// Paste a repository address; the server clones it.
+pub fn open_server_clone_dialog(model: Entity<AppModel>, server: String, server_name: String, window: &mut Window, cx: &mut App) {
+    let input = cx.new(|cx| InputState::new(window, cx).placeholder("https://github.com/you/project.git"));
+    let focus_input = input.clone();
+    window.open_dialog(cx, move |dialog, window, cx| {
+        let (model, server, input) = (model.clone(), server.clone(), input.clone());
+        let input_for_content = input.clone();
+        focus_input.update(cx, |s, cx| s.focus(window, cx));
+        dialog
+            .title(format!("Clone onto {server_name}"))
+            .w(px(480.))
+            .content(move |content, _, _| {
+                content
+                    .child(Input::new(&input_for_content))
+                    .child(div().pt_2().text_size(px(crate::theme::Type::SMALL)).child("The server downloads it directly. For a private repository, sign in to GitHub on the server first."))
+            })
+            .on_ok(move |_, window, cx| {
+                let url = input.read(cx).value().trim().to_string();
+                if !url.is_empty() {
+                    model.update(cx, |m, cx| m.clone_on_server(server.clone(), url, cx));
                 }
                 window.close_dialog(cx);
                 true

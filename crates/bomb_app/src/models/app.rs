@@ -152,6 +152,10 @@ pub struct AppModel {
     local_workspaces: Vec<grok_persistence::WorkspaceRecord>,
     local_projects: Vec<String>,
     server_lists: HashMap<String, (Vec<ThreadDto>, Vec<grok_persistence::WorkspaceRecord>, Vec<String>)>,
+    /// Which folder on this Mac is a copy of which server project.
+    pub project_links: Vec<crate::remote::sync::Link>,
+    /// A send, download or sync is running.
+    pub syncing: bool,
     /// A pairing attempt is in flight.
     pub pairing: bool,
     pub sidebar_sort: SidebarSort,
@@ -215,6 +219,8 @@ impl AppModel {
             local_workspaces: Vec::new(),
             local_projects: Vec::new(),
             server_lists: HashMap::new(),
+            project_links: Vec::new(),
+            syncing: false,
             pairing: false,
             sidebar_sort: SidebarSort::default(),
             pinned_projects: Vec::new(),
@@ -491,6 +497,116 @@ impl AppModel {
         spawn_service(cx, async move { services::kv_get(&state, crate::remote::SERVERS_KEY).await }, move |res, cx| {
             let saved: Vec<crate::remote::ServerConfig> = res.ok().flatten().and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default();
             let _ = this.update(cx, |m, cx| { for config in saved { m.connect_server(config, cx); } });
+        });
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move { services::kv_get(&state, crate::remote::sync::LINKS_KEY).await }, move |res, cx| {
+            let links = res.ok().flatten().and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default();
+            let _ = this.update(cx, |m, cx| { m.project_links = links; cx.notify(); });
+        });
+    }
+
+    // ── moving projects between this Mac and a server ───────────────────
+
+    fn transfer_dir() -> PathBuf {
+        std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp")).join(".grok/control-panel/transfer")
+    }
+
+    /// The other side of a linked project, if this project has one.
+    pub fn linked_project(&self, root: &str) -> Option<String> {
+        self.project_links.iter().find_map(|l| if l.local == root { Some(l.server.clone()) } else if l.server == root { Some(l.local.clone()) } else { None })
+    }
+
+    fn remember_link(&mut self, local: String, server: String, cx: &mut Context<Self>) {
+        self.project_links.retain(|l| l.local != local && l.server != server);
+        self.project_links.push(crate::remote::sync::Link { local, server });
+        let raw = serde_json::to_string(&self.project_links).unwrap_or_else(|_| "[]".into());
+        let state = svc(cx);
+        spawn_service(cx, async move { services::kv_set(&state, crate::remote::sync::LINKS_KEY, &raw).await }, |_, _| {});
+    }
+
+    /// Put the project in view on a server, and open it there.
+    pub fn send_project_to_server(&mut self, server: String, cx: &mut Context<Self>) {
+        let (Some(local), Some(remote)) = (self.active_project.clone().filter(|r| !crate::remote::is_server_root(r)), crate::runtime::servers(cx).get(&server)) else { return; };
+        if self.syncing { return; }
+        self.syncing = true; cx.notify();
+        let this = cx.entity().downgrade();
+        let name = project_name(&local);
+        let source = local.clone();
+        spawn_service(cx, async move { crate::remote::sync::send_to_server(&remote, &source, &name, &Self::transfer_dir()).await }, move |res, cx| {
+            let _ = this.update(cx, |m, cx| {
+                m.syncing = false;
+                match res {
+                    Ok(root) => {
+                        m.toast(ToastKind::Success, format!("{} is now on the server. Threads you start there keep running with this Mac closed.", project_name(&root)));
+                        m.remember_link(local, root.clone(), cx);
+                        m.refresh_servers(cx);
+                        m.set_active_project(root, cx);
+                    }
+                    Err(e) => m.fail(e, cx),
+                }
+                cx.notify();
+            });
+        });
+    }
+
+    /// A normal copy of the server project in view, in Documents/BombCode, for working offline.
+    pub fn download_project_copy(&mut self, cx: &mut Context<Self>) {
+        let Some(server_root) = self.active_project.clone().filter(|r| crate::remote::is_server_root(r)) else { return; };
+        let Some(remote) = crate::runtime::servers(cx).for_root(&server_root) else { return; };
+        if self.syncing { return; }
+        let Ok(folder) = services::default_projects_dir() else { return; };
+        let target = folder.join(project_name(&server_root));
+        self.syncing = true; cx.notify();
+        let this = cx.entity().downgrade();
+        let (source, destination) = (server_root.clone(), target.clone());
+        spawn_service(cx, async move { crate::remote::sync::download_copy(&remote, &source, &destination, &Self::transfer_dir()).await }, move |res, cx| {
+            let _ = this.update(cx, |m, cx| {
+                m.syncing = false;
+                match res {
+                    Ok(()) => {
+                        m.toast(ToastKind::Success, format!("Copied to {}. Use Sync to send offline work back.", target.display()));
+                        m.remember_link(target.display().to_string(), server_root, cx);
+                        m.add_project(target, cx);
+                    }
+                    Err(e) => m.fail(e, cx),
+                }
+                cx.notify();
+            });
+        });
+    }
+
+    /// Bring this Mac's copy and the server's copy of the project in view up to date with each other.
+    pub fn sync_project(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.active_project.clone() else { return; };
+        let Some(other) = self.linked_project(&root) else { return; };
+        let (local, server_root) = if crate::remote::is_server_root(&root) { (other, root) } else { (root, other) };
+        let Some(remote) = crate::runtime::servers(cx).for_root(&server_root) else { self.fail("That server is not paired with this Mac any more.".into(), cx); return; };
+        if self.syncing { return; }
+        self.syncing = true; cx.notify();
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move { crate::remote::sync::sync(&remote, &local, &server_root, &Self::transfer_dir()).await }, move |res, cx| {
+            let _ = this.update(cx, |m, cx| {
+                m.syncing = false;
+                match res { Ok(summary) => m.toast(ToastKind::Success, summary), Err(e) => m.fail(e, cx) }
+                m.refresh_project_overview(cx); m.refresh_project_status(false, cx); m.refresh_servers(cx);
+                cx.notify();
+            });
+        });
+    }
+
+    /// Clone a repository (for example from GitHub) straight onto a server.
+    pub fn clone_on_server(&mut self, server: String, url: String, cx: &mut Context<Self>) {
+        let Some(remote) = crate::runtime::servers(cx).get(&server) else { return; };
+        if self.syncing { return; }
+        self.syncing = true; cx.notify();
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move { remote.call::<String>("clone_project", serde_json::json!({ "url": url })).await.map(|path| remote.root(&path)) }, move |res, cx| {
+            let _ = this.update(cx, |m, cx| {
+                m.syncing = false;
+                match res { Ok(root) => { m.refresh_servers(cx); m.set_active_project(root, cx); } Err(e) => m.fail(e, cx) }
+                cx.notify();
+            });
         });
     }
 

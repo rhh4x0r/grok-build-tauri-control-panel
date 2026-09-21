@@ -6,6 +6,7 @@
 //! [`Core`](crate::runtime::Core) can tell where a call belongs.
 
 pub mod keychain;
+pub mod sync;
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -86,6 +87,11 @@ impl RemoteCore {
     /// The path on the server for one of this server's roots.
     pub fn path_of<'a>(&self, root: &'a str) -> &'a str {
         split_root(root).map(|(_, path)| path).unwrap_or(root)
+    }
+
+    /// The live connection, for transfers that stream files.
+    pub fn client(&self) -> Result<Client, String> {
+        self.client.read().unwrap_or_else(|e| e.into_inner()).clone().ok_or_else(|| format!("{} is not connected right now.", self.config.name))
     }
 
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
@@ -328,6 +334,43 @@ mod tests {
         assert_eq!(workspaces[0].project_root, root);
         assert!(!core.snapshot(id.clone()).await.unwrap().rows.is_empty());
         assert!(core.workspace_action(workspaces[0].id.clone(), "squash".into(), String::new()).await.unwrap_err().contains("server"));
+
+        // A project that starts on this Mac goes up as Git history, comes back down, and stays in step.
+        let git = |dir: std::path::PathBuf, args: Vec<&'static str>| async move { grok_worktree::run_git(&dir, &args).await.unwrap() };
+        let local = temp.path().join("mac/site");
+        std::fs::create_dir_all(&local).unwrap();
+        for args in [vec!["init", "-q", "-b", "main"], vec!["config", "user.name", "Mac"], vec!["config", "user.email", "mac@example.com"]] { git(local.clone(), args).await; }
+        std::fs::write(local.join("index.html"), "<h1>v1</h1>").unwrap();
+        git(local.clone(), vec!["add", "-A"]).await;
+        git(local.clone(), vec!["commit", "-q", "-m", "v1"]).await;
+        let scratch = temp.path().join("scratch");
+        let site = sync::send_to_server(&remote, local.to_str().unwrap(), "Site", &scratch).await.unwrap();
+        assert!(is_server_root(&site) && core.list_projects().await.unwrap().contains(&site));
+        let on_server = std::path::PathBuf::from(remote.path_of(&site));
+        assert_eq!(std::fs::read_to_string(on_server.join("index.html")).unwrap(), "<h1>v1</h1>");
+        assert_eq!(sync::sync(&remote, local.to_str().unwrap(), &site, &scratch).await.unwrap(), "Nothing new on the server · Nothing new on this Mac");
+
+        // Overnight, a server thread commits. In the morning the Mac's copy catches up, files included.
+        for args in [vec!["config", "user.name", "Server"], vec!["config", "user.email", "server@example.com"]] { git(on_server.clone(), args).await; }
+        std::fs::write(on_server.join("index.html"), "<h1>v2 from the server</h1>").unwrap();
+        git(on_server.clone(), vec!["commit", "-q", "-am", "v2"]).await;
+        assert_eq!(sync::sync(&remote, local.to_str().unwrap(), &site, &scratch).await.unwrap(), "Nothing new on the server · 1 branch updated on this Mac");
+        assert_eq!(std::fs::read_to_string(local.join("index.html")).unwrap(), "<h1>v2 from the server</h1>");
+        // And offline work on the Mac goes back up.
+        std::fs::write(local.join("about.html"), "about").unwrap();
+        git(local.clone(), vec!["add", "-A"]).await;
+        git(local.clone(), vec!["commit", "-q", "-m", "about page"]).await;
+        assert_eq!(sync::sync(&remote, local.to_str().unwrap(), &site, &scratch).await.unwrap(), "1 branch updated on the server · Nothing new on this Mac");
+        assert!(on_server.join("about.html").exists());
+
+        let copy = temp.path().join("mac/site-copy");
+        sync::download_copy(&remote, &site, &copy, &scratch).await.unwrap();
+        assert!(copy.join("about.html").exists());
+        assert!(std::fs::read_dir(&scratch).unwrap().next().is_none(), "no bundles are left lying around");
+
+        // The server only touches this person's registered projects, and only files it received itself.
+        assert!(remote.request("branch_tips", json!({ "root": "/etc" })).await.unwrap_err().contains("not one of your projects"));
+        assert!(remote.request("import_bundle", json!({ "root": on_server, "bundle_path": "/etc/passwd" })).await.unwrap_err().contains("bundle_path"));
 
         // Removing the device on the server cuts this Mac off; it reports why instead of hanging.
         gateway.revoke_device(&config.device_id).unwrap();

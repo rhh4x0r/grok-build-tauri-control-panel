@@ -92,12 +92,46 @@ pub async fn dispatch(state: &AppState, origin: &str, method: &str, p: Value) ->
         // A new empty Git project in this person's projects folder.
         "create_project" => {
             let name: String = arg(&p, "name")?;
-            let slug: String = name.trim().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c.to_ascii_lowercase() } else { '-' }).collect::<String>().trim_matches('-').to_string();
-            if slug.is_empty() || slug.len() > 64 { return Err("Give the project a short name using letters, digits or dashes.".into()); }
+            let slug = project_slug(&name)?;
             let path = server_projects_dir(state).join(&slug);
             if path.exists() { return Err(format!("There is already a project named {slug} on this server.")); }
             std::fs::create_dir_all(server_projects_dir(state)).map_err(|e| format!("Could not create the projects folder: {e}"))?;
             services::thread_setup::create(&path).await?;
+            services::add_project(state, path.display().to_string()).await?;
+            Ok(json!(path.display().to_string()))
+        }
+
+        // Git history between this core's copy of a project and a Mac's. `bundle_path` is filled in by the
+        // server from an uploaded stream; a client can never name a file on this machine.
+        "branch_tips" => { let root = own_project(state, &p).await?; out(services::project_sync::branch_tips(&root).await?) }
+        "import_bundle" => {
+            let root = own_project(state, &p).await?;
+            let bundle: String = arg(&p, "bundle_path")?;
+            out(services::project_sync::import_bundle(&root, std::path::Path::new(&bundle)).await?)
+        }
+        "import_project" => {
+            let (name, bundle): (String, String) = (arg(&p, "name")?, arg(&p, "bundle_path")?);
+            let path = server_projects_dir(state).join(project_slug(&name)?);
+            services::project_sync::init_from_bundle(&path, std::path::Path::new(&bundle)).await?;
+            services::add_project(state, path.display().to_string()).await?;
+            Ok(json!(path.display().to_string()))
+        }
+        "export_bundle" => {
+            let root = own_project(state, &p).await?;
+            let have: Vec<String> = arg::<Option<Vec<String>>>(&p, "have")?.unwrap_or_default();
+            let dir = state.paths.panel_dir.join("transfer");
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let file = dir.join(format!("{}.bundle", Uuid::new_v4()));
+            match services::project_sync::create_bundle(&root, &have, &file).await? {
+                Some(path) => Ok(json!({ "bundle_path": path.display().to_string() })),
+                None => Ok(json!({ "empty": true })),
+            }
+        }
+        "clone_project" => {
+            let url: String = arg(&p, "url")?;
+            let name = arg::<Option<String>>(&p, "name")?.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| url.trim_end_matches('/').trim_end_matches(".git").rsplit(['/', ':']).next().unwrap_or("project").to_string());
+            let path = server_projects_dir(state).join(project_slug(&name)?);
+            services::project_sync::clone_url(url.trim(), &path).await?;
             services::add_project(state, path.display().to_string()).await?;
             Ok(json!(path.display().to_string()))
         }
@@ -113,4 +147,17 @@ pub async fn dispatch(state: &AppState, origin: &str, method: &str, p: Value) ->
 /// Where a person's projects live on a server: `~/projects`.
 pub fn server_projects_dir(state: &AppState) -> std::path::PathBuf {
     state.paths.home_dir.join("projects")
+}
+
+/// A folder-safe project name.
+fn project_slug(name: &str) -> Result<String, String> {
+    let slug: String = name.trim().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c.to_ascii_lowercase() } else { '-' }).collect::<String>().trim_matches('-').to_string();
+    if slug.is_empty() || slug.len() > 64 { return Err("Give the project a short name using letters, digits or dashes.".into()); }
+    Ok(slug)
+}
+
+/// The `root` parameter, but only if it is one of this core's registered projects.
+async fn own_project(state: &AppState, params: &Value) -> Result<String, String> {
+    let root: String = arg(params, "root")?;
+    if services::list_projects(state).await?.contains(&root) { Ok(root) } else { Err("That is not one of your projects on this server.".into()) }
 }

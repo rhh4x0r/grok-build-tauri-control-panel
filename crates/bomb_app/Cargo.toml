@@ -26,6 +26,8 @@ grok_permissions = { path = "../grok_permissions" }
 grok_persistence = { path = "../grok_persistence" }
 grok_worktree = { path = "../grok_worktree" }
 serde.workspace = true
+sha2.workspace = true
+hex.workspace = true
 bomb_link = { path = "../bomb_link" }
 bomb_proto = { path = "../bomb_proto" }
 serde_json.workspace = true
