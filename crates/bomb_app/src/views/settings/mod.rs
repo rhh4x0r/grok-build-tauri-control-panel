@@ -4,7 +4,8 @@
 
 pub mod model;
 
-use gpui_kit::component::button::{Button, ButtonVariants};
+use crate::views::button::Button;
+use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
@@ -252,7 +253,7 @@ fn render_mcp_servers(cx: &mut App) -> AnyElement {
                 .child(Button::new("mcp-check-all").ghost().small().label("Check all").on_click(move |_, _, cx| {
                     check_model.update(cx, |s, cx| s.doctor(None, cx));
                 }))
-                .when_some(busy, |el, b| el.child(div().text_xs().text_color(ui.text_faint).child(b))),
+                .when_some(busy, |el, b| el.child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child(b))),
         )
         .children(servers.into_iter().map(|s| {
             let name = s.name.clone();
@@ -292,9 +293,9 @@ fn render_mcp_servers(cx: &mut App) -> AnyElement {
                         .gap_2()
                         .child(div().size(px(8.)).rounded_full().bg(dot))
                         .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(s.name.clone()))
-                        .child(div().text_xs().text_color(ui.text_faint).child(format!("{} · {}", s.kind, s.transport.as_str())))
+                        .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child(format!("{} · {}", s.kind, s.transport.as_str())))
                         .children(badges.into_iter().map(|b| {
-                            div().px_1p5().rounded(px(4.)).text_xs().bg(ui.ink(0.06)).text_color(ui.text_muted).child(b)
+                            div().px_1p5().rounded(px(4.)).text_size(px(crate::theme::Type::SMALL)).bg(ui.ink(0.06)).text_color(ui.text_muted).child(b)
                         }))
                         .child(div().flex_1())
                         .child(
@@ -308,10 +309,10 @@ fn render_mcp_servers(cx: &mut App) -> AnyElement {
                                 .checked(s.enabled)
                                 .on_click(move |v, _, cx| model_toggle.update(cx, |m, cx| m.toggle_mcp(n1.clone(), *v, cx))),
                         )
-                        .child(Button::new(SharedString::from(format!("chk-{name}"))).ghost().xsmall().label("Check").on_click(move |_, _, cx| {
+                        .child(Button::new(SharedString::from(format!("chk-{name}"))).ghost().small().label("Check").on_click(move |_, _, cx| {
                             model_check.update(cx, |m, cx| m.doctor(Some(n3.clone()), cx));
                         }))
-                        .child(Button::new(SharedString::from(format!("rm-{name}"))).ghost().xsmall().label("Remove").on_click(move |_, window, cx| {
+                        .child(Button::new(SharedString::from(format!("rm-{name}"))).ghost().small().label("Remove").on_click(move |_, window, cx| {
                             let m = model_remove.clone();
                             let n = n4.clone();
                             window.open_alert_dialog(cx, move |dlg, _, _| {
@@ -324,8 +325,8 @@ fn render_mcp_servers(cx: &mut App) -> AnyElement {
                             });
                         })),
                 )
-                .when_some(s.description.clone(), |el, d| el.child(div().text_xs().text_color(ui.text_muted).child(d)))
-                .when(!msgs.is_empty(), |el| el.child(div().text_xs().text_color(dot).child(msgs)))
+                .when_some(s.description.clone(), |el, d| el.child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(d)))
+                .when(!msgs.is_empty(), |el| el.child(div().text_size(px(crate::theme::Type::SMALL)).text_color(dot).child(msgs)))
         }))
         .into_any_element()
 }
@@ -351,9 +352,9 @@ fn render_credentials(cx: &mut App) -> AnyElement {
                 .items_center()
                 .gap_3()
                 .child(div().text_sm().font_family(ui.mono.clone()).child(c.key.clone()))
-                .child(div().text_xs().text_color(ui.text_faint).child(c.masked.clone()))
+                .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child(c.masked.clone()))
                 .child(div().flex_1())
-                .child(Button::new(SharedString::from(format!("cred-rm-{}", c.key))).ghost().xsmall().label("Remove").on_click(move |_, _, cx| {
+                .child(Button::new(SharedString::from(format!("cred-rm-{}", c.key))).ghost().small().label("Remove").on_click(move |_, _, cx| {
                     m.update(cx, |s, cx| s.remove_credential(k.clone(), cx));
                 }))
         }))
@@ -433,7 +434,7 @@ fn render_memory(cx: &mut App) -> AnyElement {
                 .child(Button::new("mem-export").ghost().small().label("Export .md").on_click(move |_, _, cx| {
                     export_model.update(cx, |s, cx| s.export_memory(cx));
                 }))
-                .when_some(busy, |el, b| el.child(div().text_xs().text_color(ui.text_faint).child(b))),
+                .when_some(busy, |el, b| el.child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child(b))),
         )
         .child(
             div()
@@ -461,14 +462,14 @@ fn render_memory(cx: &mut App) -> AnyElement {
                                 .items_center()
                                 .gap_2()
                                 .children(e.tags.iter().map(|t| {
-                                    div().px_1p5().rounded(px(4.)).text_xs().bg(ui.ink(0.06)).text_color(ui.text_muted).child(t.clone())
+                                    div().px_1p5().rounded(px(4.)).text_size(px(crate::theme::Type::SMALL)).bg(ui.ink(0.06)).text_color(ui.text_muted).child(t.clone())
                                 }))
-                                .child(div().text_xs().text_color(ui.text_faint).child(e.updated_at.format("%b %-d, %Y").to_string()))
+                                .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child(e.updated_at.format("%b %-d, %Y").to_string()))
                                 .child(div().flex_1())
-                                .child(Button::new(SharedString::from(format!("mem-edit-{}", e.id))).ghost().xsmall().label("Edit").on_click(move |_, window, cx| {
+                                .child(Button::new(SharedString::from(format!("mem-edit-{}", e.id))).ghost().small().label("Edit").on_click(move |_, window, cx| {
                                     m_edit.update(cx, |s, cx| s.edit_memory(&entry, window, cx));
                                 }))
-                                .child(Button::new(SharedString::from(format!("mem-rm-{}", e.id))).ghost().xsmall().label("Delete").on_click(move |_, _, cx| {
+                                .child(Button::new(SharedString::from(format!("mem-rm-{}", e.id))).ghost().small().label("Delete").on_click(move |_, _, cx| {
                                     m_rm.update(cx, |s, cx| s.remove_memory(id.clone(), cx));
                                 })),
                         )
@@ -528,9 +529,9 @@ fn render_worktrees(cx: &mut App) -> AnyElement {
                         .items_center()
                         .gap_2()
                         .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(crate::models::app::project_name(&repo)))
-                        .child(div().text_xs().text_color(ui.text_faint).child(repo.clone()))
+                        .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child(repo.clone()))
                         .child(div().flex_1())
-                        .child(Button::new(SharedString::from(format!("prune-{repo}"))).ghost().xsmall().label("Prune").on_click(move |_, _, cx| {
+                        .child(Button::new(SharedString::from(format!("prune-{repo}"))).ghost().small().label("Prune").on_click(move |_, _, cx| {
                             m_prune.update(cx, |s, cx| s.prune_worktrees(r1.clone(), cx));
                         })),
                 )
@@ -546,13 +547,13 @@ fn render_worktrees(cx: &mut App) -> AnyElement {
                         .pl_3()
                         .h(px(28.))
                         .child(div().text_sm().font_family(ui.mono.clone()).child(w.name.clone()))
-                        .when_some(w.branch.clone(), |el, b| el.child(div().text_xs().text_color(ui.text_muted).child(b)))
-                        .when(w.locked, |el| el.child(div().text_xs().text_color(ui.warning).child("locked")))
+                        .when_some(w.branch.clone(), |el, b| el.child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(b)))
+                        .when(w.locked, |el| el.child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.warning).child("locked")))
                         .child(div().flex_1())
-                        .child(Button::new(SharedString::from(format!("diff-{}", w.id))).ghost().xsmall().label("Diff").on_click(move |_, _, cx| {
+                        .child(Button::new(SharedString::from(format!("diff-{}", w.id))).ghost().small().label("Diff").on_click(move |_, _, cx| {
                             m_diff.update(cx, |s, cx| s.show_diff(path.clone(), cx));
                         }))
-                        .child(Button::new(SharedString::from(format!("wt-rm-{}", w.id))).ghost().xsmall().label("Remove").on_click(move |_, window, cx| {
+                        .child(Button::new(SharedString::from(format!("wt-rm-{}", w.id))).ghost().small().label("Remove").on_click(move |_, window, cx| {
                             let m = m_rm.clone();
                             let (r, n) = (repo_rm.clone(), name_rm.clone());
                             window.open_alert_dialog(cx, move |dlg, _, _| {
@@ -571,7 +572,7 @@ fn render_worktrees(cx: &mut App) -> AnyElement {
                         .gap_2()
                         .pl_3()
                         .child(div().w(px(240.)).child(Input::new(&wt_name)))
-                        .child(Button::new(SharedString::from(format!("wt-create-{repo}"))).outline().xsmall().label("Create").on_click(move |_, window, cx| {
+                        .child(Button::new(SharedString::from(format!("wt-create-{repo}"))).outline().small().label("Create").on_click(move |_, window, cx| {
                             m_create.update(cx, |s, cx| s.create_worktree(r2.clone(), window, cx));
                         })),
                 )
@@ -588,9 +589,9 @@ fn render_worktrees(cx: &mut App) -> AnyElement {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(div().text_xs().text_color(ui.text_muted).child(format!("diff · {path}")))
+                            .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(format!("diff · {path}")))
                             .child(div().flex_1())
-                            .child(Button::new("diff-close").ghost().xsmall().label("Close").on_click(move |_, _, cx| {
+                            .child(Button::new("diff-close").ghost().small().label("Close").on_click(move |_, _, cx| {
                                 m.update(cx, |s, cx| {
                                     s.diff_preview = None;
                                     cx.notify();
@@ -606,7 +607,7 @@ fn render_worktrees(cx: &mut App) -> AnyElement {
                             .border_color(ui.border)
                             .max_h(px(360.))
                             .overflow_hidden()
-                            .text_xs()
+                            .text_size(px(crate::theme::Type::SMALL))
                             .font_family(ui.mono.clone())
                             .whitespace_normal()
                             .child(text),
@@ -684,9 +685,9 @@ fn render_rules(cx: &mut App) -> AnyElement {
         .flex_col()
         .gap_2()
         .w_full()
-        .child(div().text_xs().text_color(ui.text_muted).child("Allow"))
+        .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child("Allow"))
         .child(Textarea::new(&allow))
-        .child(div().text_xs().text_color(ui.text_muted).child("Deny"))
+        .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child("Deny"))
         .child(Textarea::new(&deny))
         .child(div().flex().child(Button::new("rules-save").small().label("Save rules").on_click(move |_, _, cx| {
             save_model.update(cx, |s, cx| s.save_rules(cx));
@@ -720,8 +721,8 @@ fn render_runtime(cx: &mut App) -> AnyElement {
             .gap_3()
             .h(px(22.))
             .items_center()
-            .child(div().w(px(140.)).text_xs().text_color(ui.text_faint).child(k.to_string()))
-            .child(div().text_xs().font_family(ui.mono.clone()).text_color(ui.text).child(v))
+            .child(div().w(px(140.)).text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child(k.to_string()))
+            .child(div().text_size(px(crate::theme::Type::SMALL)).font_family(ui.mono.clone()).text_color(ui.text).child(v))
     };
     div()
         .flex()
@@ -781,7 +782,7 @@ fn render_protocol_log(cx: &mut App) -> AnyElement {
         .border_color(ui.border)
         .max_h(px(320.))
         .overflow_hidden()
-        .text_xs()
+        .text_size(px(crate::theme::Type::SMALL))
         .font_family(ui.mono.clone())
         .text_color(ui.text_muted)
         .whitespace_normal()
@@ -808,7 +809,7 @@ fn routing_page() -> SettingPage {
                         .child(Button::new("routing-save-key").label("Save key").on_click({let model=model.clone();move |_,w,cx|model.update(cx,|m,cx|m.save_routing_key(false,w,cx))}))
                         .child(Button::new("routing-remove-key").ghost().label("Remove saved key").on_click(move |_,w,cx|model.update(cx,|m,cx|m.save_routing_key(true,w,cx)))))
 
-                    .child(div().text_xs().child(status)).into_any_element()
+                    .child(div().text_size(px(crate::theme::Type::SMALL)).child(status)).into_any_element()
             })))
         .group(SettingGroup::new().title("Test connection")
             .description("After saving your key, verify access to JEV. This sends a small billed test request without project context.")

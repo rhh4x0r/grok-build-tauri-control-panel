@@ -87,7 +87,7 @@ pub fn status_line(
             .overflow_hidden()
             .text_ellipsis()
             .whitespace_nowrap()
-            .text_xs()
+            .text_size(px(crate::theme::Type::SMALL))
             .font_weight(FontWeight::MEDIUM)
             .text_color(if p.visible() { ui.text } else { ui.text_faint })
             .child(label)
@@ -99,7 +99,7 @@ pub fn status_line(
             .overflow_hidden()
             .text_ellipsis()
             .whitespace_nowrap()
-            .text_xs()
+            .text_size(px(crate::theme::Type::SMALL))
             .text_color(ui.text_muted)
             .child(s)
             .into_any_element()
@@ -123,7 +123,7 @@ pub fn status_line(
         bits.push(dot(ui));
         bits.push(
             div()
-                .text_xs()
+                .text_size(px(crate::theme::Type::SMALL))
                 .text_color(ui.warning)
                 .child("no signal for a while")
                 .into_any_element(),
@@ -175,7 +175,7 @@ pub fn status_line(
                             .px_2()
                             .py_0p5()
                             .rounded(px(6.))
-                            .text_xs()
+                            .text_size(px(crate::theme::Type::SMALL))
                             .text_color(toggle_color)
                             .cursor_pointer()
                             .hover(move |s| s.bg(hover))
@@ -217,7 +217,7 @@ pub fn status_line(
 fn dot(ui: &Ui) -> AnyElement {
     let _ = ca;
     div()
-        .text_xs()
+        .text_size(px(crate::theme::Type::SMALL))
         .text_color(ui.text_faint)
         .child("·")
         .into_any_element()

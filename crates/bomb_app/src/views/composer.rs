@@ -3,12 +3,13 @@
 //! turn runs. Enter sends, Shift+Enter inserts a newline, Shift+Tab cycles
 //! the approval mode.
 
+use crate::views::button::Button;
 use std::sync::Arc;
 
 use base64::Engine;
 use bomb_core::services::ImageInput;
 use gpui_kit::assets::IconName as Lucide;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
@@ -79,6 +80,7 @@ pub struct ComposerView {
     foundry_result: Option<(String, String, Option<uuid::Uuid>)>,
     foundry_undo: Option<(String, String, Option<uuid::Uuid>)>,
     foundry_message: Option<String>,
+    placeholder: &'static str,
 }
 
 impl ComposerView {
@@ -87,7 +89,7 @@ impl ComposerView {
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("Do anything…")
-                .auto_grow(1, 10)
+                .auto_grow(3, 14)
                 .submit_on_enter(true)
         });
         cx.subscribe_in(
@@ -154,6 +156,7 @@ impl ComposerView {
             foundry_result: None,
             foundry_undo: None,
             foundry_message: None,
+            placeholder: "Do anything…",
         }
     }
 
@@ -197,8 +200,8 @@ impl ComposerView {
             .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Set up this chat"))
             .child(div().text_sm().child(self.destination_message.clone().unwrap_or_default()));
         if let Some(root)=self.destination_init.clone() {
-            panel=panel.child(div().text_xs().text_color(ui.text_muted).child(root.clone()))
-                .child(div().text_xs().text_color(ui.text_muted).child("Initialize Git creates an empty initial commit. Existing files stay uncommitted and won’t appear in the isolated branch until you commit them."))
+            panel=panel.child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(root.clone()))
+                .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child("Initialize Git creates an empty initial commit. Existing files stay uncommitted and won’t appear in the isolated branch until you commit them."))
                 .child(Button::new("destination-init").small().label("Initialize Git").disabled(self.destination_busy).on_click(cx.listener(move |v,_,_,cx| {
                     v.destination_busy=true;let root=root.clone();let weak=cx.entity().downgrade();
                     crate::runtime::spawn_service(cx,async move {bomb_core::services::thread_setup::initialize(&root).await},move |result,cx|{let _=weak.update(cx,|v,cx|{
@@ -270,14 +273,14 @@ impl ComposerView {
             ("implementation-plus-verification","Implementation + verification"),("production-readiness-audit","Production readiness"),("refactor-migration","Refactor / migration"),("content-creation","Content creation"),("mixed-workflow","Mixed workflow")],cx);
         let context_label = if self.foundry_more { "Additional context".to_owned() } else if !self.foundry_sources.is_empty() || !self.foundry_autonomy.read(cx).value().is_empty() { "Context added · Edit".to_owned() } else { "Add context · optional".to_owned() };
         let mut panel=div().id("foundry-intake-body").w_full().max_h(px(300.)).overflow_y_scroll().p_4().flex().flex_col().gap_3()
-            .child(div().text_xs().text_color(ui.text_muted).child("How much detail?"))
+            .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child("How much detail?"))
             .child(div().flex().gap_2()
                 .child(Button::new("foundry-fast").outline().small().flex_1().icon(Lucide::Zap).label("Fast Draft").when(self.foundry_depth=="fast-draft",|b|b.primary()).on_click(cx.listener(|v,_,_,cx|{v.foundry_depth="fast-draft".into();cx.notify();})))
                 .child(Button::new("foundry-full").outline().small().flex_1().icon(Lucide::Layers).label("Full Project").when(self.foundry_depth=="full-project",|b|b.primary()).on_click(cx.listener(|v,_,_,cx|{v.foundry_depth="full-project".into();cx.notify();}))))
-            .child(div().text_xs().text_color(ui.text_faint).child(if self.foundry_depth=="fast-draft" {"Focused instructions for a smaller task."} else {"Detailed phases, checks, and a clear handoff."}))
-            .child(div().text_xs().text_color(ui.text_muted).child("What are you doing?"))
+            .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child(if self.foundry_depth=="fast-draft" {"Focused instructions for a smaller task."} else {"Detailed phases, checks, and a clear handoff."}))
+            .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child("What are you doing?"))
             .child(work).child(other)
-            .child(div().flex().items_center().gap_2().text_xs().text_color(ui.text_muted)
+            .child(div().flex().items_center().gap_2().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted)
                 .child(crate::views::brand::brand_mark(&backend,14.,true,ui)).child(format!("For {target} · follows your selected provider")))
             .child(Button::new("foundry-more").ghost().small().icon(if self.foundry_more {Lucide::ChevronDown} else {Lucide::ChevronRight}).label(context_label).on_click(cx.listener(|v,_,_,cx|{v.foundry_more = !v.foundry_more;cx.notify();})));
         if self.foundry_more {
@@ -296,7 +299,7 @@ impl ComposerView {
                 panel=panel.child(Input::new(&self.foundry_memory_search));
                 let query=self.foundry_memory_search.read(cx).value().to_lowercase();
                 let entries: Vec<_>=self.foundry_memory.iter().filter(|m|format!("{} {} {}",m.scope,m.content,m.tags.join(" ")).to_lowercase().contains(&query)).collect();
-                if entries.is_empty() { panel=panel.child(div().text_xs().text_color(ui.text_muted).child(if self.foundry_memory_loading {"Loading saved memories…"} else {"No matching saved memories."})); }
+                if entries.is_empty() { panel=panel.child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(if self.foundry_memory_loading {"Loading saved memories…"} else {"No matching saved memories."})); }
                 let mut list=div().id("enhance-memory-list").max_h(px(150.)).overflow_y_scroll().flex().flex_col().gap_1();
                 for entry in entries.iter().take(50) {
                     let value=format!("Saved Bomb Code memory [{}] (user-selected reference):\n{}",entry.scope,entry.content);
@@ -311,7 +314,7 @@ impl ComposerView {
             let source_view=if snapshot {
                 let title=value.lines().next().unwrap_or("Source").to_string();
                 let note=if value.contains("Contents not included:") {"File reference · contents not included".to_owned()} else {format!("Included · {} characters",value.chars().count())};
-                div().flex().flex_col().gap_1().text_xs().child(div().overflow_hidden().text_ellipsis().whitespace_nowrap().child(title)).child(div().text_color(ui.text_faint).child(note)).into_any_element()
+                div().flex().flex_col().gap_1().text_size(px(crate::theme::Type::SMALL)).child(div().overflow_hidden().text_ellipsis().whitespace_nowrap().child(title)).child(div().text_color(ui.text_faint).child(note)).into_any_element()
             } else {Input::new(input).into_any_element()};
             let weak=cx.entity().downgrade();let selected=role.clone();
             panel=panel.child(div().flex().items_center().gap_1()
@@ -324,7 +327,7 @@ impl ComposerView {
                 }))
                 .child(Button::new(SharedString::from(format!("source-remove-{i}"))).ghost().small().label("Remove").on_click(cx.listener(move |v,_,_,cx| {if i<v.foundry_sources.len() {v.foundry_sources.remove(i);}cx.notify();}))));
         }
-            panel=panel.child(div().text_xs().text_color(ui.text_faint).child("Selected text files and memory are included. Binary or large files are linked for later inspection."));
+            panel=panel.child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child("Selected text files and memory are included. Binary or large files are linked for later inspection."));
         }
         let card=div().w_full().max_w(px(520.)).rounded(px(16.)).bg(linear_gradient(145., linear_color_stop(if ui.dark {hsla(0.64,0.10,0.15,0.98)} else {hsla(0.64,0.15,0.99,1.)},0.), linear_color_stop(if ui.dark {hsla(0.64,0.07,0.09,0.98)} else {hsla(0.64,0.12,0.95,1.)},1.))).border_1().border_color(ui.border).shadow_lg().overflow_hidden().flex().flex_col()
             .child(div().flex().items_center().gap_2().px_4().py_3().border_b_1().border_color(ui.border)
@@ -333,7 +336,7 @@ impl ComposerView {
                 .child(Button::new("foundry-close").ghost().small().icon(Lucide::X).label("Close").on_click(cx.listener(|v,_,_,cx|{v.foundry_setup=false;cx.notify();}))))
             .child(panel)
             .child(div().flex().items_center().flex_wrap().gap_3().px_4().py_3().border_t_1().border_color(ui.border)
-                .child(div().flex_1().text_xs().text_color(ui.text_faint).child(if self.foundry_work_type.is_empty() {"Choose a work type to continue."} else {"Review the result before sending."}))
+                .child(div().flex_1().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child(if self.foundry_work_type.is_empty() {"Choose a work type to continue."} else {"Review the result before sending."}))
                 .child(Button::new("foundry-generate").primary().small().icon(Lucide::Sparkles).label("Enhance Prompt").disabled(self.foundry_source_loading || self.foundry_work_type.is_empty() || self.input.read(cx).value().trim().is_empty()).on_click(cx.listener(|v,_,_,cx|v.run_foundry(cx)))));
         div().w_full().max_w(px(Layout::COMPOSER_MAX)).flex().justify_end().mb_2().child(card).into_any_element()
     }
@@ -399,13 +402,13 @@ impl ComposerView {
                     .gap_2()
                     .px_2()
                     .py_1()
-                    .text_size(px(11.))
+                    .text_size(px(crate::theme::Type::CAPTION))
                     .text_color(ui.text_faint)
                     .child(super::brand::brand_mark(&backend, 13., true, ui))
                     .child("Commands · ↑ ↓ to navigate · Tab or Enter to select"),
             );
         if commands.is_empty() {
-            menu = menu.child(div().px_2().py_2().text_size(px(12.)).text_color(ui.text_muted)
+            menu = menu.child(div().px_2().py_2().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted)
                 .child(if catalog.is_null() { "Commands load when this provider connects. You can still type a command and send it." } else { "No matching commands" }));
         }
         for (index, command) in commands.into_iter().enumerate() {
@@ -432,21 +435,21 @@ impl ComposerView {
                                 .flex()
                                 .items_center()
                                 .justify_between()
-                                .text_size(px(12.))
+                                .text_size(px(crate::theme::Type::SMALL))
                                 .text_color(ui.text)
                                 .child(format!("/{}", command.name))
                                 .when(index == selected, |el| el.child("↵")),
                         )
                         .child(
                             div()
-                                .text_size(px(11.))
+                                .text_size(px(crate::theme::Type::CAPTION))
                                 .text_color(ui.text_muted)
                                 .child(command.description),
                         )
                         .when_some(command.hint, |el, hint| {
                             el.child(
                                 div()
-                                    .text_size(px(10.))
+                                    .text_size(px(crate::theme::Type::CAPTION))
                                     .text_color(ui.text_faint)
                                     .child(hint),
                             )
@@ -511,7 +514,7 @@ impl ComposerView {
                 .px(px(6.))
                 .h(px(24.))
                 .rounded(px(6.))
-                .text_size(px(11.))
+                .text_size(px(crate::theme::Type::CAPTION))
                 .text_color(color)
                 .hover(move |s| s.bg(hover))
                 .child(
@@ -885,7 +888,7 @@ impl ComposerView {
                 .child(
                     div()
                         .min_w_0()
-                        .text_size(px(12.))
+                        .text_size(px(crate::theme::Type::SMALL))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(if open {
                             ui.text
@@ -902,7 +905,7 @@ impl ComposerView {
                         div()
                             .min_w_0()
                             .flex_shrink(1000.)
-                            .text_size(px(12.))
+                            .text_size(px(crate::theme::Type::SMALL))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(Ui::alpha(ui.text_muted, 0.7))
                             .overflow_hidden()
@@ -951,7 +954,7 @@ impl ComposerView {
                     .flex()
                     .flex_col()
                     .w(px(304.))
-                    .text_size(px(13.))
+                    .text_size(px(crate::theme::Type::BODY))
                     .text_color(ui.text);
 
                 // ── tab strip ────────────────────────────────────────
@@ -1141,7 +1144,7 @@ impl ComposerView {
                                             .child(
                                                 div()
                                                     .flex_shrink_0()
-                                                    .text_size(px(12.5))
+                                                    .text_size(px(crate::theme::Type::SMALL))
                                                     .font_weight(FontWeight::MEDIUM)
                                                     .text_color(ui.text)
                                                     .child(
@@ -1154,7 +1157,7 @@ impl ComposerView {
                                             .child(
                                                 div()
                                                     .min_w_0()
-                                                    .text_size(px(11.))
+                                                    .text_size(px(crate::theme::Type::CAPTION))
                                                     .text_color(ui.text_muted)
                                                     .overflow_hidden()
                                                     .text_ellipsis()
@@ -1170,7 +1173,7 @@ impl ComposerView {
                                                 .py(px(1.))
                                                 .rounded(px(5.))
                                                 .bg(ink05)
-                                                .text_size(px(10.))
+                                                .text_size(px(crate::theme::Type::CAPTION))
                                                 .font_family(ui.mono.clone())
                                                 .text_color(ui.text_muted)
                                                 .child(h),
@@ -1208,7 +1211,7 @@ impl ComposerView {
                         div()
                             .px_2()
                             .py_2()
-                            .text_xs()
+                            .text_size(px(crate::theme::Type::SMALL))
                             .text_color(ui.text_muted)
                             .whitespace_normal()
                             .child(if message.is_empty() {
@@ -1251,7 +1254,7 @@ impl ComposerView {
                                 .px(px(8.))
                                 .pt(px(6.))
                                 .pb(px(4.))
-                                .text_size(px(10.))
+                                .text_size(px(crate::theme::Type::CAPTION))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(ui.text_muted)
                                 .child(tracked_upper("Reasoning")),
@@ -1269,7 +1272,7 @@ impl ComposerView {
                                 .h(px(30.))
                                 .px(px(8.))
                                 .rounded(px(8.))
-                                .text_size(px(13.))
+                                .text_size(px(crate::theme::Type::BODY))
                                 .text_color(if !applies {
                                     ui.text_faint
                                 } else if on {
@@ -1294,7 +1297,7 @@ impl ComposerView {
                                     el.child(
                                         div()
                                             .flex_shrink_0()
-                                            .text_size(px(10.))
+                                            .text_size(px(crate::theme::Type::CAPTION))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(ui.text_muted)
                                             .child("Default"),
@@ -1317,7 +1320,7 @@ impl ComposerView {
                                 .px(px(8.))
                                 .pt(px(2.))
                                 .pb(px(4.))
-                                .text_size(px(10.))
+                                .text_size(px(crate::theme::Type::CAPTION))
                                 .text_color(ui.text_faint)
                                 .child("Applies to new conversations"),
                         );
@@ -1352,7 +1355,7 @@ impl ComposerView {
                         .items_center()
                         .h(px(32.))
                         .px(px(2.))
-                        .text_size(px(12.))
+                        .text_size(px(crate::theme::Type::SMALL))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(Ui::alpha(ui.text_muted, 0.7))
                         .child(label),
@@ -1403,7 +1406,7 @@ impl ComposerView {
                         if mode == "yolo" { ui.warning } else { ui.text },
                         0.06,
                     ))
-                    .text_size(px(12.))
+                    .text_size(px(crate::theme::Type::SMALL))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(if mode == "yolo" {
                         ui.warning
@@ -1460,8 +1463,8 @@ impl ComposerView {
                                         .gap(px(3.))
                                         .child(
                                             div()
-                                                .text_size(px(12.))
-                                                .line_height(px(16.))
+                                                .text_size(px(crate::theme::Type::SMALL))
+                                                .line_height(px(18.))
                                                 .font_weight(FontWeight::MEDIUM)
                                                 .text_color(if m == "yolo" {
                                                     ui.warning
@@ -1472,8 +1475,8 @@ impl ComposerView {
                                         )
                                         .child(
                                             div()
-                                                .text_size(px(11.))
-                                                .line_height(px(15.))
+                                                .text_size(px(crate::theme::Type::CAPTION))
+                                                .line_height(px(16.))
                                                 .text_color(ui.text_muted)
                                                 .whitespace_normal()
                                                 .child(description.clone()),
@@ -1588,6 +1591,19 @@ fn mode_presentation(mode: &str) -> (&'static str, Lucide, &'static str) {
 impl Render for ComposerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.apply_routing_result(window, cx);
+        // Say what sending will do: on the project page a message starts a new thread.
+        let placeholder = {
+            let m = self.model.read(cx);
+            if m.selected.is_none() && m.active_project.is_some() && !m.prefs.temporary {
+                "Describe a feature or fix — sending starts a new thread on its own copy of the project…"
+            } else {
+                "Do anything…"
+            }
+        };
+        if self.placeholder != placeholder {
+            self.placeholder = placeholder;
+            self.input.update(cx, |s, cx| s.set_placeholder(placeholder, window, cx));
+        }
         if let Some((request,thread))=self.review_loop_result.take() {
             if self.model.read(cx).selected==Some(thread) && self.input.read(cx).value().as_ref()==request {
                 self.input.update(cx,|s,cx|s.set_value("",window,cx));
@@ -1736,8 +1752,8 @@ impl Render for ComposerView {
             .when_some(destination, |el,panel|el.child(panel))
             .when_some(setup, |el,panel|el.child(panel))
             .when(self.foundry_busy || self.foundry_message.is_some() || self.foundry_undo.is_some(), |el|el.child(div().w_full().max_w(px(Layout::COMPOSER_MAX)).flex().items_center().flex_wrap().gap_2().pb_2()
-                .when(self.foundry_busy, |el|el.child(super::motion::breathe("enhance-working",0.45,div().flex().items_center().gap_2().text_xs().text_color(ui.text_muted).child(Icon::from(Lucide::Sparkles).size(px(12.))).child("Enhancing your prompt… Your draft is safe."))))
-                .when_some(self.foundry_message.clone(), |el,message|el.child(div().text_xs().text_color(ui.text_muted).child(message)))
+                .when(self.foundry_busy, |el|el.child(super::motion::breathe("enhance-working",0.45,div().flex().items_center().gap_2().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(Icon::from(Lucide::Sparkles).size(px(12.))).child("Enhancing your prompt… Your draft is safe."))))
+                .when_some(self.foundry_message.clone(), |el,message|el.child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(message)))
                 .when(self.foundry_undo.is_some(), |el|el.child(Button::new("undo-foundry").ghost().small().label("Undo").on_click(cx.listener(|v,_,window,cx| {
                     if let Some((original,_,_)) = v.foundry_undo.take() { v.input.update(cx,|s,cx|s.set_value(original,window,cx)); }
                     v.foundry_message = None; cx.notify();
@@ -1791,6 +1807,43 @@ impl Render for ComposerView {
                     ))
                     .child(
                         div()
+                            .flex()
+                            .items_center()
+                            // Context bar: where this message will work, attached to the top of the pill.
+                            .min_h(px(38.)).flex_wrap()
+                            .gap(px(Layout::SPACE_XS))
+                            .mx(px(14.))
+                            .px(px(8.))
+                            .py(px(4.))
+                            .rounded_t(px(14.))
+                            .border_1()
+                            .border_color(ui.pill_border())
+                            .bg(ui.ink(0.035))
+                            .child(footer_label(Lucide::MessageCircle, location_label, &ui))
+                            .when(worktree_on, |el| {
+                                el.child(footer_label(
+                                    Lucide::GitBranch,
+                                    if self.model.read(cx).active_workspace.as_ref().and_then(|id|self.model.read(cx).workspaces.iter().find(|w|&w.id==id)).is_some_and(|w|w.shared_checkout){"Shared checkout"}else{"Isolated branch"}.into(),
+                                    &ui,
+                                ))
+                            })
+                            .when_some(branch, |el, b| {
+                                el.child(footer_label(Lucide::GitBranch, b, &ui))
+                            })
+                            .when(!has_thread && new_target, |el| el.child(self.location.clone()))
+                            .child(div().flex_1())
+                            .when(starting, |el| {
+                                el.child(
+                                    div()
+                                        .text_size(px(crate::theme::Type::CAPTION))
+                                        .text_color(ui.text_faint)
+                                        .child("starting agent…"),
+                                )
+                            })
+                            .children(context_ring),
+                    )
+                    .child(
+                        div()
                             .id("composer-frame")
                             .w_full()
                             .flex()
@@ -1809,23 +1862,29 @@ impl Render for ComposerView {
                             .drag_over::<ExternalPaths>(move |s, _, _, _| s.border_color(hover))
                             .children(tray)
                             .child(
+                                // Message on top at full width, controls underneath.
                                 div()
                                     .flex()
-                                    .items_end()
-                                    .gap(px(Layout::SPACE_SM))
-                                    .pl(px(16.))
-                                    .pr(px(8.))
-                                    .py(px(7.))
-                                    .min_h(px(47.))
+                                    .flex_col()
+                                    .gap(px(6.))
+                                    .pl(px(18.))
+                                    .pr(px(10.))
+                                    .pt(px(14.))
+                                    .pb(px(8.))
                                     .child(
                                         div()
-                                            .flex_1()
+                                            .id("composer-text")
+                                            .w_full()
                                             .min_w_0()
-                                            .py(px(5.))
-                                            .text_size(px(14.))
-                                            .line_height(px(22.75))
+                                            .min_h(px(76.))
+                                            .cursor_text()
+                                            .on_click(cx.listener(|this, _, window, cx| this.focus(window, cx)))
+                                            .text_size(px(Layout::BODY_SIZE))
+                                            .line_height(px(Layout::BODY_LINE))
                                             .child(
                                                 Textarea::new(&self.input)
+                                                    .text_size(px(Layout::BODY_SIZE))
+                                                    .line_height(px(Layout::BODY_LINE))
                                                     .appearance(false)
                                                     .bordered(false),
                                             ),
@@ -1834,16 +1893,9 @@ impl Render for ComposerView {
                                         div()
                                             .flex()
                                             .items_center()
-                                            .flex_shrink_0()
-                                            .max_w(relative(0.8))
+                                            .w_full()
                                             .flex_wrap()
-                                            .justify_end()
-                                            .gap(px(2.))
-                                            .child(model_picker)
-                                            .child(routing_control)
-                                            .child(self.speed.clone())
-                                            .child(mode_picker)
-                                            .children(mcp_picker)
+                                            .gap(px(4.))
                                             .child(
                                                 div()
                                                     .id("attach")
@@ -1864,53 +1916,30 @@ impl Render for ComposerView {
                                                             .child(Icon::from(Lucide::Paperclip)),
                                                     ),
                                             )
+                                            .child(mode_picker)
+                                            .children(mcp_picker)
                 .child(Button::new("run-foundry").ghost().small().icon(Lucide::Sparkles).rounded_full().selected(self.foundry_setup)
-                    .label(if self.foundry_busy { "Enhancing…" } else { "Enhance Prompt" })
+                    .tooltip("Rewrite this message into a clearer prompt before sending")
+                    .label(if self.foundry_busy { "Enhancing…" } else { "Enhance" })
                     .disabled(self.review_loop_busy || self.foundry_busy || busy || starting || self.input.read(cx).value().trim().is_empty() || !self.model.read(cx).model_ready())
                     .on_click(cx.listener(|v,_,_,cx| {
                         if v.foundry_target.is_empty() { v.foundry_target = match v.model.read(cx).prefs.backend.as_str() { "grok"=>"grok-build", "codex"=>"openai-codex", "claude"=>"claude-code", _=>"general-assistant" }.into(); }
                         v.foundry_setup = !v.foundry_setup;v.foundry_message=None;cx.notify();
                     })))
                 .child(Button::new("run-review-loop").ghost().small().icon(Lucide::Repeat).rounded_full()
-                    .label(if self.review_loop_busy {"Starting loop…"} else {"Run with review loop"})
+                    .label(if self.review_loop_busy {"Starting loop…"} else {"Review loop"})
                     .disabled(self.review_loop_busy || self.foundry_busy || self.foundry_source_loading || busy || starting || self.input.read(cx).value().trim().is_empty() || !self.model.read(cx).model_ready())
                     .tooltip("Plan, build, independently review, and revise. Uses your current approval mode; pauses for final approval.")
                     .on_click(cx.listener(|v,_,_,cx|v.run_review_loop(cx))))
+                                            .child(div().flex_1().min_w(px(8.)))
+                                            .child(model_picker)
+                                            .child(routing_control)
+                                            .child(self.speed.clone())
                                             .child(div().w(px(6.)))
                                             .child(send_button),
                                     ),
                             ),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .min_h(px(24.)).flex_wrap()
-                            .gap(px(Layout::SPACE_XS))
-                            .px(px(10.))
-                            .child(footer_label(Lucide::MessageCircle, location_label, &ui))
-                            .when(worktree_on, |el| {
-                                el.child(footer_label(
-                                    Lucide::GitBranch,
-                                    if self.model.read(cx).active_workspace.as_ref().and_then(|id|self.model.read(cx).workspaces.iter().find(|w|&w.id==id)).is_some_and(|w|w.shared_checkout){"Shared checkout"}else{"Isolated branch"}.into(),
-                                    &ui,
-                                ))
-                            })
-                            .when_some(branch, |el, b| {
-                                el.child(footer_label(Lucide::GitBranch, b, &ui))
-                            })
-                            .when(!has_thread && new_target, |el| el.child(self.location.clone()))
-                            .child(div().flex_1())
-                            .when(starting, |el| {
-                                el.child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(ui.text_faint)
-                                        .child("starting agent…"),
-                                )
-                            })
-                            .children(context_ring),
-                    ),
             )
     }
 }
@@ -1989,15 +2018,15 @@ fn footer_label(icon: Lucide, text: String, ui: &Ui) -> AnyElement {
     div()
         .flex()
         .items_center()
-        .h(px(20.))
-        .max_w(px(160.))
+        .h(px(28.))
+        .max_w(px(200.))
         .min_w_0()
         .gap(px(6.))
         .px(px(8.))
-        .text_size(px(12.))
+        .text_size(px(crate::theme::Type::BODY))
         .font_weight(FontWeight::MEDIUM)
         .text_color(color)
-        .child(div().size(px(12.)).flex_shrink_0().child(Icon::from(icon)))
+        .child(div().size(px(14.)).flex_shrink_0().child(Icon::from(icon)))
         .child(
             div()
                 .min_w_0()

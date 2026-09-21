@@ -141,7 +141,7 @@ impl Render for FileTree {
             .p_2()
             .child(
                 div()
-                    .text_xs()
+                    .text_size(px(crate::theme::Type::SMALL))
                     .text_color(ui.text_muted)
                     .whitespace_normal()
                     .child(
@@ -171,7 +171,7 @@ impl Render for FileTree {
                             .pl(px(8. + depth as f32 * 14.))
                             .pr_2()
                             .rounded(px(4.))
-                            .text_size(px(12.))
+                            .text_size(px(crate::theme::Type::SMALL))
                             .cursor_pointer()
                             .when(selected, |el| el.bg(ui.hover))
                             .hover(move |el| el.bg(ui.hover))
@@ -208,11 +208,11 @@ impl Render for FileTree {
                     })),
             )
             .when(!self.loading.is_empty(), |el| {
-                el.child(div().text_xs().child("Loading files…"))
+                el.child(div().text_size(px(crate::theme::Type::SMALL)).child("Loading files…"))
             })
             .children(self.errors.iter().map(|(p, e)| {
                 div()
-                    .text_xs()
+                    .text_size(px(crate::theme::Type::SMALL))
                     .text_color(ui.danger)
                     .child(format!("{}: {e}", p.display()))
             }))

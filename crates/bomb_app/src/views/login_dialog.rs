@@ -1,7 +1,8 @@
 //! Grok device-code sign-in, as a dialog: confirm code, open the browser,
 //! paste the code back if the CLI asks for it.
 
-use gpui_kit::component::button::{Button, ButtonVariants};
+use crate::views::button::Button;
+use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::dialog::Dialog;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{Disableable, Sizable, WindowExt};

@@ -1,10 +1,11 @@
 //! Center column: header · transcript (or welcome) · status line + meter ·
 //! composer.
 
+use crate::views::button::Button;
 use std::time::Instant;
 
 use gpui_kit::assets::IconName as Lucide;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::{Disableable, Icon, Sizable};
@@ -168,7 +169,7 @@ impl ThreadView {
                     .w(px(280.))
                     .child(Input::new(&self.search).cleanable(true)),
             )
-            .child(div().text_xs().text_color(ui.text_faint).child(status))
+            .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child(status))
             .child(
                 icon_button("find-prev", Lucide::ChevronUp, ui.text_muted).on_click(cx.listener(
                     |this, _, _, cx| {
@@ -267,7 +268,7 @@ impl ThreadView {
                     )
                     .child(
                         div()
-                            .text_size(px(22.))
+                            .text_size(px(crate::theme::Type::DISPLAY))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(ui.text)
                             .child(
@@ -340,7 +341,6 @@ impl ThreadView {
         ui: &Ui,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        use gpui_kit::component::button::Button;
         use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
         use gpui_kit::component::Sizable;
         let projects = self.model.read(cx).projects.clone();
@@ -385,7 +385,7 @@ impl ThreadView {
                     }),
             )
             .child("·")
-            .child(div().text_xs().child(if temporary {
+            .child(div().text_size(px(crate::theme::Type::SMALL)).child(if temporary {
                 "Ask questions · your files stay unchanged"
             } else {
                 "Make changes · saved in a thread"
@@ -414,50 +414,29 @@ impl ThreadView {
         let backend = t.meta.backend.clone();
         let model = t.meta.model.clone();
         let has_worktree = t.meta.worktree.is_some();
-        let branch = t
-            .meta
-            .worktree
-            .as_deref()
-            .and_then(|w| std::path::Path::new(w).file_name())
-            .map(|s| s.to_string_lossy().to_string());
         let app = self.model.clone();
         let review = self.model.read(cx).review.as_ref();
-        let changes_label = review
-            .filter(|r| !r.files.is_empty())
-            .map(|r| format!("Changes · {}", r.files.len()))
-            .unwrap_or_else(|| "Changes".into());
-        let changes_hint = review
-            .map(|r| {
-                format!(
-                    "View file changes · {} · {} commits ahead, {} behind",
-                    r.branch, r.ahead, r.behind
-                )
-            })
-            .unwrap_or_else(|| {
-                format!(
-                    "View file changes in {}",
-                    branch.unwrap_or_else(|| "this thread".into())
-                )
-            });
-        let action = |id: &'static str, label: &str, icon: Lucide| {
+        let workspace = self.model.read(cx).active_workspace.clone().and_then(|id| {
+            self.model.read(cx).workspaces.iter().find(|w| w.id == id && !w.inline && !w.shared_checkout && w.archived_at.is_none()).cloned()
+        });
+        let busy = self.model.read(cx).git_busy;
+        let base = review.map(|r| r.default_branch.clone()).unwrap_or_else(|| "main".into());
+        let can_merge = review.is_some_and(|r| r.ahead > 0 || !r.dirty.is_empty());
+        let action = |id: &'static str, label: &str, icon: Lucide, show_label: bool| {
             Button::new(id)
                 .ghost()
                 .compact()
                 .small()
                 .h(px(28.))
-                .text_size(px(12.))
+                .text_size(px(crate::theme::Type::SMALL))
                 .font_weight(FontWeight::NORMAL)
                 .text_color(ui.text_muted)
                 .icon(Icon::from(icon).size(px(14.)))
-                .accessibility_label(if label.is_empty() {
-                    "More thread actions"
-                } else {
-                    label
-                })
-                .when(!label.is_empty(), |button| {
+                .accessibility_label(label.to_string())
+                .when(show_label, |button| {
                     button.child(
                         div()
-                            .text_size(px(12.))
+                            .text_size(px(crate::theme::Type::SMALL))
                             .font_weight(FontWeight::NORMAL)
                             .child(label.to_string()),
                     )
@@ -468,8 +447,9 @@ impl ThreadView {
             .flex()
             .items_center()
             .gap_1()
-            .flex_wrap()
-            .min_h(px(Layout::HEADER))
+            .min_w_0()
+            .overflow_hidden()
+            .h(px(Layout::HEADER))
             .py_1()
             .px_4()
             .child(
@@ -477,7 +457,7 @@ impl ThreadView {
                     .flex()
                     .items_center()
                     .gap_1p5()
-                    .text_size(px(12.))
+                    .text_size(px(crate::theme::Type::SMALL))
                     .text_color(ui.text_faint)
                     .child(crate::views::brand::brand_mark(&backend, 13., true, ui))
                     .child(if model.is_empty() { backend } else { model }),
@@ -485,7 +465,7 @@ impl ThreadView {
             .child(super::workspaces::branch_control(self.model.clone(), cx))
             .child(div().flex_1())
             .child(
-                action("new-workspace-thread", "New chat", Lucide::Plus)
+                action("new-workspace-thread", "New chat", Lucide::Plus, false)
                     .tooltip("Start a new conversation in this thread")
                     .on_click({
                         let app = app.clone();
@@ -494,7 +474,7 @@ impl ThreadView {
             )
             .when(!has_worktree, |el| {
                 el.child(
-                    action("inline-convert", "Make changes", Lucide::GitBranch)
+                    action("inline-convert", "Make changes", Lucide::GitBranch, true)
                         .tooltip("Create a thread to make changes to this project")
                         .on_click({
                             let app = app.clone();
@@ -502,23 +482,35 @@ impl ThreadView {
                         }),
                 )
             })
-            .when(self.model.read(cx).active_workspace.is_some(), |el| {
-                el.child(
-                    action("workspace-review", &changes_label, Lucide::GitBranch)
-                        .tooltip(changes_hint)
-                        .on_click({
-                            let app = app.clone();
-                            move |_, _, cx| {
-                                if let Some(id) = id {
-                                    app.update(cx, |m, cx| m.land_thread(id, cx));
-                                }
-                            }
-                        }),
-                )
+            .when_some(workspace.clone(), |el, w| {
+                let merge_app = app.clone();
+                let close_app = app.clone();
+                if can_merge {
+                    let id = w.id.clone();
+                    el.child(
+                        Button::new("thread-merge-main")
+                            .primary()
+                            .small()
+                            .label(format!("Merge to {base}"))
+                            .disabled(busy)
+                            .tooltip(format!("Asks this thread’s agent to merge its work into {base} here in the chat, resolving any conflicts it finds. “Merge & close” is in the ··· menu."))
+                            .on_click(move |_, _, cx| merge_app.update(cx, |m, cx| m.merge_to_main(id.clone(), false, cx))),
+                    )
+                } else {
+                    el.child(
+                        Button::new("thread-close-feature")
+                            .outline()
+                            .small()
+                            .label("Close feature")
+                            .disabled(busy)
+                            .tooltip("Nothing left to merge. Archive this thread and tidy up its branch.")
+                            .on_click(move |_, window, cx| super::project::confirm_close(close_app.clone(), w.id.clone(), w.name.clone(), window, cx)),
+                    )
+                }
             })
             .child(div().w(px(1.)).h(px(14.)).mx_1().bg(ui.border))
             .child(
-                action("thread-terminal", "Terminal", Lucide::Terminal)
+                action("thread-terminal", "Terminal", Lucide::Terminal, false)
                     .tooltip("Show or hide terminals for this thread")
                     .on_click({
                         let meta = thread.read(cx).meta.clone();
@@ -528,7 +520,7 @@ impl ThreadView {
                     }),
             )
             .child(
-                action("dev-preview", "Dev sidebar", Lucide::PanelRight)
+                action("dev-preview", "Dev sidebar", Lucide::PanelRight, false)
                     .tooltip("Show or hide the development preview and server controls")
                     .on_click(|_, window, cx| {
                         window.dispatch_action(Box::new(crate::actions::ToggleDevPreview), cx)
@@ -536,7 +528,7 @@ impl ThreadView {
             )
             .when_some(id, |el, thread_id| {
                 el.child(
-                    action("thread-more", "", Lucide::Ellipsis)
+                    action("thread-more", "More thread actions", Lucide::Ellipsis, false)
                         .tooltip("More thread actions")
                         .dropdown_menu(move |mut menu, _, cx| {
                             if crate::runtime::services(cx)
@@ -559,11 +551,24 @@ impl ThreadView {
                             if has_worktree {
                                 let app = app.clone();
                                 menu = menu.item(
-                                    PopupMenuItem::new("Merge latest default branch into thread")
+                                    PopupMenuItem::new("Bring in the latest from main")
                                         .on_click(move |_, _, cx| {
                                             app.update(cx, |m, cx| m.sync_thread(thread_id, cx))
                                         }),
                                 );
+                            }
+                            if let Some(w) = workspace.clone().filter(|_| can_merge) {
+                                let app = app.clone();
+                                let merge_base = base.clone();
+                                menu = menu.item(PopupMenuItem::new(format!("Merge to {merge_base} & close")).on_click(move |_, _, cx| {
+                                    app.update(cx, |m, cx| m.merge_to_main(w.id.clone(), true, cx))
+                                }));
+                            }
+                            if let Some(w) = workspace.clone() {
+                                let app = app.clone();
+                                menu = menu.item(PopupMenuItem::new(if can_merge { "Close feature without merging…" } else { "Close feature…" }).on_click(move |_, window, cx| {
+                                    super::project::confirm_close(app.clone(), w.id.clone(), w.name.clone(), window, cx)
+                                }));
                             }
                             let archived = app.read(cx).archived.contains(&thread_id);
                             super::sidebar::thread_lifecycle_menu(

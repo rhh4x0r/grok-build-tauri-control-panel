@@ -88,21 +88,38 @@ impl AppearanceExt for WindowAppearance {
 pub struct Layout;
 impl Layout {
     pub const TITLEBAR: f32 = 38.0;
-    pub const HEADER: f32 = 44.0;
-    pub const SIDEBAR: f32 = 256.0;
+    pub const HEADER: f32 = 48.0;
+    pub const SIDEBAR: f32 = 272.0;
     pub const BUBBLE_RADIUS: f32 = 16.0;
     pub const PANEL_RADIUS: f32 = 10.0;
     pub const COMPOSER_RADIUS: f32 = 26.0;
     pub const CONTENT_MAX: f32 = 736.0;
-    /// Transcript body: 14px on a 22px line (Zeron MD_LINE_HEIGHT).
-    pub const BODY_SIZE: f32 = 14.0;
-    pub const BODY_LINE: f32 = 22.0;
+    /// Transcript body: 15px on a 24px line.
+    pub const BODY_SIZE: f32 = 15.0;
+    pub const BODY_LINE: f32 = 24.0;
     pub const COMPOSER_MAX: f32 = 768.0;
     pub const SPACE_XS: f32 = 4.0;
     pub const SPACE_SM: f32 = 8.0;
     /// Sidebar: rows 2px apart, sections 12px apart (Zeron).
     pub const SIDEBAR_LIST_GAP: f32 = 2.0;
     pub const SIDEBAR_SECTION_GAP: f32 = 12.0;
+}
+
+/// The one type scale. Views pick a step; nothing is smaller than `CAPTION`.
+/// `themes/bomb.json` sets the kit's base size to 16, so its buttons and inputs land on the same steps
+/// (small controls 14, captions 12).
+pub struct Type;
+impl Type {
+    /// Timestamps, counters, paths under a title.
+    pub const CAPTION: f32 = 12.0;
+    /// Secondary lines, badges, toolbar labels.
+    pub const SMALL: f32 = 13.0;
+    /// Default interface text and buttons.
+    pub const BODY: f32 = 14.0;
+    /// Card and panel titles.
+    pub const TITLE: f32 = 17.0;
+    /// Page titles.
+    pub const DISPLAY: f32 = 24.0;
 }
 
 /// App tokens for the active appearance.

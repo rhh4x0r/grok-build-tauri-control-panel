@@ -1,10 +1,11 @@
-//! Visual branch map and repository pull-request overview.
+//! Project page: what is finished, what is in progress, and how each thread relates to the default branch.
+use crate::views::button::Button;
 use crate::{
     models::app::{project_name, AppModel},
-    theme::Ui,
+    theme::{Layout, Ui},
 };
 use gpui_kit::assets::IconName as Lucide;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::{Disableable, Icon, Sizable};
 use gpui_kit::{prelude::FluentBuilder as _, *};
 
@@ -15,9 +16,6 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
     let data = m.project_overviews.get(&root);
     let refresh = model.clone();
     let reveal = model.clone();
-    let ask = model.clone();
-    let ask_root = root.clone();
-    let fetch = model.clone();
     let mut page = div()
         .id("project-overview")
         .size_full()
@@ -26,7 +24,7 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
         .flex_col()
         .gap_5()
         .p_6()
-        .text_size(px(13.))
+        .text_size(px(crate::theme::Type::BODY))
         .child(
             div()
                 .flex()
@@ -41,13 +39,13 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                         .gap_1()
                         .child(
                             div()
-                                .text_size(px(22.))
+                                .text_size(px(crate::theme::Type::DISPLAY))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(project_name(&root)),
                         )
                         .child(
                             div()
-                                .text_size(px(11.))
+                                .text_size(px(crate::theme::Type::CAPTION))
                                 .text_color(ui.text_faint)
                                 .child(root.clone()),
                         ),
@@ -57,23 +55,13 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                         .flex()
                         .gap_2()
                         .child(
-                            Button::new("project-fetch")
-                                .ghost()
-                                .small()
-                                .label("Fetch remote")
-                                .disabled(!m.project_status.get(&root).is_some_and(|s| s.remote))
-                                .on_click(move |_, _, cx| {
-                                    fetch.update(cx, |m, cx| m.fetch_project(cx))
-                                }),
-                        )
-                        .child(
                             Button::new("project-refresh")
                                 .ghost()
                                 .small()
                                 .icon(Lucide::RefreshCw)
                                 .label(if loading { "Refreshing…" } else { "Refresh" })
                                 .disabled(loading)
-                                .tooltip("Refresh local branches and GitHub pull requests")
+                                .tooltip("Check again for new work and merges")
                                 .on_click(move |_, _, cx| {
                                     refresh.update(cx, |m, cx| {
                                         m.refresh_project_overview(cx);
@@ -116,317 +104,290 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
     };
     if !overview.git_detected {
         let app = model.clone();
-        return page.child(panel(ui)
-            .child(div().flex().items_center().gap_2()
-                .child(Icon::from(Lucide::GitBranch).size(px(18.)).text_color(ui.text_muted))
-                .child(div().text_size(px(16.)).font_weight(FontWeight::MEDIUM).child("Git not detected")))
-            .child(div().text_size(px(12.)).text_color(ui.text_muted)
-                .child("Initialize a repository to track changes and create threads in this folder."))
-            .child(div().flex().child(Button::new("initialize-git").outline().small()
-                .label(if loading { "Initializing…" } else { "Initialize Git repo" }).disabled(loading)
-                .on_click(move |_, _, cx| app.update(cx, |m, cx| m.initialize_project_git(root.clone(), cx)))))
-            .child(div().text_size(px(11.)).text_color(ui.text_faint).child("Creates a local repository. Your files won’t be committed or uploaded.")))
-            .into_any_element();
-    }
-    let selected = m
-        .overview_branch
-        .as_deref()
-        .and_then(|name| overview.branches.iter().find(|b| b.name == name))
-        .or_else(|| overview.branches.first());
-    let status = m.project_status.get(&root);
-    page = page.child(
-        div()
+        let name = project_name(&root);
+        // Centered like the welcome screen: one clear next step.
+        return div()
+            .id("project-no-git")
+            .size_full()
             .flex()
+            .flex_col()
             .items_center()
-            .gap_2()
-            .flex_wrap()
-            .child(badge(
-                format!("{} local branches", overview.branches.len()),
-                ui,
-            ))
-            .child(badge(
-                if overview.pr_error.is_some() {
-                    "PR status unavailable".into()
-                } else {
-                    format!("{} open PRs", overview.prs.len())
-                },
-                ui,
-            ))
-            .when_some(status, |el, s| {
-                el.child(badge(
-                    if s.dirty {
-                        "Checkout has edits"
-                    } else {
-                        "Checkout clean"
-                    }
-                    .into(),
-                    ui,
-                ))
-            })
-            .child(div().flex_1())
+            .justify_center()
+            .gap_4()
+            .p_6()
+            .child(Icon::from(Lucide::GitBranch).size(px(28.)).text_color(ui.text_muted))
+            .child(div().text_size(px(crate::theme::Type::DISPLAY)).font_weight(FontWeight::SEMIBOLD).child(format!("Set up {name} for threads")))
             .child(
-                Button::new("project-ask")
-                    .ghost()
-                    .small()
-                    .label("Ask a question")
-                    .on_click(move |_, _, cx| {
-                        ask.update(cx, |m, cx| m.inline_project(ask_root.clone(), cx))
-                    }),
+                div()
+                    .max_w(px(460.))
+                    .text_center()
+                    .text_size(px(Layout::BODY_SIZE))
+                    .line_height(px(Layout::BODY_LINE))
+                    .text_color(ui.text_muted)
+                    .child("This folder isn’t tracked by Git yet. Turning it on lets each thread work on its own copy, so you can run several features at once and merge the ones you like."),
             )
             .child(
-                Button::new("new-workspace")
-                    .outline()
-                    .small()
-                    .icon(Lucide::Plus)
-                    .label("New thread")
-                    .on_click(|_, window, cx| {
-                        window.dispatch_action(Box::new(crate::actions::NewThread), cx)
-                    }),
-            ),
-    );
-    let mut map = panel(ui)
-        .flex_1()
-        .min_w(px(240.))
-        .child(section("Branch map", ui))
-        .child(
-            div()
-                .text_size(px(11.))
-                .text_color(ui.text_faint)
-                .child(format!(
-                    "Compared with local {} · select a branch",
-                    overview.default_branch
-                )),
-        );
-    if overview.branches.is_empty() {
-        map = map.child(
-            div()
-                .text_color(ui.text_muted)
-                .child("No local branches yet. Create an initial Git commit to get started."),
-        );
+                Button::new("initialize-git")
+                    .primary()
+                    .large()
+                    .icon(Lucide::GitBranch)
+                    .label(if loading { "Setting up…" } else { "Turn on Git for this folder" })
+                    .disabled(loading)
+                    .on_click(move |_, _, cx| app.update(cx, |m, cx| m.initialize_project_git(root.clone(), cx))),
+            )
+            .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child("Stays on your computer. Nothing is committed or uploaded."))
+            .into_any_element();
     }
-    for b in &overview.branches {
-        let is_base = b.name == overview.default_branch;
-        let active = selected.is_some_and(|s| s.name == b.name);
-        let workspace = m.workspaces.iter().find(|w| {
-            w.project_root == root && w.branch == b.name && !w.inline && w.archived_at.is_none()
-        });
-        let pr = overview.prs.iter().find(|pr| pr.head_ref_name == b.name);
-        let app = model.clone();
-        let name = b.name.clone();
-        map = map.child(
+    let status = m.project_status.get(&root);
+    let base = overview.default_branch.clone();
+    let busy = m.git_busy;
+    let workspace_for = |branch: &str| {
+        m.workspaces.iter().find(|w| {
+            w.project_root == root && w.branch == branch && !w.inline && !w.shared_checkout && w.archived_at.is_none()
+        })
+    };
+    let features: Vec<_> = overview.branches.iter().filter(|b| b.name != base).collect();
+    let waiting = features.iter().filter(|b| b.ahead > 0).count();
+    let dirty = status.is_some_and(|s| s.dirty);
+
+    let mut main = panel(ui)
+        .child(
             div()
                 .flex()
                 .items_center()
-                .when(!is_base, |el| {
-                    el.child(
-                        div()
-                            .ml_3()
-                            .w(px(20.))
-                            .h(px(46.))
-                            .border_l_2()
-                            .border_color(ui.border)
-                            .child(div().mt(px(23.)).w_full().h(px(1.)).bg(ui.border)),
-                    )
+                .gap_2()
+                .child(Icon::from(Lucide::GitBranch).size(px(15.)).text_color(ui.accent))
+                .child(div().text_size(px(crate::theme::Type::TITLE)).font_weight(FontWeight::MEDIUM).child(base.clone()))
+                .child(badge("Finished work".into(), ui))
+                .child(div().flex_1())
+                .when(status.is_some_and(|s| s.remote), |el| {
+                    let app = model.clone();
+                    let root = root.clone();
+                    el.child(Button::new("pull-default").ghost().small().label("Get latest from GitHub…").on_click(move |_, window, cx| {
+                        use gpui_kit::component::WindowExt;
+                        let app = app.clone(); let root = root.clone();
+                        window.open_alert_dialog(cx, move |d, _, _| {
+                            let app = app.clone(); let root = root.clone();
+                            d.confirm().title("Update the finished version?").description("Downloads the newest version from GitHub. Needs a project folder with no unsaved edits.")
+                                .on_ok(move |_, _, cx| { app.update(cx, |m, cx| m.pull_project(root.clone(), cx)); true })
+                        });
+                    }))
                 })
                 .child(
-                    div()
-                        .id(SharedString::from(format!("branch-{}", b.name)))
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .p_3()
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(if active { ui.accent } else { ui.border })
-                        .bg(Ui::alpha(
-                            if active { ui.accent } else { ui.text },
-                            if active { 0.08 } else { 0.025 },
-                        ))
-                        .cursor_pointer()
-                        .hover(move |s| s.bg(ui.hover))
-                        .on_click(move |_, _, cx| {
-                            app.update(cx, |m, cx| {
-                                m.overview_branch = Some(name.clone());
-                                cx.notify();
-                            })
-                        })
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    Icon::from(Lucide::GitBranch).size(px(14.)).text_color(
-                                        if is_base { ui.accent } else { ui.text_muted },
-                                    ),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .text_ellipsis()
-                                        .child(b.name.clone()),
-                                )
-                                .when(is_base, |el| el.child(badge("Default".into(), ui)))
-                                .when(b.current, |el| el.child(badge("Checked out".into(), ui))),
-                        )
-                        .child(div().text_size(px(11.)).text_color(ui.text_muted).child(
-                            if is_base {
-                                "Base for branch comparisons".into()
-                            } else {
-                                format!(
-                                    "{} ahead · {} behind · {} committed files changed",
-                                    b.ahead,
-                                    b.behind,
-                                    b.files.len()
-                                )
-                            },
-                        ))
-                        .when_some(workspace, |el, w| {
-                            el.child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(ui.text_faint)
-                                    .child(format!("{} · {} chats", w.name, w.threads.len())),
-                            )
-                        })
-                        .when_some(pr, |el, pr| {
-                            el.child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(ui.accent)
-                                    .child(format!("PR #{} · {}", pr.number, pr.checks())),
-                            )
-                        }),
-                ),
-        );
-    }
-    let mut detail = panel(ui)
-        .flex_1()
-        .min_w(px(240.))
-        .child(section("Branch details", ui));
-    if let Some(b) = selected {
-        detail = detail.child(
-            div()
-                .text_size(px(15.))
-                .font_weight(FontWeight::MEDIUM)
-                .child(b.name.clone()),
-        );
-        if let Some(w) = m.workspaces.iter().find(|w| {
-            w.project_root == root && w.branch == b.name && !w.inline && w.archived_at.is_none()
-        }) {
-            let app = model.clone();
-            let id = w.id.clone();
-            detail = detail.child(
-                div().flex().gap_2().child(
-                    Button::new("open-workspace")
-                        .outline()
+                    Button::new("new-workspace")
+                        .primary()
                         .small()
-                        .label("Open thread")
-                        .on_click(move |_, _, cx| {
-                            app.update(cx, |m, cx| m.open_workspace(id.clone(), cx))
-                        }),
+                        .icon(Lucide::Plus)
+                        .label("New thread")
+                        .tooltip("Start a feature on its own copy of the project. You can run several at once with different models.")
+                        .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::actions::NewThread), cx)),
                 ),
-            );
-            for tid in &w.threads {
-                if let Ok(id) = uuid::Uuid::parse_str(tid) {
-                    if let Some(thread) = m.threads.get(&id) {
-                        let app = model.clone();
-                        detail = detail.child(
-                            Button::new(SharedString::from(format!("chat-{id}")))
-                                .ghost()
-                                .small()
-                                .icon(Lucide::MessageCircle)
-                                .label(thread.read(cx).title())
-                                .on_click(move |_, _, cx| {
-                                    app.update(cx, |m, cx| m.select(Some(id), cx))
-                                }),
-                        );
-                    }
-                }
-            }
-        }
-        detail = detail.child(section("Recent commits", ui));
-        for (sha, title) in &b.commits {
-            detail = detail.child(
+        )
+        .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(format!(
+            "The finished version of your project. Every thread works on its own copy, and {base} only changes when you merge a thread into it."
+        )))
+        .child(div().text_size(px(crate::theme::Type::BODY)).child(match waiting {
+            0 => format!("Nothing is waiting. Everything finished is already in {base}."),
+            1 => format!("1 feature has work that is not in {base} yet."),
+            n => format!("{n} features have work that is not in {base} yet."),
+        }));
+    if dirty {
+        main = main.child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.warning).child(format!(
+            "The project folder has unsaved edits on {base}. Agents will stop and ask before merging until they are committed or discarded."
+        )));
+    }
+    page = page.child(main);
+
+    // Board: a thread moves right as its work gets saved and then merged.
+    let running = |w: &grok_persistence::WorkspaceRecord| {
+        w.threads.iter().filter_map(|t| uuid::Uuid::parse_str(t).ok()).any(|id| {
+            m.threads.get(&id).is_some_and(|t| t.read(cx).thread.presence.turn_active())
+        })
+    };
+    let mut columns: [Vec<_>; 3] = Default::default();
+    for b in features {
+        let workspace = workspace_for(&b.name);
+        let working = workspace.is_some_and(|w| running(w));
+        let column = if working || (workspace.is_some() && b.ahead == 0 && b.behind == 0) { 0 } else if b.ahead > 0 { 1 } else { 2 };
+        columns[column].push((b, workspace, working));
+    }
+    let titles = [
+        ("Working", "An agent is on it, or nothing is saved yet.".to_string()),
+        ("In progress", format!("Has saved work that is not in {base} yet. Merge it when you’re happy with it.")),
+        ("In main", format!("Everything here is already in {base}. Close to tidy up.")),
+    ];
+    let mut board = div().id("feature-board").flex().gap_3().items_start().overflow_x_scroll();
+    for ((title, hint), cards) in titles.into_iter().zip(columns) {
+        let mut column = panel(ui)
+            .flex_1()
+            .min_w(px(250.))
+            .child(
                 div()
                     .flex()
+                    .items_center()
                     .gap_2()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .font_family(ui.mono.clone())
-                            .text_size(px(11.))
-                            .text_color(ui.text_faint)
-                            .child(sha.clone()),
-                    )
-                    .child(div().flex_1().text_size(px(12.)).child(title.clone())),
-            );
+                    .child(section(title, ui))
+                    .child(badge(cards.len().to_string(), ui)),
+            )
+            .child(div().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint).child(hint));
+        if cards.is_empty() {
+            column = column.child(div().py_3().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child("Nothing here"));
         }
-        detail = detail.child(section("Committed changes", ui));
-        if b.files.is_empty() {
-            detail = detail.child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(ui.text_faint)
-                    .child("No branch changes relative to its merge base."),
-            );
+        for (b, workspace, working) in cards {
+            let pr = overview.prs.iter().find(|pr| pr.head_ref_name == b.name);
+            let open = m.overview_branch.as_deref() == Some(b.name.as_str());
+            let toggle = model.clone();
+            let name = b.name.clone();
+            let agent = workspace
+                .and_then(|w| w.threads.iter().filter_map(|t| uuid::Uuid::parse_str(t).ok()).find_map(|id| m.threads.get(&id)))
+                .map(|t| { let meta = &t.read(cx).meta; if meta.model.is_empty() { meta.backend.clone() } else { meta.model.clone() } });
+            let mut card = div()
+                .flex()
+                .flex_col()
+                .gap_1p5()
+                .p_3()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(if working { ui.accent } else { ui.border })
+                .bg(Ui::alpha(ui.text, 0.03))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(workspace.map(|w| w.name.clone()).unwrap_or_else(|| b.name.clone())),
+                        )
+                        .when(working, |el| el.child(badge("Agent working".into(), ui)))
+                        .child(
+                            Button::new(SharedString::from(format!("feature-toggle-{}", b.name)))
+                                .ghost()
+                                .small()
+                                .icon(if open { Lucide::ChevronDown } else { Lucide::ChevronRight })
+                                .tooltip("Show what changed")
+                                .on_click(move |_, _, cx| {
+                                    toggle.update(cx, |m, cx| {
+                                        m.overview_branch = if m.overview_branch.as_deref() == Some(name.as_str()) { None } else { Some(name.clone()) };
+                                        cx.notify();
+                                    })
+                                }),
+                        ),
+                )
+                .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(if b.ahead > 0 { ui.text } else { ui.text_muted }).child(
+                    bomb_core::services::project_overview::describe_relation(b.ahead, b.behind, &base),
+                ))
+                .child(div().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint).child(format!(
+                    "{}{} files changed{}",
+                    match (&agent, workspace) {
+                        (Some(agent), Some(w)) => format!("{agent} · {} chats · ", w.threads.len()),
+                        (None, Some(w)) => format!("{} chats · ", w.threads.len()),
+                        _ => "No open thread · ".into(),
+                    },
+                    b.files.len(),
+                    pr.map(|pr| format!(" · PR #{} · {}", pr.number, pr.checks())).unwrap_or_default(),
+                )));
+            if open {
+                let mut detail = div().pt_1().flex().flex_col().gap_1();
+                detail = detail.child(div().text_size(px(crate::theme::Type::CAPTION)).font_family(ui.mono.clone()).text_color(ui.text_faint).child(b.name.clone()));
+                if b.ahead > 0 {
+                    detail = detail.child(section("Latest saved changes", ui));
+                    for (_, title) in b.commits.iter().take(b.ahead.min(6)) {
+                        detail = detail.child(div().text_size(px(crate::theme::Type::SMALL)).child(title.clone()));
+                    }
+                }
+                if !b.files.is_empty() {
+                    detail = detail.child(section("Files changed", ui));
+                }
+                for file in b.files.iter().take(10) {
+                    detail = detail.child(div().text_size(px(crate::theme::Type::CAPTION)).font_family(ui.mono.clone()).text_color(ui.text_muted).child(file.clone()));
+                }
+                if b.files.len() > 10 {
+                    detail = detail.child(div().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint).child(format!("…and {} more files", b.files.len() - 10)));
+                }
+                card = card.child(detail);
+            }
+            if let Some(w) = workspace {
+                let open_app = model.clone();
+                let open_id = w.id.clone();
+                let merge_app = model.clone();
+                let merge_id = w.id.clone();
+                let both_app = model.clone();
+                let both_id = w.id.clone();
+                let close_app = model.clone();
+                let close_id = w.id.clone();
+                let close_name = w.name.clone();
+                card = card.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_1()
+                        .pt_1()
+                        .child(
+                            Button::new(SharedString::from(format!("feature-open-{}", w.id)))
+                                .outline()
+                                .small()
+                                .label("Open chat")
+                                .on_click(move |_, _, cx| open_app.update(cx, |m, cx| m.open_workspace(open_id.clone(), cx))),
+                        )
+                        .when(b.ahead > 0 && !working, |el| {
+                            el.child(
+                                Button::new(SharedString::from(format!("feature-merge-{}", w.id)))
+                                    .primary()
+                                    .small()
+                                    .label(format!("Merge to {base}"))
+                                    .disabled(busy)
+                                    .tooltip(format!("Opens the chat and asks its agent to merge this work into {base}, resolving any conflicts it finds."))
+                                    .on_click(move |_, _, cx| merge_app.update(cx, |m, cx| m.merge_to_main(merge_id.clone(), false, cx))),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("feature-merge-close-{}", w.id)))
+                                    .outline()
+                                    .small()
+                                    .label("Merge & close")
+                                    .disabled(busy)
+                                    .tooltip(format!("Same merge in the chat, then closes this feature once its work is confirmed in {base}."))
+                                    .on_click(move |_, _, cx| both_app.update(cx, |m, cx| m.merge_to_main(both_id.clone(), true, cx))),
+                            )
+                        })
+                        .when(!working, |el| {
+                            el.child(
+                                Button::new(SharedString::from(format!("feature-close-{}", w.id)))
+                                    .ghost()
+                                    .small()
+                                    .label("Close")
+                                    .disabled(busy)
+                                    .tooltip("Archive this thread and tidy up its branch. Unmerged work is kept on the branch.")
+                                    .on_click(move |_, window, cx| confirm_close(close_app.clone(), close_id.clone(), close_name.clone(), window, cx)),
+                            )
+                        }),
+                );
+            }
+            column = column.child(card);
         }
-        for file in b.files.iter().take(12) {
-            detail = detail.child(
-                div()
-                    .text_size(px(11.))
-                    .font_family(ui.mono.clone())
-                    .text_color(ui.text_muted)
-                    .child(file.clone()),
-            );
-        }
-        if b.files.len() > 12 {
-            detail = detail.child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(ui.text_faint)
-                    .child(format!("…and {} more files", b.files.len() - 12)),
-            );
-        }
-        if b.name == overview.default_branch && status.is_some_and(|s| s.remote) {
-            let app = model.clone();
-            let root = root.clone();
-            detail = detail.child(Button::new("pull-default").outline().small().label("Pull latest…").on_click(move |_, window, cx| {
-                use gpui_kit::component::WindowExt;
-                let app = app.clone(); let root = root.clone();
-                window.open_alert_dialog(cx, move |d, _, _| {
-                    let app = app.clone(); let root = root.clone();
-                    d.confirm().title("Update default branch?").description("Fast-forward from origin. Requires a clean checkout on the default branch.")
-                        .on_ok(move |_, _, cx| { app.update(cx, |m, cx| m.pull_project(root.clone(), cx)); true })
-                });
-            }));
-        }
+        board = board.child(column);
     }
-    page = page.child(
-        div()
-            .flex()
-            .gap_4()
-            .flex_wrap()
-            .items_start()
-            .child(map)
-            .child(detail),
-    );
+    page = page.child(board);
+    if overview.prs.is_empty() {
+        return page.into_any_element();
+    }
     let mut prs = panel(ui).child(section("Open pull requests", ui));
     if let Some(error) = &overview.pr_error {
         prs = prs.child(
             div()
-                .text_size(px(12.))
+                .text_size(px(crate::theme::Type::SMALL))
                 .text_color(ui.text_muted)
                 .child(error.clone()),
         );
     } else if overview.prs.is_empty() {
         prs = prs.child(
             div()
-                .text_size(px(12.))
+                .text_size(px(crate::theme::Type::SMALL))
                 .text_color(ui.text_faint)
                 .child("No open pull requests."),
         );
@@ -479,7 +440,7 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                 )
                 .child(
                     div()
-                        .text_size(px(11.))
+                        .text_size(px(crate::theme::Type::CAPTION))
                         .text_color(ui.text_faint)
                         .child(format!("{} → {}", pr.head_ref_name, pr.base_ref_name)),
                 )
@@ -497,7 +458,7 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
     if overview.prs.len() == 100 {
         prs = prs.child(
             div()
-                .text_xs()
+                .text_size(px(crate::theme::Type::SMALL))
                 .child("Showing the first 100 open pull requests."),
         );
     }
@@ -516,18 +477,34 @@ fn panel(ui: &Ui) -> Div {
 }
 fn section(label: &str, ui: &Ui) -> Div {
     div()
-        .text_size(px(12.))
+        .text_size(px(crate::theme::Type::SMALL))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(ui.text_muted)
         .child(label.to_string())
 }
 fn badge(label: String, ui: &Ui) -> Div {
     div()
-        .text_size(px(10.))
+        .text_size(px(crate::theme::Type::CAPTION))
         .text_color(ui.text_muted)
         .px_2()
         .py_1()
         .rounded(px(5.))
         .bg(ui.hover)
         .child(label)
+}
+
+/// Closing keeps the chats in the archive and never deletes unmerged work.
+pub fn confirm_close(app: Entity<AppModel>, id: String, name: String, window: &mut Window, cx: &mut App) {
+    use gpui_kit::component::WindowExt;
+    window.open_alert_dialog(cx, move |d, _, _| {
+        let app = app.clone();
+        let id = id.clone();
+        d.confirm()
+            .title(format!("Close “{name}”?"))
+            .description("Its chats move to the archive and its working copy is removed. The branch is deleted only if its work is already merged; otherwise it is kept.")
+            .on_ok(move |_, _, cx| {
+                app.update(cx, |m, cx| m.close_feature(id.clone(), cx));
+                true
+            })
+    });
 }

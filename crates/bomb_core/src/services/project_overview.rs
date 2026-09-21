@@ -164,6 +164,29 @@ pub async fn load(root: &str) -> Result<ProjectOverview, String> {
     })
 }
 
+/// Plain-language relation of a branch to the default branch.
+/// `ahead` counts commits only the branch has; `behind` counts commits only the default branch has.
+pub fn describe_relation(ahead: usize, behind: usize, base: &str) -> String {
+    let changes = |n: usize| if n == 1 { "1 saved change".to_string() } else { format!("{n} saved changes") };
+    let updates = |n: usize| if n == 1 { "1 newer update".to_string() } else { format!("{n} newer updates") };
+    match (ahead, behind) {
+        (0, 0) => format!("Same as {base} · no new work yet"),
+        (a, 0) => format!("{} not in {base} yet · ready to merge", changes(a)),
+        (0, _) => format!("Nothing to merge · everything here is already in {base}"),
+        (a, b) => format!("{} not in {base} yet · {base} has {} this hasn’t picked up", changes(a), updates(b)),
+    }
+}
+
+/// The same relation in a few words, for toolbars. `unsaved` counts edited files not saved to the branch yet.
+pub fn describe_relation_short(unsaved: usize, ahead: usize, behind: usize, base: &str) -> String {
+    let mut parts = Vec::new();
+    if unsaved > 0 { parts.push(format!("{unsaved} unsaved {}", if unsaved == 1 { "edit" } else { "edits" })); }
+    if ahead > 0 { parts.push(format!("{ahead} {} to merge", if ahead == 1 { "change" } else { "changes" })); }
+    if behind > 0 && (ahead > 0 || unsaved > 0) { parts.push(format!("{base} has {behind} newer")); }
+    if parts.is_empty() { parts.push(if behind > 0 { format!("Already in {base}") } else { format!("Same as {base}") }); }
+    parts.join(" · ")
+}
+
 /// Distinguish an ordinary folder from Git execution/access failures.
 pub(super) async fn repository_detected(path: &Path) -> Result<bool, String> {
     if !path.is_absolute() || !path.is_dir() {
@@ -216,6 +239,19 @@ async fn load_prs(path: &Path) -> Result<Vec<PullRequest>, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn relation_is_described_without_git_jargon() {
+        use super::describe_relation as d;
+        use super::describe_relation_short as short;
+        assert_eq!(short(8, 1, 0, "main"), "8 unsaved edits · 1 change to merge");
+        assert_eq!(short(0, 2, 3, "main"), "2 changes to merge · main has 3 newer");
+        assert_eq!(short(0, 0, 4, "main"), "Already in main");
+        assert_eq!(short(0, 0, 0, "main"), "Same as main");
+        assert_eq!(d(0, 0, "main"), "Same as main · no new work yet");
+        assert_eq!(d(1, 0, "main"), "1 saved change not in main yet · ready to merge");
+        assert_eq!(d(0, 7, "main"), "Nothing to merge · everything here is already in main");
+        assert_eq!(d(2, 1, "main"), "2 saved changes not in main yet · main has 1 newer update this hasn’t picked up");
+    }
     use super::*;
     #[tokio::test]
     async fn branch_map_reports_divergence_and_changed_files() {

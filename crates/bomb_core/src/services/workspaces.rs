@@ -312,6 +312,56 @@ pub async fn archive_workspace(state: &AppState, id: String) -> Result<(), Strin
     state.persistence.save_workspace(&w).map_err(err)
 }
 
+/// The request sent to a thread's own agent so it performs the merge in its chat.
+pub async fn merge_request(state: &AppState, id: String) -> Result<String, String> {
+    let w = workspace(state, &id)?;
+    if w.inline || w.read_only || w.shared_checkout || w.archived_at.is_some() {
+        return Err("Only an active thread with its own branch can be merged".into());
+    }
+    let base = default_branch(Path::new(&w.project_root)).await?;
+    if w.branch == base { return Err(format!("This thread already works directly on {base}")); }
+    Ok(format!(
+"Merge this thread's work into {base}.
+
+1. Look at what this branch ({branch}) changed and commit any unsaved work here.
+2. Merge the latest {base} into this branch. If anything conflicts, resolve it so both this feature and the newer {base} changes keep working, then run the project's checks.
+3. When this branch is healthy, go to the project folder at {root}, which should have {base} checked out, and run `git merge --no-ff {branch}` there.
+4. If the project folder is not on {base} or has uncommitted edits to tracked files, stop and tell me instead of stashing, resetting or discarding anything. Untracked files there are fine to leave alone.
+5. Do not push and do not delete this branch or folder.
+
+Finish with a short plain-English summary: what went into {base}, any conflicts you resolved and how, and whether the checks passed.",
+        branch = w.branch, root = w.project_root))
+}
+
+/// True when the default branch already contains everything on the thread's branch and nothing is left unsaved.
+pub async fn is_merged(state: &AppState, id: &str) -> Result<bool, String> {
+    let w = workspace(state, id)?;
+    let root = Path::new(&w.project_root);
+    let base = default_branch(root).await?;
+    if Path::new(&w.path).exists() && !state.worktrees.is_clean(Path::new(&w.path)).await.map_err(err)? { return Ok(false); }
+    Ok(run_git(root, &["merge-base", "--is-ancestor", &format!("refs/heads/{}", w.branch), &format!("refs/heads/{base}")]).await.is_ok())
+}
+
+/// Save any loose work, archive the thread, and delete its branch only when the default branch already contains it.
+pub async fn close_feature(state: &AppState, id: String) -> Result<String, String> {
+    let w = workspace(state, &id)?;
+    {
+        let _gate = state.workspace_gate.lock().await;
+        ensure_idle(state, &w)?;
+        if w.inline || w.shared_checkout { return Err("This conversation works in the project folder and has no feature branch to close".into()); }
+        if w.archived_at.is_none() && Path::new(&w.path).exists() {
+            state.worktrees.commit_all(Path::new(&w.path), &format!("Save work before closing {}", w.name)).await.map_err(err)?;
+        }
+    }
+    if w.archived_at.is_none() { archive_workspace(state, id).await?; }
+    let root = Path::new(&w.project_root);
+    let base = default_branch(root).await?;
+    // `branch -d` refuses unless the branch is fully merged, so unmerged work is never lost.
+    let removed = w.branch != base && run_git(root, &["branch", "-d", &w.branch]).await.is_ok();
+    Ok(if removed { format!("Closed “{}” · its work is in {base}, so the branch was removed", w.name) }
+       else { format!("Closed “{}” · branch {} kept because it has work that is not in {base}", w.name, w.branch) })
+}
+
 /// All destructive operations require a concrete confirmation in the view.
 pub async fn workspace_action(
     state: &AppState,
@@ -731,6 +781,45 @@ mod tests {
         assert!(WorkspaceTurn::new(active.clone(), "b").is_ok());
         drop(guard);
         assert!(WorkspaceTurn::new(active, "a").is_ok());
+    }
+    #[tokio::test]
+    async fn merge_is_requested_in_chat_detected_when_done_and_close_removes_merged_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo"); std::fs::create_dir(&root).unwrap();
+        for args in [vec!["init", "-b", "main"], vec!["config", "user.name", "Test"], vec!["config", "user.email", "test@example.com"]] { run_git(&root, &args).await.unwrap(); }
+        std::fs::write(root.join("app.txt"), "one\n").unwrap();
+        run_git(&root, &["add", "-A"]).await.unwrap(); run_git(&root, &["commit", "-m", "initial"]).await.unwrap();
+        let home = temp.path().to_path_buf(); let grok = home.join("grok"); let panel = grok.join("panel");
+        let state = AppState::initialize_with_paths(grok_config::GrokPaths {
+            home_dir: home.clone(), grok_dir: grok.clone(), config_file: panel.join("config.toml"),
+            grok_cli_config_file: grok.join("config.toml"), worktrees_dir: home.join("worktrees"),
+            memory_dir: panel.join("memory"), sessions_dir: panel.join("sessions"), panel_dir: panel,
+            project_config_file: None, project_root: None,
+        }).await.unwrap();
+        let options = SpawnOptions { model: Some("mock".into()), prompt: Some("Change the app".into()), ..Default::default() };
+        let session = super::super::start_session(&state, root.display().to_string(), options).await.unwrap();
+        super::super::wait_until_idle(&state, &session.id, std::time::Duration::from_secs(5)).await.unwrap();
+        let w = list_workspaces(&state).await.unwrap()[0].clone();
+        let copy = Path::new(&w.path);
+
+        let request = merge_request(&state, w.id.clone()).await.unwrap();
+        assert!(request.contains(&w.branch) && request.contains(&root.display().to_string()) && request.contains("Do not push"));
+
+        // Unsaved or unmerged work is never reported as merged.
+        std::fs::write(copy.join("app.txt"), "feature\n").unwrap();
+        assert!(!is_merged(&state, &w.id).await.unwrap());
+        run_git(copy, &["commit", "-am", "feature"]).await.unwrap();
+        assert!(!is_merged(&state, &w.id).await.unwrap());
+
+        // What the agent does in the chat.
+        run_git(&root, &["merge", "--no-ff", &w.branch, "-m", "Merge feature"]).await.unwrap();
+        assert!(is_merged(&state, &w.id).await.unwrap());
+
+        let note = close_feature(&state, w.id.clone()).await.unwrap();
+        assert!(note.contains("branch was removed"), "{note}");
+        assert!(workspace(&state, &w.id).unwrap().archived_at.is_some());
+        assert!(!copy.exists());
+        assert!(run_git(&root, &["rev-parse", "--verify", &format!("refs/heads/{}", w.branch)]).await.is_err());
     }
     #[tokio::test]
     async fn workspace_lifecycle_checkpoints_sharing_inline_and_archive() {

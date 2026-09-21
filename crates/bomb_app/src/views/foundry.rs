@@ -1,4 +1,5 @@
 //! Native Foundry authoring, library and run inspection.
+use crate::views::button::Button;
 use crate::{
     models::app::AppModel,
     runtime::{services, spawn_service},
@@ -6,7 +7,7 @@ use crate::{
 };
 use bomb_foundry::{Document, Run, RunStatus, SkillEdge, StageBinding};
 use gpui_kit::component::{
-    button::{Button, ButtonVariants},
+    button::ButtonVariants,
     input::{Input, InputState, Textarea, TextareaState},
     Disableable, Sizable,
 };
@@ -688,13 +689,13 @@ impl FoundryView {
                 )
                 .child(
                     div()
-                        .text_size(px(11.))
+                        .text_size(px(crate::theme::Type::CAPTION))
                         .text_color(ui.text_muted)
                         .child(format!("{} · {}", n.kind, n.role)),
                 )
                 .child(
                     div()
-                        .text_size(px(11.))
+                        .text_size(px(crate::theme::Type::CAPTION))
                         .text_color(ui.text_faint)
                         .child(n.purpose.clone()),
                 )
@@ -992,7 +993,7 @@ impl FoundryView {
                 .child(Button::new("inherit-model").ghost().small().label("Use run model").on_click(cx.listener(|v,_,w,cx|{if let Some(n)=v.document.graph.nodes.get(v.selected){v.document.bindings.remove(&n.id);v.sync_editor(w,cx);v.autosave(cx);}})))))
             .child(div().text_sm().text_color(ui.text_muted).child("Stage linkages · sequence follows stage order; return links repeat earlier work."))
             .child(link_controls)
-            .child(div().text_size(px(11.)).child(links))
+            .child(div().text_size(px(crate::theme::Type::CAPTION)).child(links))
             .child(div().flex().gap_2().child(Button::new("insert-skill").ghost().label("Insert instructions").on_click(cx.listener(|v,_,_,cx|v.handoff(true,cx))))
                 .child(Button::new("run-loop").label("Run loop").disabled(self.busy).on_click(cx.listener(|v,_,_,cx|v.start_run(cx)))))
             .child(div().text_sm().text_color(ui.text_muted).child("Run uses the current thread folder or creates an isolated branch for the selected project. Two returns per edge; total attempts default to 3 × stages. Human gates always pause."))
@@ -1159,7 +1160,7 @@ impl FoundryView {
                         .when(self.expanded_attempt.as_deref() == Some(&a.id), |el| {
                             el.child(div().text_sm().child(a.output.clone())).child(
                                 div()
-                                    .text_size(px(11.))
+                                    .text_size(px(crate::theme::Type::CAPTION))
                                     .text_color(ui.text_muted)
                                     .child(format!(
                                         "App-observed tool events:\n{}",

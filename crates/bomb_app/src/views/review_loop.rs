@@ -1,4 +1,5 @@
 //! Thread-local Foundry progress and decisions.
+use crate::views::button::Button;
 use crate::{
     models::app::AppModel,
     runtime::{services, spawn_service},
@@ -7,7 +8,7 @@ use crate::{
 use bomb_foundry::{Run, RunStatus};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
-    button::{Button, ButtonVariants},
+    button::ButtonVariants,
     input::{Input, InputState},
     Disableable, Icon, Sizable,
 };
@@ -224,7 +225,7 @@ impl Render for ReviewLoopView {
                     card = card.child(div().text_sm().child(result.summary.clone()));
                     for criterion in &result.criteria {
                         card = card.child(
-                            div().text_xs().text_color(ui.text_muted).child(format!(
+                            div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(format!(
                                 "{} · {}",
                                 criterion.status,
                                 node.exit_criteria
@@ -236,7 +237,7 @@ impl Render for ReviewLoopView {
                         for evidence in &criterion.evidence {
                             card = card.child(
                                 div()
-                                    .text_xs()
+                                    .text_size(px(crate::theme::Type::SMALL))
                                     .text_color(ui.text_muted)
                                     .child(format!("• {evidence}")),
                             );
@@ -297,7 +298,7 @@ impl Render for ReviewLoopView {
                             .child(format!("Review notes · {}", &result.summary[index..])),
                     );
                 }
-                content=content.child(div().text_xs().text_color(ui.text_muted).child("Select Review above for checks, evidence and files. Approval accepts this result; it does not commit, merge or deploy."));
+                content=content.child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child("Select Review above for checks, evidence and files. Approval accepts this result; it does not commit, merge or deploy."));
             }
         }
         if !run.note.is_empty() && !waiting && !complete {

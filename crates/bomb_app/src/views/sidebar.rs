@@ -1,11 +1,12 @@
 //! Left column: threads (project · time-ago / title / branch) and the
 //! connected services footer.
 
+use crate::views::button::Button;
 use chrono::{DateTime, Utc};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, Sizable, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -126,7 +127,7 @@ impl SidebarView {
                 .flex()
                 .items_center()
                 .gap(px(Layout::SPACE_SM))
-                .h(px(29.))
+                .h(px(32.))
                 .px(px(Layout::SPACE_SM))
                 .child(div().size(px(GROUP_ICON)).flex_shrink_0().text_color(ui.text_muted).child(Icon::from(if collapsed { Lucide::Folder } else { Lucide::FolderOpen })))
                 .child(
@@ -134,8 +135,8 @@ impl SidebarView {
                         .id(SharedString::from(format!("project-{root}")))
                         .flex_1()
                         .min_w_0()
-                        .text_size(px(13.))
-                        .line_height(px(17.))
+                        .text_size(px(crate::theme::Type::BODY))
+                        .line_height(px(20.))
                         .text_color(Ui::alpha(ui.text, 0.8))
                         .overflow_hidden()
                         .text_ellipsis()
@@ -191,10 +192,10 @@ impl SidebarView {
                             .pl(px(GROUP_INDENT))
                             .pr(px(Layout::SPACE_SM))
                             .h(px(14.))
-                            .text_size(px(11.))
-                            .line_height(px(14.))
+                            .text_size(px(crate::theme::Type::CAPTION))
+                            .line_height(px(16.))
                             .text_color(ui.subline())
-                            .child(div().size(px(11.)).child(Icon::from(Lucide::GitBranch)))
+                            .child(div().size(px(13.)).child(Icon::from(Lucide::GitBranch)))
                             .child(parts.join(" · ")),
                     );
                 }
@@ -211,17 +212,17 @@ impl SidebarView {
                         .flex()
                         .items_center()
                         .gap(px(Layout::SPACE_XS))
-                        .h(px(24.))
+                        .h(px(28.))
                         .pl(px(GROUP_INDENT))
                         .pr(px(Layout::SPACE_SM))
-                        .text_size(px(11.))
+                        .text_size(px(crate::theme::Type::CAPTION))
                         .text_color(ui.subline())
                         .cursor_pointer()
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if !this.expanded.remove(&archived_key) { this.expanded.insert(archived_key.clone()); }
                             cx.notify();
                         }))
-                        .child(div().size(px(11.)).child(Icon::from(if archive_open { Lucide::ChevronDown } else { Lucide::ChevronRight })))
+                        .child(div().size(px(13.)).child(Icon::from(if archive_open { Lucide::ChevronDown } else { Lucide::ChevronRight })))
                         .child("Archived"),
                 );
             }
@@ -306,8 +307,8 @@ impl SidebarView {
                                     div()
                                         .flex_1()
                                         .min_w_0()
-                                        .text_size(px(13.))
-                                        .line_height(px(17.))
+                                        .text_size(px(crate::theme::Type::BODY))
+                                        .line_height(px(20.))
                                         .overflow_hidden()
                                         .text_ellipsis()
                                         .whitespace_nowrap()
@@ -321,10 +322,10 @@ impl SidebarView {
                                 .items_center()
                                 .gap(px(Layout::SPACE_XS))
                                 .h(px(14.))
-                                .text_size(px(11.))
-                                .line_height(px(14.))
+                                .text_size(px(crate::theme::Type::CAPTION))
+                                .line_height(px(16.))
                                 .text_color(ui.subline())
-                                .child(div().size(px(11.)).flex_shrink_0().child(Icon::from(Lucide::GitBranch)))
+                                .child(div().size(px(13.)).flex_shrink_0().child(Icon::from(Lucide::GitBranch)))
                                 .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(if active {self.model.read(cx).review.as_ref().map(|r|format!("{}{}",r.branch,if r.dirty.is_empty(){""}else{" · ●"})).unwrap_or_else(||w.branch.clone())}else{w.branch.clone()})),
                         )
                         .child(model_history_stack(&history, &current, ui)),
@@ -337,17 +338,17 @@ impl SidebarView {
                             .flex()
                             .items_center()
                             .gap(px(Layout::SPACE_XS))
-                            .h(px(22.))
+                            .h(px(26.))
                             .pl(px(GROUP_INDENT + 21.))
                             .pr(px(Layout::SPACE_SM))
-                            .text_size(px(11.))
+                            .text_size(px(crate::theme::Type::CAPTION))
                             .text_color(ui.subline())
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if !this.expanded.remove(&wid) { this.expanded.insert(wid.clone()); }
                                 cx.notify();
                             }))
-                            .child(div().size(px(11.)).child(Icon::from(if expanded { Lucide::ChevronDown } else { Lucide::ChevronRight })))
+                            .child(div().size(px(13.)).child(Icon::from(if expanded { Lucide::ChevronDown } else { Lucide::ChevronRight })))
                             .child(format!("{count} conversations")),
                     );
                     if expanded {
@@ -387,17 +388,17 @@ impl SidebarView {
                     .flex()
                     .items_center()
                     .gap(px(Layout::SPACE_XS))
-                    .h(px(24.))
+                    .h(px(28.))
                     .pl(px(GROUP_INDENT))
                     .pr(px(Layout::SPACE_SM))
-                    .text_size(px(11.))
+                    .text_size(px(crate::theme::Type::CAPTION))
                     .text_color(ui.subline())
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !this.expanded.remove(&key) { this.expanded.insert(key.clone()); }
                         cx.notify();
                     }))
-                    .child(div().size(px(11.)).child(Icon::from(if open { Lucide::ChevronDown } else { Lucide::ChevronRight })))
+                    .child(div().size(px(13.)).child(Icon::from(if open { Lucide::ChevronDown } else { Lucide::ChevronRight })))
                     .child(format!("{} archived", archived_threads.len())),
             );
             if open {
@@ -508,8 +509,8 @@ impl SidebarView {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .text_size(px(11.))
-                                .line_height(px(14.))
+                                .text_size(px(crate::theme::Type::CAPTION))
+                                .line_height(px(16.))
                                 .text_color(ui.subline())
                                 .overflow_hidden()
                                 .text_ellipsis()
@@ -529,8 +530,8 @@ impl SidebarView {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(13.))
-                            .line_height(px(17.))
+                            .text_size(px(crate::theme::Type::BODY))
+                            .line_height(px(20.))
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
@@ -545,10 +546,10 @@ impl SidebarView {
                         .items_center()
                         .gap(px(Layout::SPACE_XS))
                         .h(px(14.))
-                        .text_size(px(11.))
-                        .line_height(px(14.))
+                        .text_size(px(crate::theme::Type::CAPTION))
+                        .line_height(px(16.))
                         .text_color(ui.subline())
-                        .child(div().size(px(11.)).flex_shrink_0().child(Icon::from(Lucide::GitBranch)))
+                        .child(div().size(px(13.)).flex_shrink_0().child(Icon::from(Lucide::GitBranch)))
                         .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(b)),
                 )
             })
@@ -564,7 +565,7 @@ impl SidebarView {
             return vec![div()
                 .px_4()
                 .py_3()
-                .text_xs()
+                .text_size(px(crate::theme::Type::SMALL))
                 .text_color(ui.text_faint)
                 .child(format!("No thread matches \"{query}\""))
                 .into_any_element()];
@@ -585,7 +586,7 @@ impl SidebarView {
                         .h(px(28.))
                         .px(px(Layout::SPACE_SM))
                         .when(!last_group.is_empty(), |el| el.mt(px(Layout::SIDEBAR_SECTION_GAP - Layout::SIDEBAR_LIST_GAP)))
-                        .child(div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(Ui::alpha(ui.text_muted, 0.5)).child(group))
+                        .child(div().text_size(px(crate::theme::Type::SMALL)).font_weight(FontWeight::MEDIUM).text_color(Ui::alpha(ui.text_muted, 0.5)).child(group))
                         .child(div().flex_1().h(px(1.)).bg(Ui::alpha(ui.border, 0.6)))
                         .into_any_element(),
                 );
@@ -617,7 +618,7 @@ impl SidebarView {
                         .pb_1()
                         .children(u.windows.iter().enumerate().map(|(ix, w)| usage_bar(&a.backend, ix, w, ui)))
                         .when_some(u.error.clone(), |el, error| el.child(
-                            div().text_size(px(10.)).text_color(ui.text_faint)
+                            div().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint)
                                 .child(if u.windows.is_empty() { error } else { format!("Last known usage · {error}") })
                         )),
                 )
@@ -664,7 +665,7 @@ impl SidebarView {
             .child(
                 div()
                     .flex_1()
-                    .text_xs()
+                    .text_size(px(crate::theme::Type::SMALL))
                     .text_color(ui.text_faint)
                     .overflow_hidden()
                     .text_ellipsis()
@@ -675,7 +676,7 @@ impl SidebarView {
                 el.child(
                     Button::new(SharedString::from(format!("svc-menu-{}", a.backend)))
                         .ghost()
-                        .xsmall()
+                        .small()
                         .compact()
                         .label("…")
                         .dropdown_menu(move |menu, _, _| {
@@ -752,11 +753,11 @@ impl Render for SidebarView {
                             .cursor_pointer()
                             .hover(move |s| s.bg(ui.hover))
                             .tooltip(|window, cx| Tooltip::new("Home").build(window, cx))
-                            .child(div().text_size(px(16.)).child("💣"))
+                            .child(div().text_size(px(crate::theme::Type::TITLE)).child("💣"))
                             .child(
                                 div()
                                     .font_family(ui.mono.clone())
-                                    .text_size(px(14.))
+                                    .text_size(px(crate::theme::Type::BODY))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(ui.text)
                                     .child("Bomb Code"),
@@ -791,7 +792,7 @@ impl Render for SidebarView {
                                         div()
                                             .px(px(Layout::SPACE_SM))
                                             .pb(px(Layout::SPACE_SM))
-                                            .text_size(px(12.))
+                                            .text_size(px(crate::theme::Type::SMALL))
                                             .text_color(ui.text_faint)
                                             .child(if self.model.read(cx).projects.is_empty() { "No projects yet — add a folder" } else { "No conversations yet — start a new chat" }),
                                     )
@@ -814,7 +815,7 @@ impl Render for SidebarView {
                         div()
                             .px_4()
                             .pb_1()
-                            .text_xs()
+                            .text_size(px(crate::theme::Type::SMALL))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(ui.text_faint)
                             .child("Services"),
@@ -853,7 +854,7 @@ fn usage_bar(backend: &str, ix: usize, w: &bomb_core::usage::UsageWindow, ui: &U
         .items_center()
         .gap_2()
         .when_some(resets, |el, r| el.tooltip(move |window, cx| Tooltip::new(r.clone()).build(window, cx)))
-        .child(div().w(px(40.)).text_xs().text_color(ui.text_faint).child(w.label.clone()))
+        .child(div().w(px(56.)).flex_shrink_0().whitespace_nowrap().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child(w.label.clone()))
         .child(
             div()
                 .flex_1()
@@ -865,8 +866,9 @@ fn usage_bar(backend: &str, ix: usize, w: &bomb_core::usage::UsageWindow, ui: &U
         )
         .child(
             div()
-                .w(px(32.))
-                .text_xs()
+                .w(px(40.))
+                .flex_shrink_0()
+                .text_size(px(crate::theme::Type::SMALL))
                 .text_right()
                 .text_color(ui.text_faint)
                 .child(format!("{}%", pct.round() as i64)),
@@ -939,8 +941,8 @@ fn status_corner(state: &str, updated_at: &str, ui: &Ui) -> AnyElement {
             return div()
                 .flex_shrink_0()
                 .h(px(14.))
-                .text_size(px(10.))
-                .line_height(px(14.))
+                .text_size(px(crate::theme::Type::CAPTION))
+                .line_height(px(16.))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(ui.subline())
                 .child(time_ago(updated_at))
@@ -954,7 +956,7 @@ fn status_corner(state: &str, updated_at: &str, ui: &Ui) -> AnyElement {
         .gap(px(Layout::SPACE_XS))
         .h(px(14.))
         .child(div().size(px(6.)).rounded_full().bg(color))
-        .child(div().text_size(px(10.)).line_height(px(14.)).font_weight(FontWeight::MEDIUM).text_color(color).child(word))
+        .child(div().text_size(px(crate::theme::Type::CAPTION)).line_height(px(16.)).font_weight(FontWeight::MEDIUM).text_color(color).child(word))
         .into_any_element()
 }
 
@@ -1020,6 +1022,6 @@ fn model_history_stack(history: &[grok_persistence::ModelUsage], current: &grok_
                 .child(crate::views::brand::brand_mark(&item.backend, 11., true, ui))
                 .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
         }))
-        .when(previous.len() > 4, |el| el.child(div().pl_1().text_xs().text_color(ui.text_muted).child(format!("+{}", previous.len()-4))))
+        .when(previous.len() > 4, |el| el.child(div().pl_1().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(format!("+{}", previous.len()-4))))
         .into_any_element()
 }

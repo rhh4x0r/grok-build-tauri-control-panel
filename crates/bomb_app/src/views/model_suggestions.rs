@@ -254,7 +254,7 @@ impl ComposerView {
         let trigger = Button::new("smart-routing")
             .ghost()
             .small()
-            .icon(Lucide::GitBranch)
+            .icon(Lucide::Route)
             .selected(enabled)
             .tooltip(if !configured {
                 "Enable JEV in Settings to use Smart Model Routing."
@@ -293,7 +293,7 @@ impl ComposerView {
                             .child("Smart Model Routing"),
                     )
                     .child(
-                        div().text_xs().text_color(ui.text_muted).child(
+                        div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(
                             "Suggest a model for each prompt. You choose whether to switch.",
                         ),
                     )
@@ -333,7 +333,7 @@ impl ComposerView {
                             }),
                     )
                     .when_some(feedback.clone(), |el, text| {
-                        el.child(div().text_xs().text_color(ui.text_muted).child(text))
+                        el.child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(text))
                     })
                     .child(
                         Button::new("routing-settings")
@@ -355,7 +355,7 @@ impl ComposerView {
         }
         let ui = Ui::of(cx);
         let mut card = super::super::brand::handoff_card(&ui)
-            .text_size(px(12.))
+            .text_size(px(crate::theme::Type::SMALL))
             .text_color(ui.text_muted)
             .whitespace_normal();
         if self.routing_pending.is_some() {
@@ -454,7 +454,7 @@ impl ComposerView {
                                 ))
                                 .child(
                                     div()
-                                        .text_size(px(11.))
+                                        .text_size(px(crate::theme::Type::CAPTION))
                                         .text_color(ui.text_faint)
                                         .child(current_effort),
                                 ),
@@ -464,7 +464,7 @@ impl ComposerView {
                         .child(effort_picker),
                 )
                 .child(
-                    div().text_size(px(11.)).text_color(ui.text_faint).child(
+                    div().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint).child(
                         "Suggested for this prompt. Recent conversation history carries over.",
                     ),
                 )
@@ -508,11 +508,11 @@ impl ComposerView {
                         ),
                 );
             if self.routing_details {
-                card=card.child(div().text_xs().text_color(ui.text_muted).child("Based on your model preferences, this prompt and recent conversation. Conversation history carries over when switching providers."));
+                card=card.child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child("Based on your model preferences, this prompt and recent conversation. Conversation history carries over when switching providers."));
                 if let Some((_, message)) = &self.routing_feedback {
                     card = card.child(
                         div()
-                            .text_xs()
+                            .text_size(px(crate::theme::Type::SMALL))
                             .text_color(ui.text_muted)
                             .child(message.clone()),
                     );

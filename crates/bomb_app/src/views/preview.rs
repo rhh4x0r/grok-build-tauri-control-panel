@@ -1,9 +1,10 @@
 //! Dev-server preview: an embedded WebKit view docked to the right of the
 //! thread, pointed at the dev server's URL (like Codex's preview pane).
 
+use crate::views::button::Button;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::Icon;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::Sizable;
 use gpui_kit::base::Selectable;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -175,7 +176,7 @@ impl Render for PreviewPanel {
                             .flex_1()
                             .min_w_0()
                             .px_2()
-                            .text_xs()
+                            .text_size(px(crate::theme::Type::SMALL))
                             .font_family(ui.mono.clone())
                             .text_color(ui.text_muted)
                             .overflow_hidden()

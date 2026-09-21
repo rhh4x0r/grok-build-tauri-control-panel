@@ -44,7 +44,7 @@ pub fn handoff_card(ui: &Ui) -> Div {
 pub fn model_identity(backend: &str, label: String, ui: &Ui) -> Div {
     div().flex().items_center().gap_2()
         .child(brand_mark(backend, 18., true, ui))
-        .child(div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).child(label))
+        .child(div().text_size(px(crate::theme::Type::SMALL)).font_weight(FontWeight::MEDIUM).child(label))
 }
 
 /// Human-readable model name: `grok-4.6` → "Grok 4.6",

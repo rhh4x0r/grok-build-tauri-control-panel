@@ -1,4 +1,5 @@
 //! A working location and read-only access are independent choices.
+use crate::views::button::Button;
 use crate::{
     models::app::AppModel,
     runtime::{services, spawn_service},
@@ -7,7 +8,7 @@ use crate::{
 use bomb_core::services::git_ui::BranchChoices;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
-    button::{Button, ButtonVariants},
+    button::ButtonVariants,
     menu::{DropdownMenu, PopupMenuItem},
     Sizable,
 };
@@ -87,7 +88,7 @@ impl Render for WorkLocation {
             .flex_wrap()
             .items_center()
             .gap_2()
-            .text_xs()
+            .text_size(px(crate::theme::Type::SMALL))
             .text_color(ui.text_muted)
             .child(
                 Button::new("work-location")

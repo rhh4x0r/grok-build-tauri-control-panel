@@ -170,7 +170,7 @@ impl RootView {
                         .child(
                             div()
                                 .id("project-chip")
-                                .text_xs()
+                                .text_size(px(crate::theme::Type::SMALL))
                                 .text_color(ui.text_faint)
                                 .cursor_pointer()
                                 .hover(|s| s.opacity(0.8))

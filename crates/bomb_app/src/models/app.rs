@@ -89,6 +89,8 @@ pub struct AppModel {
     pub project_overviews: HashMap<String, Result<bomb_core::services::project_overview::ProjectOverview, String>>,
     pub overview_loading: HashSet<String>,
     pub overview_branch: Option<String>,
+    /// Workspaces to close once their agent finishes merging.
+    pub close_after_merge: HashSet<String>,
     pub active_workspace: Option<String>,
     pub source_thread: Option<String>,
     pub review: Option<bomb_core::services::workspaces::WorkspaceReview>,
@@ -139,6 +141,7 @@ impl AppModel {
             project_overviews: HashMap::new(),
             overview_loading: HashSet::new(),
             overview_branch: None,
+            close_after_merge: HashSet::new(),
             active_workspace: None,
             source_thread: None,
             review: None,
@@ -285,27 +288,6 @@ impl AppModel {
         cx.notify();
     }
 
-    /// An intent choice for a new conversation, not a Git-mode switch.
-    pub fn set_new_intent(&mut self, questions: bool, cx: &mut Context<Self>) {
-        self.prefs.read_only = questions;
-        self.prefs.location = if questions {"checkout"}else{"new"}.into();
-        self.prefs.temporary = questions;
-        self.prefs.worktree = !questions;
-        if questions { self.prefs.mode = "plan".into(); }
-        cx.notify();
-    }
-
-    pub fn inline_project(&mut self, root: String, cx: &mut Context<Self>) {
-        if let Some(w) = self.workspaces.iter().find(|w| w.project_root == root && w.inline) {
-            self.open_workspace(w.id.clone(), cx);
-        } else {
-            self.set_active_project(root, cx);
-            self.new_thread_open = true;
-            self.set_new_intent(true, cx);
-            cx.notify();
-        }
-    }
-
     pub fn refresh_review(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.active_workspace.clone() else { self.review = None; return; };
         if self.workspaces.iter().any(|w| w.id == id && w.archived_at.is_some()) { self.review = None; return; }
@@ -339,17 +321,6 @@ impl AppModel {
                 match res { Ok(note) => m.toast(ToastKind::Success, note), Err(e) => m.fail(e, cx) }
                 m.refresh_threads(cx);m.refresh_review(cx);
                 cx.notify();
-            });
-        });
-    }
-
-    pub fn fetch_project(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = self.active_project.clone() else { return; };
-        let this = cx.entity().downgrade();
-        spawn_service(cx, async move { services::workspaces::fetch_project(root).await }, move |res, cx| {
-            let _ = this.update(cx, |m, cx| {
-                match res { Ok(()) => m.toast(ToastKind::Success, "Project fetched"), Err(e) => m.fail(e, cx) }
-                m.refresh_review(cx); m.refresh_project_status(false, cx); m.refresh_project_overview(cx); cx.notify();
             });
         });
     }
@@ -817,6 +788,7 @@ impl AppModel {
 
     pub fn apply_events(&mut self, batch: Vec<ControlEvent>, cx: &mut Context<Self>) {
         let mut need_refresh = false;
+        let mut ended = Vec::new();
         for ev in batch {
             match &ev {
                 ControlEvent::SessionCreated { session_id, .. } => {
@@ -824,8 +796,15 @@ impl AppModel {
                         need_refresh = true;
                     }
                 }
-                ControlEvent::SessionStatusChanged { .. }
-                | ControlEvent::SessionCancelled { .. }
+                ControlEvent::SessionStatusChanged { session_id, status, .. } => {
+                    need_refresh = true;
+                    if matches!(status, grok_events::SessionStatus::Completed | grok_events::SessionStatus::Idle) { ended.push(*session_id); }
+                    if matches!(status, grok_events::SessionStatus::Cancelled | grok_events::SessionStatus::Failed) {
+                        // A stopped or failed merge must not close anything.
+                        if let Some(w) = self.workspaces.iter().find(|w| w.threads.contains(&session_id.to_string())) { let id = w.id.clone(); self.close_after_merge.remove(&id); }
+                    }
+                }
+                ControlEvent::SessionCancelled { .. }
                 | ControlEvent::SessionCompleted { .. } => need_refresh = true,
                 ControlEvent::Error {
                     session_id: None,
@@ -873,6 +852,7 @@ impl AppModel {
         if need_refresh {
             self.refresh_threads(cx);
         }
+        for session in ended { self.turn_ended(session, cx); }
     }
 
     // ── prompts / sessions ──────────────────────────────────────────────
@@ -1330,6 +1310,73 @@ impl AppModel {
         if let Some(w) = self.workspaces.iter().find(|w| w.threads.contains(&id.to_string())) {
             self.run_workspace_action(w.id.clone(), "update".into(), String::new(), cx);
         }
+    }
+
+    /// Ask the thread's own agent to do the merge in its chat. With `then_close`, the feature is closed once the merge has landed.
+    pub fn merge_to_main(&mut self, workspace: String, then_close: bool, cx: &mut Context<Self>) {
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        let id = workspace.clone();
+        spawn_service(cx, async move { services::workspaces::merge_request(&state, id).await }, move |res, cx| {
+            let _ = this.update(cx, |m, cx| match res {
+                Ok(request) => {
+                    m.review_open = false;
+                    m.open_workspace(workspace.clone(), cx);
+                    // A planning-only turn cannot merge anything.
+                    if m.prefs.mode == "plan" { m.prefs.mode = "ask".into(); }
+                    if then_close { m.close_after_merge.insert(workspace.clone()); } else { m.close_after_merge.remove(&workspace); }
+                    m.send_prompt(request, vec![], cx);
+                    cx.notify();
+                }
+                Err(e) => m.fail(e, cx),
+            });
+        });
+    }
+
+    /// A turn ended: refresh the board, and finish any pending "merge and close".
+    fn turn_ended(&mut self, session: Uuid, cx: &mut Context<Self>) {
+        let Some(w) = self.workspaces.iter().find(|w| w.threads.contains(&session.to_string())).cloned() else { return; };
+        if self.active_project.as_deref() == Some(&w.project_root) { self.refresh_project_overview(cx); }
+        // A resumed session can report idle before its turn starts; wait for the real end.
+        if self.threads.get(&session).is_some_and(|t| t.read(cx).thread.presence.turn_active()) { return; }
+        if !self.close_after_merge.remove(&w.id) { return; }
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        let id = w.id.clone();
+        spawn_service(cx, async move { services::workspaces::is_merged(&state, &id).await }, move |res, cx| {
+            let _ = this.update(cx, |m, cx| match res {
+                Ok(true) => m.close_feature(w.id.clone(), cx),
+                Ok(false) => { m.toast(ToastKind::Info, format!("“{}” was not closed because its work is not fully in main yet. Check the chat.", w.name)); cx.notify(); }
+                Err(e) => m.fail(e, cx),
+            });
+        });
+    }
+
+    /// Archive the thread and its chats; the branch is removed only when its work is already merged.
+    pub fn close_feature(&mut self, workspace: String, cx: &mut Context<Self>) {
+        if self.git_busy { return; }
+        self.git_busy = true; cx.notify();
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        let id = workspace.clone();
+        spawn_service(cx, async move { services::workspaces::close_feature(&state, id).await }, move |res, cx| {
+            let _ = this.update(cx, |m, cx| {
+                m.git_busy = false;
+                match res {
+                    Ok(note) => {
+                        if let Some(w) = m.workspaces.iter().find(|w| w.id == workspace).cloned() {
+                            m.archived.extend(w.threads.iter().filter_map(|t| Uuid::parse_str(t).ok()));
+                            m.save_archived(cx);
+                            if m.active_workspace.as_deref() == Some(&workspace) { m.review_open = false; m.set_active_project(w.project_root, cx); }
+                        }
+                        m.toast(ToastKind::Success, note);
+                    }
+                    Err(e) => m.fail(e, cx),
+                }
+                m.refresh_workspaces(cx); m.refresh_threads(cx); m.refresh_project_overview(cx);
+                cx.notify();
+            });
+        });
     }
 
     // ── projects ────────────────────────────────────────────────────────

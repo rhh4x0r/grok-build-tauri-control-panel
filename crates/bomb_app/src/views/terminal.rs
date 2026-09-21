@@ -1,9 +1,10 @@
 //! Docked, per-thread interactive terminals.
+use crate::views::button::Button;
 use crate::{runtime::spawn_service, theme::Ui};
 use bomb_core::terminal::TerminalSession;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
-    button::{Button, ButtonVariants},
+    button::ButtonVariants,
     Icon, Sizable,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
@@ -215,8 +216,8 @@ impl Render for TerminalPanel {
                 .flex()
                 .flex_col()
                 .font_family(ui.mono.clone())
-                .text_size(px(12.))
-                .line_height(px(16.));
+                .text_size(px(crate::theme::Type::SMALL))
+                .line_height(px(18.));
             for row in 0..rows {
                 let mut line = div().flex().h(px(16.)).flex_shrink_0();
                 for col in 0..cols {
@@ -272,7 +273,7 @@ impl Render for TerminalPanel {
             body = body.child(
                 div()
                     .p_3()
-                    .text_size(px(12.))
+                    .text_size(px(crate::theme::Type::SMALL))
                     .text_color(ui.text_muted)
                     .child(if self.loading {
                         "Opening shell…"
@@ -310,13 +311,13 @@ impl Render for TerminalPanel {
                     .child(div().flex_1())
                     .child(
                         div()
-                            .text_size(px(10.))
+                            .text_size(px(crate::theme::Type::CAPTION))
                             .text_color(ui.text_faint)
                             .child("⌘C copy screen · ⌘V paste · Ctrl+C interrupt"),
                     ),
             )
             .when_some(self.error.clone(), |el, error| {
-                el.child(div().text_size(px(11.)).text_color(ui.danger).child(error))
+                el.child(div().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.danger).child(error))
             })
             .child(body)
     }

@@ -1,10 +1,11 @@
 //! Session-advertised speed controls. Never substitute reasoning effort for speed.
+use crate::views::button::Button;
 use crate::{
     models::app::AppModel,
     runtime::{services, spawn_service},
 };
 use gpui_kit::component::{
-    button::{Button, ButtonVariants},
+    button::ButtonVariants,
     menu::{DropdownMenu, PopupMenuItem},
     Sizable,
 };

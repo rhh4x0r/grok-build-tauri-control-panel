@@ -1,8 +1,9 @@
 //! Project overview and workspace review controls.
+use crate::views::button::Button;
 use crate::models::app::AppModel;
 use crate::theme::Ui;
 use gpui_kit::assets::IconName as Lucide;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::text::TextView;
@@ -364,7 +365,7 @@ impl Render for ReviewPanel {
             )
             .child(
                 div()
-                    .text_xs()
+                    .text_size(px(crate::theme::Type::SMALL))
                     .text_color(ui.text_faint)
                     .child(if self.branch_tab {
                         format!(
@@ -436,7 +437,7 @@ impl Render for ReviewPanel {
                 .child(div().flex_1())
                 .child(
                     div()
-                        .text_xs()
+                        .text_size(px(crate::theme::Type::SMALL))
                         .text_color(ui.text_muted)
                         .child(format!("+{} −{}", file.added, file.removed)),
                 );
@@ -447,7 +448,7 @@ impl Render for ReviewPanel {
             for (sha, title) in &r.checkpoints {
                 list = list.child(
                     div()
-                        .text_xs()
+                        .text_size(px(crate::theme::Type::SMALL))
                         .text_color(ui.text_muted)
                         .child(format!("{}  {title}", &sha[..sha.len().min(8)])),
                 );
@@ -545,7 +546,7 @@ impl Render for ReviewPanel {
         }
         footer = footer.child(
             div()
-                .text_xs()
+                .text_size(px(crate::theme::Type::SMALL))
                 .text_color(ui.text_muted)
                 .child(if !r.remote {
                     "No remote configured · commits stay local".into()
@@ -577,7 +578,7 @@ impl Render for ReviewPanel {
             }menu
         }));
         if r.main_unpushed > 0 && r.branch != r.default_branch {
-            footer = footer.child(div().text_xs().child(format!(
+            footer = footer.child(div().text_size(px(crate::theme::Type::SMALL)).child(format!(
                 "Local {} has {} commits not pushed",
                 r.default_branch, r.main_unpushed
             )));
@@ -602,24 +603,22 @@ pub fn branch_control(model: Entity<AppModel>, cx: &mut App) -> AnyElement {
         .as_ref()
         .map(|r| r.branch.clone())
         .unwrap_or_else(|| w.branch.clone());
-    let dirty = review.as_ref().map(|r| r.dirty.len()).unwrap_or(0);
     let shared = w.shared_checkout;
-    let label = if shared {
-        format!("{branch} · Direct checkout")
-    } else {
-        branch.clone()
-    };
+    // The toolbar says where the work stands; branch names and Git detail live in the menu.
+    let label = review
+        .as_ref()
+        .map(|r| bomb_core::services::project_overview::describe_relation_short(r.dirty.len(), r.ahead, r.behind, &r.default_branch))
+        .unwrap_or_else(|| "Checking…".into());
+    let sentence = review.as_ref().map(|r| bomb_core::services::project_overview::describe_relation(r.ahead, r.behind, &r.default_branch));
     Button::new("thread-branch")
         .ghost()
         .small()
         .icon(Lucide::GitBranch)
-        .label(if dirty > 0 {
-            format!("{label} · {dirty} uncommitted")
-        } else {
-            label
-        })
+        .label(if shared { format!("{label} · works in the project folder") } else { label })
+        .tooltip("Where this thread’s work stands. Click for branch details and history.")
         .dropdown_caret(true)
         .dropdown_menu(move |mut menu, _, _| {
+            if let Some(sentence) = &sentence { menu = menu.item(PopupMenuItem::new(sentence.clone()).disabled(true)); }
             menu =
                 menu.item(PopupMenuItem::new(format!("Working branch: {branch}")).disabled(true)).item(PopupMenuItem::new(format!("Base reference: {}",w.base_ref)).disabled(true));
             if let Some(r) = &review {

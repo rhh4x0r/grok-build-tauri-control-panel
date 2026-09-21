@@ -2,11 +2,12 @@
 //! right-aligned bubbles; the agent's replies are plain markdown; thoughts and
 //! tool calls fold into one "Thought · Ran 4 commands" disclosure line.
 
+use crate::views::button::Button;
 use crate::models::app::AppModelHandle;
 use bomb_core::services;
 use bomb_core::transcript::{ApprovalCard, Body, Entry, PlanDoc, Role, ToolRow};
 use gpui_kit::assets::IconName as Lucide;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::component::{Icon, IconName, Sizable};
@@ -466,7 +467,7 @@ impl TranscriptView {
                         .items_center()
                         .gap_2()
                         .pt_1()
-                        .text_xs()
+                        .text_size(px(crate::theme::Type::SMALL))
                         .text_color(ui.text_faint)
                         .child(at.to_string())
                         .child(action("copy-reply", "Copy").on_click(move |_, _, cx| {
@@ -491,7 +492,7 @@ impl TranscriptView {
             let attempt=run.as_ref().and_then(|run|run.attempts.iter().find(|a|a.result.as_ref().zip(stage_result.as_ref()).is_some_and(|(a,b)|a.summary==b.summary)));
             let meta=attempt.map(|a| {
                 let seconds=chrono::DateTime::parse_from_rfc3339(&a.started_at).ok().zip(a.finished_at.as_deref().and_then(|s|chrono::DateTime::parse_from_rfc3339(s).ok())).map(|(s,e)|(e-s).num_seconds().max(0)).unwrap_or(0);
-                div().flex().items_center().gap_2().text_xs().text_color(ui.text_muted)
+                div().flex().items_center().gap_2().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted)
                     .child(super::brand::brand_mark(&a.backend,13.,true,ui))
                     .child(format!("{} · {}m {}s{}",a.model,seconds/60,seconds%60,if a.invalidated {" · Superseded by revision"}else{""}))
             });
@@ -536,6 +537,7 @@ impl TranscriptView {
         };
         let mut header = div()
             .id(("act-head", first_id))
+            .cursor_pointer()
             .flex()
             .items_center()
             .gap_2()
@@ -575,7 +577,7 @@ impl TranscriptView {
             )
             .child(div().text_sm().text_color(color).child(summary));
         if running {
-            header = header.child(div().text_xs().text_color(ui.text_faint).child("working…"));
+            header = header.child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child("working…"));
         }
         // Un-collapsing a collapsed-by-default group needs the header click to
         // land in `expanded`; fix the toggle so a collapsed group opens.
@@ -739,7 +741,7 @@ impl TranscriptView {
             .child(glyph)
             .child(
                 div()
-                    .text_size(px(13.))
+                    .text_size(px(crate::theme::Type::BODY))
                     .text_color(if failed { ui.danger } else { ui.text_muted })
                     .child(tool_label(&r.name)),
             )
@@ -747,7 +749,7 @@ impl TranscriptView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_size(px(13.))
+                    .text_size(px(crate::theme::Type::BODY))
                     .text_color(ui.text_faint)
                     .overflow_hidden()
                     .text_ellipsis()
@@ -757,7 +759,7 @@ impl TranscriptView {
             .when(failed, |el| {
                 el.child(
                     div()
-                        .text_xs()
+                        .text_size(px(crate::theme::Type::SMALL))
                         .text_color(ui.danger)
                         .child(r.status.clone()),
                 )
@@ -826,7 +828,7 @@ impl TranscriptView {
         let backends = app.read(cx).backends.clone();
         let code_it = Button::new(("code-it", id))
             .outline()
-            .xsmall()
+            .small()
             .label("Code it")
             .dropdown_caret(true)
             .dropdown_menu(move |mut menu, _, _| {
@@ -869,7 +871,7 @@ impl TranscriptView {
                     .gap_2()
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(crate::theme::Type::SMALL))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(ui.text_muted)
                             .child(doc.title.clone().unwrap_or_else(|| "Plan".into())),
@@ -981,7 +983,7 @@ impl TranscriptView {
                     .gap_2()
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(crate::theme::Type::SMALL))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(if open { ui.warning } else { ui.text_muted })
                             .child(if open {
@@ -997,7 +999,7 @@ impl TranscriptView {
                     )
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(crate::theme::Type::SMALL))
                             .font_family(mono.clone())
                             .text_color(ui.text_faint)
                             .child(
@@ -1013,7 +1015,7 @@ impl TranscriptView {
                         card.resolution.clone().filter(|r| r != "restored"),
                         |el, r| {
                             el.child(
-                                div().text_xs().text_color(ui.text_faint).child(
+                                div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child(
                                     card.options
                                         .iter()
                                         .find(|o| o.id == r)
@@ -1042,7 +1044,7 @@ impl TranscriptView {
             .when(expanded, |el| {
                 el.child(
                     div()
-                        .text_xs()
+                        .text_size(px(crate::theme::Type::SMALL))
                         .font_family(ui.mono.clone())
                         .text_color(ui.text_muted)
                         .whitespace_normal()
@@ -1078,7 +1080,7 @@ impl TranscriptView {
             ("line", id),
             div()
                 .py_1()
-                .text_xs()
+                .text_size(px(crate::theme::Type::SMALL))
                 .text_color(color)
                 .whitespace_normal()
                 .when(text.starts_with("Switched model:"), |el| {
@@ -1349,12 +1351,12 @@ fn terminal_block(
                 .h(px(30.))
                 .border_b_1()
                 .border_color(ui.border)
-                .child(div().text_xs().text_color(ui.text_faint).child("$"))
+                .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child("$"))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_xs()
+                        .text_size(px(crate::theme::Type::SMALL))
                         .font_family(mono.clone())
                         .text_color(ui.text)
                         .overflow_hidden()
@@ -1374,7 +1376,7 @@ fn terminal_block(
                         .flex()
                         .items_center()
                         .gap_1()
-                        .text_xs()
+                        .text_size(px(crate::theme::Type::SMALL))
                         .text_color(if failed { ui.danger } else { ui.success })
                         .child(div().size(px(12.)).child(Icon::from(if failed {
                             Lucide::X
@@ -1394,7 +1396,7 @@ fn terminal_block(
                 .id(("terminal-output-scroll",id))
                 .max_h(px(320.))
                 .min_w_0().overflow_y_scroll().overflow_x_hidden()
-                .text_xs()
+                .text_size(px(crate::theme::Type::SMALL))
                 .font_family(mono)
                 .when(n == 0, |el| {
                     el.child(div().text_color(ui.text_faint).child(if done {
@@ -1483,7 +1485,7 @@ fn image_placeholder(id: u64, args: &str, running: bool, ui: &Ui) -> AnyElement 
                 .flex()
                 .items_center()
                 .gap_2()
-                .text_xs()
+                .text_size(px(crate::theme::Type::SMALL))
                 .font_family(ui.mono.clone())
                 .text_color(ui.text_faint)
                 .child(label),
@@ -1492,7 +1494,7 @@ fn image_placeholder(id: u64, args: &str, running: bool, ui: &Ui) -> AnyElement 
             el.child(
                 div()
                     .max_w(px(320.))
-                    .text_xs()
+                    .text_size(px(crate::theme::Type::SMALL))
                     .text_color(ui.text_muted)
                     .child(caption),
             )
@@ -1545,7 +1547,7 @@ fn model_switch_notice(text: &str, ui: &Ui) -> Option<AnyElement> {
             )
             .child(
                 div()
-                    .text_size(px(11.))
+                    .text_size(px(crate::theme::Type::CAPTION))
                     .text_color(ui.text_faint)
                     .child(continuity.to_string()),
             )
@@ -1619,7 +1621,7 @@ fn diff_block(id: impl Into<ElementId>, text: &str) -> AnyElement {
     let md = format!("```diff\n{}\n```", text.trim_end());
     div()
         .id(id.clone())
-        .text_xs().min_w_0()
+        .text_size(px(crate::theme::Type::SMALL)).min_w_0()
         .max_h(px(400.))
         .overflow_y_scroll().overflow_x_hidden()
         .child(TextView::markdown(id, md).selectable(true))
@@ -1771,7 +1773,7 @@ fn mono_block(id: impl Into<ElementId>, text: &str, mono: &SharedString, color: 
         .bg(ui.ink(0.04))
         .border_1()
         .border_color(ui.border)
-        .text_xs()
+        .text_size(px(crate::theme::Type::SMALL))
         .font_family(mono.clone())
         .text_color(color)
         .whitespace_normal()

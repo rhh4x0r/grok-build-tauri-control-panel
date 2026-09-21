@@ -1,10 +1,11 @@
 //! One next step for connecting an agent, choosing a project and starting a chat.
+use crate::views::button::Button;
 use crate::{
     models::app::{project_name, AppModel},
     theme::Ui,
 };
 use gpui_kit::assets::IconName as Lucide;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::{Icon, Sizable};
 use gpui_kit::*;
@@ -57,7 +58,7 @@ pub fn setup(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
         .gap_5()
         .p_6()
         .child(
-            div().flex().gap_4().text_size(px(11.)).children(
+            div().flex().gap_4().text_size(px(crate::theme::Type::CAPTION)).children(
                 [
                     ("1  Connect", Step::Connect),
                     ("2  Choose project", Step::Project),
@@ -78,7 +79,7 @@ pub fn setup(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
         )
         .child(
             div()
-                .text_size(px(22.))
+                .text_size(px(crate::theme::Type::DISPLAY))
                 .font_weight(FontWeight::MEDIUM)
                 .child(title),
         )
@@ -86,7 +87,7 @@ pub fn setup(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
             div()
                 .max_w(px(440.))
                 .text_center()
-                .text_size(px(13.))
+                .text_size(px(crate::theme::Type::BODY))
                 .text_color(ui.text_muted)
                 .child(detail),
         );
@@ -177,7 +178,7 @@ pub fn setup(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
     }
     content = content.child(Button::new("welcome-temporary").ghost().label("Temporary chat")
         .on_click(move |_, _, cx| temporary.update(cx, |m, cx| m.temporary_chat(cx))))
-        .child(div().text_xs().text_color(ui.text_faint).child("No project needed · saved in ~/.bombcode/chats"));
+        .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child("No project needed · saved in ~/.bombcode/chats"));
     content.into_any_element()
 }
 
