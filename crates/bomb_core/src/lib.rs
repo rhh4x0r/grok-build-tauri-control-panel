@@ -8,7 +8,9 @@
 
 pub mod devserver;
 pub mod explainer;
+pub mod journal;
 pub mod presence;
+pub mod rpc;
 pub mod services;
 pub mod state;
 pub mod transcript;

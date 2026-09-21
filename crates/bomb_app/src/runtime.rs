@@ -15,7 +15,7 @@ use std::sync::Arc;
 use bomb_core::{AppState, ControlEvent};
 use gpui_kit::*;
 use tokio::runtime::Handle;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::models::app::AppModel;
 
@@ -50,39 +50,17 @@ where
     .detach();
 }
 
-/// Forward the backend event bus into [`AppModel`], batching bursts so a
-/// long stream costs one re-render per frame instead of one per chunk.
+/// Forward the core's event journal into [`AppModel`], batching bursts so a
+/// long stream costs one re-render per frame instead of one per chunk. The
+/// journal saves history and hides Foundry's helper sessions before we see them.
 pub fn start_bridge(cx: &mut App, model: WeakEntity<AppModel>) {
-    let bus = cx.global::<Services>().0.event_bus.clone();
-    let db = cx.global::<Services>().0.persistence.clone();
-    let foundry = cx.global::<Services>().0.foundry.clone();
+    let journal = cx.global::<Services>().0.journal.clone();
     let (tx, rx) = async_channel::unbounded::<ControlEvent>();
     cx.global::<Tokio>().0.spawn(async move {
-        let mut sub = bus.subscribe();
-        loop {
-            match sub.recv().await {
-                Ok(ev) => {
-                    // Durable copy first (agent text, tools, plans, images,
-                    // status), so a restart restores the whole thread.
-                    let transient = serde_json::to_value(&ev).ok().and_then(|v|v.get("session_id").and_then(|v|v.as_str()).map(|s|foundry.transient_child(s))).unwrap_or(false);
-                    if !transient { bomb_core::services::persist_control_event(&db, &ev); }
-                    let internal = serde_json::to_value(&ev).ok().and_then(|v|v.get("session_id").and_then(|v|v.as_str()).map(|s|foundry.child(s))).unwrap_or(false);
-                    if internal { continue; }
-                    if tx.send(ev).await.is_err() {
-                        break;
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(n, "ui event bridge lagged");
-                    let _ = tx
-                        .send(ControlEvent::Error {
-                            session_id: None,
-                            message: format!("{n} events dropped (UI fell behind)"),
-                            at: chrono::Utc::now(),
-                        })
-                        .await;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        let mut events = journal.attach_local().events;
+        while let Some((_, ev)) = events.recv().await {
+            if tx.send(ev).await.is_err() {
+                break;
             }
         }
         debug!("ui event bridge closed");

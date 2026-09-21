@@ -1,0 +1,17 @@
+[package]
+name = "bomb_proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bomb Code — wire protocol between a client and a core (local socket or paired server)"
+
+[dependencies]
+bytes.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

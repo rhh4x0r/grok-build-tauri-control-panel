@@ -696,7 +696,7 @@ impl Drop for WorkspaceTurn {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProjectStatus {
     pub branch: String,
     pub dirty: bool,

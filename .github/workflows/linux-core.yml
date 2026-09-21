@@ -1,0 +1,22 @@
+# The server half (bombd and everything under it) must build and pass on Linux.
+# The desktop app is macOS-only and is not built here.
+name: linux-core
+on:
+  push:
+    branches: [main, gpui-rewrite, server-projects]
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Configure Git for the real-Git tests
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@example.com"
+          git config --global init.defaultBranch main
+      - run: cargo build -p bomb_server --locked
+      - run: cargo test -p bomb_proto -p bomb_core -p bomb_server --locked -- --test-threads=1

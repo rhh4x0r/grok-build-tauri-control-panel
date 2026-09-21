@@ -15,7 +15,9 @@ members = [
     "crates/grok_persistence",
     "crates/grok_diff",
     "crates/bomb_foundry",
+    "crates/bomb_proto",
     "crates/bomb_core",
+    "crates/bomb_server",
     "crates/bomb_app",
 ]
 default-members = ["crates/bomb_app"]

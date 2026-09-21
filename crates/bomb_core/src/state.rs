@@ -8,9 +8,9 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use grok_cli_wrapper::{GrokCli, LoginManager};
-use grok_config::{discover_environment, GrokConfig, GrokPaths};
+use grok_config::{GrokConfig, GrokPaths, discover_environment};
 use grok_control_core::SessionRegistry;
-use grok_events::{shared_bus, EventBus};
+use grok_events::{EventBus, shared_bus};
 use grok_extensions::ExtensionsService;
 use grok_mcp::McpManager;
 use grok_memory::MemoryService;
@@ -22,6 +22,8 @@ use crate::devserver::DevServerManager;
 use crate::explainer::ExplainerService;
 
 pub struct AppState {
+    /// Saves and numbers every event; the UI and remote devices attach here.
+    pub journal: Arc<crate::journal::Journal>,
     pub foundry: Arc<crate::foundry::FoundryService>,
     pub workspace_turns: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     pub workspace_gate: Arc<tokio::sync::Mutex<()>>,
@@ -72,7 +74,7 @@ impl AppState {
         Self::initialize_with_paths(paths).await
     }
 
-    pub(crate) async fn initialize_with_paths(paths: GrokPaths) -> Result<Self> {
+    pub async fn initialize_with_paths(paths: GrokPaths) -> Result<Self> {
         let _ = paths.ensure_dirs();
 
         // Resolve the binary against the BASE (global-only) config and save
@@ -246,7 +248,9 @@ impl AppState {
             crate::foundry::FoundryService::open(&paths.sessions_dir.join("foundry.db"))
                 .map_err(anyhow::Error::msg)?,
         );
+        let journal = crate::journal::Journal::start(&event_bus, persistence.clone(), foundry.clone());
         Ok(Self {
+            journal,
             foundry,
             workspace_turns: Arc::new(std::sync::Mutex::new(Default::default())),
             workspace_gate: Arc::new(tokio::sync::Mutex::new(())),

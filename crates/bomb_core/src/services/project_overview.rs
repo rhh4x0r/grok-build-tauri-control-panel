@@ -1,10 +1,10 @@
 //! Read-only project map. Branch comparisons are against the local default branch.
 use super::workspaces::default_branch;
 use grok_worktree::run_git;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{path::Path, time::Duration};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Branch {
     pub name: String,
     /// The branch this one is compared with: a thread's starting branch, otherwise the default branch.
@@ -16,7 +16,7 @@ pub struct Branch {
     pub commits: Vec<(String, String)>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PullRequest {
     pub number: u64,
@@ -57,7 +57,7 @@ impl PullRequest {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectOverview {
     pub git_detected: bool,
     pub default_branch: String,

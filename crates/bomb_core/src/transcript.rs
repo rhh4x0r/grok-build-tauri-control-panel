@@ -391,6 +391,8 @@ impl Thread {
     pub fn apply(&mut self, ev: &ControlEvent, now: Instant) -> Vec<Change> {
         match ev {
             ControlEvent::AgentMessage { text, .. } => self.on_agent_message(text, now),
+            // A prompt typed on another device attached to this thread.
+            ControlEvent::UserMessage { text, .. } => self.note_prompt(text, Vec::new(), now),
             ControlEvent::ToolCall { event, .. } => self.on_tool_call(event, now),
             ControlEvent::PlanUpdate { event, .. } => {
                 let mut ch = self.close_streams();

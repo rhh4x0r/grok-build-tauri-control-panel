@@ -28,7 +28,17 @@ gpui_kit::actions!(
 );
 
 pub fn init(cx: &mut App) {
-    cx.on_action(|_: &Quit, cx| cx.quit());
+    // Stop agents cleanly and flush history first; never hang the quit on a stuck agent.
+    cx.on_action(|_: &Quit, cx| {
+        let state = crate::runtime::services(cx);
+        crate::runtime::spawn_service(
+            cx,
+            async move {
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(3), bomb_core::services::shutdown_all(&state)).await;
+            },
+            |_, cx| cx.quit(),
+        );
+    });
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-,", OpenSettings, None),

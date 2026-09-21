@@ -1,7 +1,7 @@
 //! Broadcast event bus for the control panel backend.
 //!
 //! Fans out session lifecycle, tool calls, plan updates, and system events
-//! to Tauri UI subscribers and internal services.
+//! to UI subscribers and internal services.
 
 use std::sync::Arc;
 
@@ -91,6 +91,14 @@ pub enum ControlEvent {
         request_id: String,
         option_id: Option<String>,
         cancelled: bool,
+        at: DateTime<Utc>,
+    },
+    /// A prompt sent by a connected device, so other devices on the same thread see it.
+    /// `origin` names the sending client; that client already shows the prompt and skips it.
+    UserMessage {
+        session_id: Uuid,
+        text: String,
+        origin: String,
         at: DateTime<Utc>,
     },
     Error {

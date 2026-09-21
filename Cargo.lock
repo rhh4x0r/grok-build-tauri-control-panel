@@ -795,6 +795,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "bomb_proto"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "bomb_server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bomb_core",
+ "bomb_proto",
+ "grok_config",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "borsh"
 version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -618,7 +618,7 @@ pub async fn get_session_transcript(
 
 /// An image attached to a prompt from the composer. `data` is base64 with no
 /// `data:` URI prefix; `name` is only for the transcript breadcrumb.
-#[derive(Debug, serde::Deserialize, Clone)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageInput {
     pub mime_type: String,
