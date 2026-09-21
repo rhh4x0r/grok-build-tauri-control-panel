@@ -250,7 +250,8 @@ impl AppModel {
         if !self.overview_loading.insert(root.clone()) { return; }
         let key = root.clone();
         let this = cx.entity().downgrade();
-        spawn_service(cx, async move { services::project_overview::load(&root).await }, move |result, cx| {
+        let state = svc(cx);
+        spawn_service(cx, async move { services::project_overview::load_for_project(&state, &root).await }, move |result, cx| {
             let _ = this.update(cx, |m, cx| {
                 m.overview_loading.remove(&key);
                 m.project_overviews.insert(key, result);
@@ -266,7 +267,7 @@ impl AppModel {
         let this = cx.entity().downgrade();
         spawn_service(cx, async move {
             services::project_overview::initialize_repository(&root).await?;
-            services::project_overview::load(&root).await
+            services::project_overview::load(&root, &Default::default()).await
         }, move |result, cx| {
             let _ = this.update(cx, |m, cx| {
                 m.overview_loading.remove(&key);

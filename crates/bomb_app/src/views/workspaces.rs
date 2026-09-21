@@ -370,7 +370,7 @@ impl Render for ReviewPanel {
                     .child(if self.branch_tab {
                         format!(
                             "Compared with {} · {} ahead, {} behind",
-                            r.default_branch, r.ahead, r.behind
+                            r.base, r.ahead, r.behind
                         )
                     } else {
                         "Choose files to commit. Click a filename to inspect its diff.".into()
@@ -561,7 +561,7 @@ impl Render for ReviewPanel {
         );
         let app = self.model.clone();
         let wid = id.clone();
-        let base = r.default_branch.clone();
+        let base = r.base.clone();
         let branch = r.branch.clone();
         let remote = r.remote;
         let shared = w.shared_checkout;
@@ -607,9 +607,9 @@ pub fn branch_control(model: Entity<AppModel>, cx: &mut App) -> AnyElement {
     // The toolbar says where the work stands; branch names and Git detail live in the menu.
     let label = review
         .as_ref()
-        .map(|r| bomb_core::services::project_overview::describe_relation_short(r.dirty.len(), r.ahead, r.behind, &r.default_branch))
+        .map(|r| bomb_core::services::project_overview::describe_relation_short(r.dirty.len(), r.ahead, r.behind, &r.base))
         .unwrap_or_else(|| "Checking…".into());
-    let sentence = review.as_ref().map(|r| bomb_core::services::project_overview::describe_relation(r.ahead, r.behind, &r.default_branch));
+    let sentence = review.as_ref().map(|r| bomb_core::services::project_overview::describe_relation(r.ahead, r.behind, &r.base));
     Button::new("thread-branch")
         .ghost()
         .small()
@@ -620,13 +620,13 @@ pub fn branch_control(model: Entity<AppModel>, cx: &mut App) -> AnyElement {
         .dropdown_menu(move |mut menu, _, _| {
             if let Some(sentence) = &sentence { menu = menu.item(PopupMenuItem::new(sentence.clone()).disabled(true)); }
             menu =
-                menu.item(PopupMenuItem::new(format!("Working branch: {branch}")).disabled(true)).item(PopupMenuItem::new(format!("Base reference: {}",w.base_ref)).disabled(true));
+                menu.item(PopupMenuItem::new(format!("Working branch: {branch}")).disabled(true)).item(PopupMenuItem::new(format!("Started from: {}", review.as_ref().map(|r| r.base.clone()).unwrap_or_else(|| w.base_ref.clone()))).disabled(true));
             if let Some(r) = &review {
                 menu = menu
                     .item(
                         PopupMenuItem::new(format!(
                             "Compared with {}: {} ahead · {} behind",
-                            r.default_branch, r.ahead, r.behind
+                            r.base, r.ahead, r.behind
                         ))
                         .disabled(true),
                     )

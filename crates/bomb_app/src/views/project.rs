@@ -312,7 +312,7 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                         ),
                 )
                 .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(if b.ahead > 0 { ui.text } else { ui.text_muted }).child(
-                    bomb_core::services::project_overview::describe_relation(b.ahead, b.behind, &base),
+                    bomb_core::services::project_overview::describe_relation(b.ahead, b.behind, &b.base),
                 ))
                 .child(div().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint).child(format!(
                     "{}{} files changed{}",
@@ -372,9 +372,9 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                                 Button::new(SharedString::from(format!("feature-merge-{}", w.id)))
                                     .primary()
                                     .small()
-                                    .label(format!("Merge to {base}"))
+                                    .label(format!("Merge to {}", b.base))
                                     .disabled(busy)
-                                    .tooltip(format!("Opens the chat and asks its agent to merge this work into {base}, resolving any conflicts it finds."))
+                                    .tooltip(format!("Opens the chat and asks its agent to merge this work into {}, resolving any conflicts it finds.", b.base))
                                     .on_click(move |_, _, cx| merge_app.update(cx, |m, cx| m.merge_to_main(merge_id.clone(), false, cx))),
                             )
                             .child(
@@ -383,7 +383,7 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                                     .small()
                                     .label("Merge & close")
                                     .disabled(busy)
-                                    .tooltip(format!("Same merge in the chat, then closes this feature once its work is confirmed in {base}."))
+                                    .tooltip(format!("Same merge in the chat, then closes this feature once its work is confirmed in {}.", b.base))
                                     .on_click(move |_, _, cx| both_app.update(cx, |m, cx| m.merge_to_main(both_id.clone(), true, cx))),
                             )
                         })

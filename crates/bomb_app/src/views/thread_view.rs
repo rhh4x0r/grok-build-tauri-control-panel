@@ -420,7 +420,7 @@ impl ThreadView {
             self.model.read(cx).workspaces.iter().find(|w| w.id == id && !w.inline && !w.shared_checkout && w.archived_at.is_none()).cloned()
         });
         let busy = self.model.read(cx).git_busy;
-        let base = review.map(|r| r.default_branch.clone()).unwrap_or_else(|| "main".into());
+        let base = review.map(|r| r.base.clone()).unwrap_or_else(|| "main".into());
         let can_merge = review.is_some_and(|r| r.ahead > 0 || !r.dirty.is_empty());
         let action = |id: &'static str, label: &str, icon: Lucide, show_label: bool| {
             Button::new(id)

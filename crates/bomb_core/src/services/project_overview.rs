@@ -7,6 +7,8 @@ use std::{path::Path, time::Duration};
 #[derive(Debug, Clone)]
 pub struct Branch {
     pub name: String,
+    /// The branch this one is compared with: a thread's starting branch, otherwise the default branch.
+    pub base: String,
     pub current: bool,
     pub ahead: usize,
     pub behind: usize,
@@ -64,7 +66,19 @@ pub struct ProjectOverview {
     pub pr_error: Option<String>,
 }
 
-pub async fn load(root: &str) -> Result<ProjectOverview, String> {
+/// Overview where each thread's branch is compared with the branch it started from.
+pub async fn load_for_project(state: &crate::state::AppState, root: &str) -> Result<ProjectOverview, String> {
+    let mut bases = std::collections::HashMap::new();
+    for w in state.persistence.list_workspaces().map_err(|e| e.to_string())? {
+        if w.project_root == root && !w.inline && !w.shared_checkout && w.archived_at.is_none() {
+            if let Ok(base) = super::workspaces::merge_target(&w).await { bases.insert(w.branch.clone(), base); }
+        }
+    }
+    load(root, &bases).await
+}
+
+/// `bases` maps a branch to the branch it should be compared with; others use the default branch.
+pub async fn load(root: &str, bases: &std::collections::HashMap<String, String>) -> Result<ProjectOverview, String> {
     let path = Path::new(root);
     if !path.is_absolute() {
         return Err("Project path must be absolute".into());
@@ -95,6 +109,8 @@ pub async fn load(root: &str) -> Result<ProjectOverview, String> {
             continue;
         };
         let reference = format!("refs/heads/{name}");
+        let default = base.clone();
+        let base = bases.get(name).filter(|b| b.as_str() != name).cloned().unwrap_or(default);
         let counts = run_git(
             path,
             &[
@@ -136,6 +152,7 @@ pub async fn load(root: &str) -> Result<ProjectOverview, String> {
             .collect();
         branches.push(Branch {
             name: name.into(),
+            base: base.clone(),
             current: head.trim() == "*",
             ahead: *counts.get(1).unwrap_or(&0),
             behind: *counts.first().unwrap_or(&0),
@@ -273,7 +290,7 @@ mod tests {
         run_git(p, &["commit", "--allow-empty", "-m", "main progresses"])
             .await
             .unwrap();
-        let map = load(p.to_str().unwrap()).await.unwrap();
+        let map = load(p.to_str().unwrap(), &Default::default()).await.unwrap();
         assert_eq!(map.default_branch, "main");
         assert!(map.branches[0].current);
         let feature = map.branches.iter().find(|b| b.name == "feature").unwrap();
@@ -287,9 +304,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().to_str().unwrap();
         std::fs::write(temp.path().join("notes.txt"), "keep me").unwrap();
-        assert!(!load(root).await.unwrap().git_detected);
+        assert!(!load(root, &Default::default()).await.unwrap().git_detected);
         initialize_repository(root).await.unwrap();
-        let map = load(root).await.unwrap();
+        let map = load(root, &Default::default()).await.unwrap();
         assert!(map.git_detected);
         assert_eq!(map.default_branch, "main");
         assert!(map.branches.is_empty());
