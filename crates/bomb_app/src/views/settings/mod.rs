@@ -6,6 +6,7 @@ pub mod model;
 
 use crate::views::button::Button;
 use gpui_kit::component::button::ButtonVariants;
+use gpui_kit::component::Disableable as _;
 use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
@@ -58,6 +59,7 @@ impl Render for SettingsView {
                         routing_page(),
                         mcp_page(),
                         memory_page(),
+                        servers_page(),
                         permissions_page(cx),
                         advanced_page(),
                     ]),
@@ -497,6 +499,156 @@ fn render_memory(cx: &mut App) -> AnyElement {
         )
         .into_any_element()
 }
+
+// ── Servers ─────────────────────────────────────────────────────────────
+
+fn servers_page() -> SettingPage {
+    SettingPage::new("Servers")
+        .description("Run projects on a server you own so threads keep working with your laptop closed. Any Mac you pair can pick them up.")
+        .group(SettingGroup::new().item(SettingItem::render(|_, _, cx| render_servers(cx))))
+}
+
+fn render_servers(cx: &mut App) -> AnyElement {
+    let ui = Ui::of(cx);
+    let model = settings(cx);
+    let app = cx.global::<AppModelHandle>().0.clone();
+    let pairing = app.read(cx).pairing;
+    let servers = crate::runtime::servers(cx).all();
+    let (link, name, project, invitee, devices, invite) = {
+        let m = model.read(cx);
+        (m.server_link.clone(), m.server_name.clone(), m.server_project.clone(), m.server_invitee.clone(), m.server_devices.clone(), m.server_invite.clone())
+    };
+    let pair_model = model.clone();
+    let caption = |text: &str| div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(text.to_string());
+    let mut page = div().flex().flex_col().gap_5().w_full();
+
+    for server in servers {
+        let id = server.config.id.clone();
+        let state = server.state();
+        let (dot, status) = match &state {
+            crate::remote::LinkState::Connected => (ui.success, "Connected".to_string()),
+            crate::remote::LinkState::Connecting => (ui.warning, "Connecting…".to_string()),
+            crate::remote::LinkState::Offline(why) => (ui.danger, why.clone()),
+        };
+        let (m_project, m_devices, m_invite, id_project, id_devices, id_invite, id_unpair) = (model.clone(), model.clone(), model.clone(), id.clone(), id.clone(), id.clone(), id.clone());
+        let unpair_app = app.clone();
+        let server_name = server.config.name.clone();
+        let mut card = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .rounded(px(Layout::PANEL_RADIUS))
+            .border_1()
+            .border_color(ui.border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().size(px(8.)).rounded_full().bg(dot))
+                    .child(div().text_size(px(crate::theme::Type::TITLE)).font_weight(FontWeight::MEDIUM).child(server.config.name.clone()))
+                    .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child(format!("{} · signed in as {}{}", server.config.host, server.config.user, if server.config.admin { " (admin)" } else { "" })))
+                    .child(div().flex_1())
+                    .child(Button::new(SharedString::from(format!("server-unpair-{id}"))).ghost().small().label("Unpair this Mac").on_click(move |_, window, cx| {
+                        let (app, id, name) = (unpair_app.clone(), id_unpair.clone(), server_name.clone());
+                        window.open_alert_dialog(cx, move |dlg, _, _| {
+                            let (app, id) = (app.clone(), id.clone());
+                            dlg.confirm()
+                                .title(format!("Unpair from {name}?"))
+                                .description("This Mac stops showing that server’s projects and is removed from its devices. Nothing on the server is deleted.")
+                                .on_ok(move |_, _, cx| { app.update(cx, |m, cx| m.unpair_server(id.clone(), cx)); true })
+                        });
+                    })),
+            )
+            .child(caption(&status))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().w(px(260.)).child(Input::new(&project)))
+                    .child(Button::new(SharedString::from(format!("server-project-{id}"))).outline().small().label("New project on this server").on_click(move |_, window, cx| {
+                        m_project.update(cx, |s, cx| s.create_server_project(id_project.clone(), window, cx));
+                    })),
+            )
+            .child(caption("Creates an empty Git project in ~/projects on the server and opens it here."));
+
+        card = card.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(div().w(px(260.)).child(Input::new(&invitee)))
+                .child(Button::new(SharedString::from(format!("server-invite-{id}"))).outline().small().label("Make a pairing link").on_click(move |_, window, cx| {
+                    m_invite.update(cx, |s, cx| s.invite_to_server(id_invite.clone(), window, cx));
+                }))
+                .child(Button::new(SharedString::from(format!("server-devices-{id}"))).ghost().small().label("Show devices").on_click(move |_, _, cx| {
+                    m_devices.update(cx, |s, cx| s.load_server_devices(id_devices.clone(), cx));
+                })),
+        );
+        if server.config.admin {
+            card = card.child(caption("As the admin you can make a link for another person on this server. You manage the server, so you can also read anything stored on it, including other people’s projects."));
+        }
+        if let Some((_, link_text)) = invite.as_ref().filter(|(for_server, _)| for_server == &id) {
+            card = card.child(
+                div()
+                    .p_2()
+                    .rounded(px(6.))
+                    .bg(ui.ink(0.04))
+                    .text_size(px(crate::theme::Type::SMALL))
+                    .font_family(ui.mono.clone())
+                    .child(link_text.clone()),
+            )
+            .child(caption("Paste this into Settings → Servers on the other Mac. It works once and expires in 10 minutes."));
+        }
+        for device in devices.get(&id).into_iter().flatten() {
+            let device_id = device["id"].as_str().unwrap_or_default().to_string();
+            let mine = device_id == server.config.device_id;
+            let (m_revoke, id_revoke) = (model.clone(), id.clone());
+            card = card.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .h(px(28.))
+                    .child(div().text_sm().child(device["label"].as_str().unwrap_or("Mac").to_string()))
+                    .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child(format!("{}{}", device["user"].as_str().unwrap_or_default(), if mine { " · this Mac" } else { "" })))
+                    .child(div().flex_1())
+                    .when(!mine, |el| {
+                        el.child(Button::new(SharedString::from(format!("server-revoke-{device_id}"))).ghost().small().label("Remove").on_click(move |_, _, cx| {
+                            m_revoke.update(cx, |s, cx| s.revoke_server_device(id_revoke.clone(), device_id.clone(), cx));
+                        }))
+                    }),
+            );
+        }
+        page = page.child(card);
+    }
+
+    page.child(
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Pair with a server"))
+            .child(caption("On the server, run `bombd up` (or `bombd invite`) and paste the link it prints. This Mac makes its own key for that server and keeps it in your keychain."))
+            .child(Input::new(&link))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().w(px(260.)).child(Input::new(&name)))
+                    .child(Button::new("server-pair").primary().small().label(if pairing { "Pairing…" } else { "Pair this Mac" }).disabled(pairing).on_click(move |_, window, cx| {
+                        pair_model.update(cx, |s, cx| s.pair_server(window, cx));
+                    })),
+            ),
+    )
+    .into_any_element()
+}
+
+// ── Worktrees ───────────────────────────────────────────────────────────
+
 
 // ── Advanced: thread folders ────────────────────────────────────────────
 

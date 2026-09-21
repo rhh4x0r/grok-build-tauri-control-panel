@@ -651,6 +651,8 @@ pub fn branch_control(model: Entity<AppModel>, cx: &mut App) -> AnyElement {
                     .disabled(true),
                 );
             }
+            // The Changes panel and Finder work on this Mac's files only.
+            if crate::remote::is_server_root(&w.project_root) { return menu; }
             let app = model.clone();
             menu = menu.item(PopupMenuItem::new("View changes & history").on_click(
                 move |_, _, cx| {

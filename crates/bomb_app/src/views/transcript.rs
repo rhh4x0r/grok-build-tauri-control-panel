@@ -4,7 +4,6 @@
 
 use crate::views::button::Button;
 use crate::models::app::AppModelHandle;
-use bomb_core::services;
 use bomb_core::transcript::{ApprovalCard, Body, Entry, PlanDoc, Role, ToolRow};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::ButtonVariants;
@@ -1957,7 +1956,11 @@ fn respond_button(
     let mut b = Button::new(id).label(label).small().compact();
     b = if primary { b.primary() } else { b.outline() };
     b.on_click(move |_, _, cx| {
-        let state = svc(cx);
+        // The thread may live on a paired server; answer the core that asked.
+        let core = match (uuid::Uuid::parse_str(&session_id), cx.try_global::<crate::models::app::AppModelHandle>()) {
+            (Ok(id), Some(app)) => app.0.read(cx).core_of_thread(id, cx),
+            _ => crate::runtime::Core::Local(svc(cx)),
+        };
         let sid = session_id.clone();
         let rid = request_id.clone();
         let opt = option_id.clone();
@@ -1966,9 +1969,9 @@ fn respond_button(
             cx,
             async move {
                 if let Some(rule) = rule {
-                    let _ = services::add_session_allow_rule(&state, sid.clone(), rule).await;
+                    let _ = core.add_session_allow_rule(sid.clone(), rule).await;
                 }
-                services::respond_approval(&state, sid, rid, opt).await
+                core.respond_approval(sid, rid, opt).await
             },
             |res, _| {
                 if let Err(e) = res {

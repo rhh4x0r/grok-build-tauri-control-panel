@@ -39,6 +39,14 @@ pub struct SettingsModel {
     pub cred_key: Entity<InputState>,
     pub cred_value: Entity<InputState>,
     pub wt_name: Entity<InputState>,
+    pub server_link: Entity<InputState>,
+    pub server_name: Entity<InputState>,
+    pub server_project: Entity<InputState>,
+    pub server_invitee: Entity<InputState>,
+    /// Devices per server id, as last listed.
+    pub server_devices: std::collections::HashMap<String, Vec<serde_json::Value>>,
+    /// A freshly made pairing link to show once, per server id.
+    pub server_invite: Option<(String, String)>,
     pub allow_rules: Entity<TextareaState>,
     pub deny_rules: Entity<TextareaState>,
     rules_loaded: bool,
@@ -73,6 +81,12 @@ impl SettingsModel {
             cred_key: mk("KEY (e.g. GITHUB_TOKEN)", window, cx),
             cred_value: mk("secret value", window, cx),
             wt_name: mk("new worktree name", window, cx),
+            server_link: mk("bomb://pair?…  (pairing link from your server)", window, cx),
+            server_name: mk("Name for this server, e.g. My VPS", window, cx),
+            server_project: mk("new project name", window, cx),
+            server_invitee: mk("user name on the server (blank = another Mac of mine)", window, cx),
+            server_devices: Default::default(),
+            server_invite: None,
             allow_rules: cx.new(|cx| TextareaState::new(window, cx).placeholder("one pattern per line, e.g. Bash(cargo test *)").auto_grow(3, 8)),
             deny_rules: cx.new(|cx| TextareaState::new(window, cx).placeholder("one pattern per line, e.g. Bash(rm -rf *)").auto_grow(3, 8)),
             rules_loaded: false,
@@ -126,6 +140,67 @@ impl SettingsModel {
     }
 
     /// Push the current permission rule text into the textareas once per load.
+    pub fn pair_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let link = self.server_link.read(cx).value().trim().to_string();
+        let name = self.server_name.read(cx).value().trim().to_string();
+        if link.is_empty() { return; }
+        self.server_link.update(cx, |s, cx| s.set_value("", window, cx));
+        self.server_name.update(cx, |s, cx| s.set_value("", window, cx));
+        let app = cx.global::<crate::models::app::AppModelHandle>().0.clone();
+        app.update(cx, |m, cx| m.pair_server(link, name, cx));
+    }
+
+    pub fn create_server_project(&mut self, server: String, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.server_project.read(cx).value().trim().to_string();
+        if name.is_empty() { return; }
+        self.server_project.update(cx, |s, cx| s.set_value("", window, cx));
+        let app = cx.global::<crate::models::app::AppModelHandle>().0.clone();
+        app.update(cx, |m, cx| m.create_server_project(server, name, cx));
+    }
+
+    pub fn load_server_devices(&mut self, server: String, cx: &mut Context<Self>) {
+        let Some(remote) = crate::runtime::servers(cx).get(&server) else { return; };
+        let weak = cx.entity().downgrade();
+        crate::runtime::spawn_service(cx, async move { remote.gateway("gateway.list_devices", serde_json::Value::Null).await }, move |res, cx| {
+            let _ = weak.update(cx, |s, cx| {
+                match res {
+                    Ok(list) => { s.server_devices.insert(server, list.as_array().cloned().unwrap_or_default()); }
+                    Err(e) => s.toast(ToastKind::Error, e, cx),
+                }
+                cx.notify();
+            });
+        });
+    }
+
+    pub fn revoke_server_device(&mut self, server: String, device: String, cx: &mut Context<Self>) {
+        let Some(remote) = crate::runtime::servers(cx).get(&server) else { return; };
+        let weak = cx.entity().downgrade();
+        crate::runtime::spawn_service(cx, async move { remote.gateway("gateway.revoke_device", serde_json::json!({ "id": device })).await }, move |res, cx| {
+            let _ = weak.update(cx, |s, cx| {
+                if let Err(e) = res { s.toast(ToastKind::Error, e, cx); }
+                s.load_server_devices(server, cx);
+            });
+        });
+    }
+
+    /// A one-time link for another Mac, or (admin only) for another person on this server.
+    pub fn invite_to_server(&mut self, server: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(remote) = crate::runtime::servers(cx).get(&server) else { return; };
+        let user = self.server_invitee.read(cx).value().trim().to_string();
+        self.server_invitee.update(cx, |s, cx| s.set_value("", window, cx));
+        let params = if user.is_empty() { serde_json::json!({}) } else { serde_json::json!({ "user": user }) };
+        let weak = cx.entity().downgrade();
+        crate::runtime::spawn_service(cx, async move { remote.gateway("gateway.create_invite", params).await }, move |res, cx| {
+            let _ = weak.update(cx, |s, cx| {
+                match res {
+                    Ok(v) => s.server_invite = Some((server, v["link"].as_str().unwrap_or_default().to_string())),
+                    Err(e) => s.toast(ToastKind::Error, e, cx),
+                }
+                cx.notify();
+            });
+        });
+    }
+
     pub fn sync_rule_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.rules_loaded {
             return;

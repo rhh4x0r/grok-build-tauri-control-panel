@@ -69,7 +69,7 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                                     })
                                 }),
                         )
-                        .child(
+                        .when(!crate::remote::is_server_root(&root), |el| el.child(
                             Button::new("project-reveal")
                                 .ghost()
                                 .small()
@@ -78,7 +78,7 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                                 .on_click(move |_, _, cx| {
                                     reveal.update(cx, |m, cx| m.reveal_project(cx))
                                 }),
-                        ),
+                        )),
                 ),
         );
     let overview = match data {

@@ -1,5 +1,5 @@
 //! Read-only destination checks and explicit setup for a new isolated thread.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Readiness {
     Ready,
     NeedsGit,

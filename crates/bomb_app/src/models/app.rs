@@ -146,6 +146,14 @@ pub struct AppModel {
     pub project_intro_seen: bool,
     /// Projects whose "In main" column is showing every card.
     pub show_all_merged: HashSet<String>,
+    /// Lists as each core last reported them; the combined lists below are rebuilt from these,
+    /// so a server that is briefly offline keeps its projects and threads on screen.
+    local_threads: Vec<ThreadDto>,
+    local_workspaces: Vec<grok_persistence::WorkspaceRecord>,
+    local_projects: Vec<String>,
+    server_lists: HashMap<String, (Vec<ThreadDto>, Vec<grok_persistence::WorkspaceRecord>, Vec<String>)>,
+    /// A pairing attempt is in flight.
+    pub pairing: bool,
     pub sidebar_sort: SidebarSort,
     /// Project roots shown in the sidebar's Pinned section, in the order they were pinned.
     pub pinned_projects: Vec<String>,
@@ -203,6 +211,11 @@ impl AppModel {
             overview_branch: None,
             project_intro_seen: false,
             show_all_merged: HashSet::new(),
+            local_threads: Vec::new(),
+            local_workspaces: Vec::new(),
+            local_projects: Vec::new(),
+            server_lists: HashMap::new(),
+            pairing: false,
             sidebar_sort: SidebarSort::default(),
             pinned_projects: Vec::new(),
             close_after_merge: HashSet::new(),
@@ -250,8 +263,8 @@ impl AppModel {
         if !self.overview_loading.insert(root.clone()) { return; }
         let key = root.clone();
         let this = cx.entity().downgrade();
-        let state = svc(cx);
-        spawn_service(cx, async move { services::project_overview::load_for_project(&state, &root).await }, move |result, cx| {
+        let core = crate::runtime::core_for_root(cx, &root);
+        spawn_service(cx, async move { core.project_overview(&root).await }, move |result, cx| {
             let _ = this.update(cx, |m, cx| {
                 m.overview_loading.remove(&key);
                 m.project_overviews.insert(key, result);
@@ -288,8 +301,22 @@ impl AppModel {
     pub fn refresh_project_status(&mut self, fetch: bool, cx: &mut Context<Self>) {
         let state = svc(cx); let this = cx.entity().downgrade();
         spawn_service(cx, async move { services::workspaces::refresh_projects(&state, fetch).await }, move |res, cx| {
-            let _ = this.update(cx, |m, cx| { if let Ok(rows) = res { m.project_status = rows.into_iter().collect(); } cx.notify(); });
+            let _ = this.update(cx, |m, cx| {
+                if let Ok(rows) = res {
+                    // Replace this Mac's entries only; server projects report separately.
+                    m.project_status.retain(|root, _| crate::remote::is_server_root(root));
+                    m.project_status.extend(rows);
+                }
+                cx.notify();
+            });
         });
+        for root in self.projects.iter().filter(|root| crate::remote::is_server_root(root)).cloned().collect::<Vec<_>>() {
+            let core = crate::runtime::core_for_root(cx, &root);
+            let this = cx.entity().downgrade();
+            spawn_service(cx, async move { let status = core.project_status(&root).await; (root, status) }, move |(root, status), cx| {
+                let _ = this.update(cx, |m, cx| { if let Ok(status) = status { m.project_status.insert(root, status); cx.notify(); } });
+            });
+        }
     }
 
     pub fn pull_project(&mut self, root: String, cx: &mut Context<Self>) {
@@ -306,7 +333,8 @@ impl AppModel {
             let _ = this.update(cx, |m, cx| {
                 match res {
                     Ok(rows) => {
-                        m.workspaces = rows;
+                        m.local_workspaces = rows;
+                        m.combine_lists(cx);
                         if let Some(id) = m.selected {
                             m.active_workspace = m.workspaces.iter().find(|w| w.threads.contains(&id.to_string())).map(|w| w.id.clone());
                         }
@@ -361,7 +389,9 @@ impl AppModel {
         let state = svc(cx);
         let this = cx.entity().downgrade();
         let selected = id.clone();
-        spawn_service(cx, async move { services::workspaces::review_workspace(&state, id).await }, move |res, cx| {
+        let core = self.core_of_workspace(&id, cx);
+        let _ = &state;
+        spawn_service(cx, async move { core.review_workspace(id).await }, move |res, cx| {
             let _ = this.update(cx, |m, cx| {
                 if m.active_workspace.as_deref() != Some(&selected) { return; }
                 m.review_loading = false;
@@ -374,12 +404,10 @@ impl AppModel {
     pub fn run_workspace_action(&mut self, id: String, action: String, value: String, cx: &mut Context<Self>) {
         if self.git_busy {return;}
         self.git_busy=true;cx.notify();
-        let state = svc(cx);
+        let core = self.core_of_workspace(&id, cx);
         let this = cx.entity().downgrade();
         spawn_service(cx, async move {
-            if action == "archive" { services::workspaces::archive_workspace(&state, id).await.map(|_| "Thread archived; branch and conversations kept".into()) }
-            else if action == "rename" { services::workspaces::rename_workspace(&state, id, value).await.map(|_| "Thread renamed".into()) }
-            else { services::workspaces::workspace_action(&state, id, action, value).await }
+            core.workspace_action(id, action, value).await
         }, move |res, cx| {
             let _ = this.update(cx, |m, cx| {
                 m.git_busy=false;
@@ -430,11 +458,172 @@ impl AppModel {
             async move { services::list_threads(&state).await },
             move |res, cx| {
                 let _ = this.update(cx, |m, cx| match res {
-                    Ok(list) => m.set_threads(list, cx),
+                    Ok(list) => { m.local_threads = list; m.combine_lists(cx); }
                     Err(e) => m.fail(e, cx),
                 });
             },
         );
+        self.refresh_servers(cx);
+    }
+
+    /// Ask every paired server for its projects, threads and workspaces.
+    pub fn refresh_servers(&mut self, cx: &mut Context<Self>) {
+        for remote in crate::runtime::servers(cx).all() {
+            let core = crate::runtime::Core::Remote(remote.clone());
+            let this = cx.entity().downgrade();
+            let server = remote.config.id.clone();
+            spawn_service(cx, async move { Ok::<_, String>((core.list_threads().await?, core.list_workspaces().await?, core.list_projects().await?)) }, move |res, cx| {
+                let _ = this.update(cx, |m, cx| {
+                    // Offline: keep showing what we last knew.
+                    if let Ok(lists) = res { m.server_lists.insert(server, lists); m.combine_lists(cx); }
+                    cx.notify();
+                });
+            });
+        }
+    }
+
+    // ── paired servers ──────────────────────────────────────────────────
+
+    /// Connect to every server this Mac has been paired with.
+    pub fn load_servers(&mut self, cx: &mut Context<Self>) {
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move { services::kv_get(&state, crate::remote::SERVERS_KEY).await }, move |res, cx| {
+            let saved: Vec<crate::remote::ServerConfig> = res.ok().flatten().and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default();
+            let _ = this.update(cx, |m, cx| { for config in saved { m.connect_server(config, cx); } });
+        });
+    }
+
+    fn connect_server(&mut self, config: crate::remote::ServerConfig, cx: &mut Context<Self>) {
+        let inbox = cx.global::<crate::runtime::ServerInbox>();
+        let (events, notices) = (inbox.events.clone(), inbox.notices.clone());
+        let servers = crate::runtime::servers(cx);
+        // Connection loops live on tokio.
+        cx.global::<crate::runtime::Tokio>().0.spawn(async move { servers.connect(config, events, notices); });
+    }
+
+    fn save_servers(&self, cx: &mut Context<Self>) {
+        let configs: Vec<_> = crate::runtime::servers(cx).all().iter().map(|s| s.config.clone()).collect();
+        let raw = serde_json::to_string(&configs).unwrap_or_else(|_| "[]".into());
+        let state = svc(cx);
+        spawn_service(cx, async move { services::kv_set(&state, crate::remote::SERVERS_KEY, &raw).await }, |_, _| {});
+    }
+
+    /// Pair this Mac with a server from its pairing link.
+    pub fn pair_server(&mut self, link: String, name: String, cx: &mut Context<Self>) {
+        let this = cx.entity().downgrade();
+        let label = std::process::Command::new("scutil").args(["--get", "ComputerName"]).output().ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "Mac".into());
+        self.pairing = true; cx.notify();
+        spawn_service(cx, async move { crate::remote::pair(&link, &name, &label).await }, move |res, cx| {
+            let _ = this.update(cx, |m, cx| {
+                m.pairing = false;
+                match res {
+                    Ok(config) => {
+                        m.toast(ToastKind::Success, format!("Paired with {}", config.name));
+                        m.connect_server(config.clone(), cx);
+                        // The registry gains the server on tokio a moment later; save what we know now.
+                        let mut configs: Vec<_> = crate::runtime::servers(cx).all().iter().map(|s| s.config.clone()).filter(|c| c.id != config.id).collect();
+                        configs.push(config);
+                        let raw = serde_json::to_string(&configs).unwrap_or_else(|_| "[]".into());
+                        let state = svc(cx);
+                        spawn_service(cx, async move { services::kv_set(&state, crate::remote::SERVERS_KEY, &raw).await }, |_, _| {});
+                    }
+                    Err(e) => m.fail(e, cx),
+                }
+                cx.notify();
+            });
+        });
+    }
+
+    /// Stop using a server from this Mac. The server keeps its projects; remove the device there to revoke it.
+    pub fn unpair_server(&mut self, server: String, cx: &mut Context<Self>) {
+        if let Some(remote) = crate::runtime::servers(cx).get(&server) {
+            // Best effort: also remove this Mac from the server's device list.
+            let device = remote.config.device_id.clone();
+            spawn_service(cx, async move { remote.gateway("gateway.revoke_device", serde_json::json!({ "id": device })).await }, |_, _| {});
+        }
+        crate::runtime::servers(cx).remove(&server);
+        self.forget_server(&server, cx);
+        self.save_servers(cx);
+        cx.notify();
+    }
+
+    /// Create an empty Git project in the person's projects folder on a server and open it.
+    pub fn create_server_project(&mut self, server: String, name: String, cx: &mut Context<Self>) {
+        let Some(remote) = crate::runtime::servers(cx).get(&server) else { return; };
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move { remote.call::<String>("create_project", serde_json::json!({ "name": name })).await.map(|path| remote.root(&path)) }, move |res, cx| {
+            let _ = this.update(cx, |m, cx| match res {
+                Ok(root) => { m.refresh_servers(cx); m.set_active_project(root, cx); }
+                Err(e) => m.fail(e, cx),
+            });
+        });
+    }
+
+    pub fn server_notice(&mut self, notice: crate::remote::Notice, cx: &mut Context<Self>) {
+        match notice {
+            crate::remote::Notice::Changed => {
+                self.refresh_servers(cx);
+                if self.on_server() { self.refresh_services(cx); self.refresh_backends(cx); self.refresh_project_overview(cx); }
+            }
+            // The server could not continue our event cursor: rebuild what is open from its saved history.
+            crate::remote::Notice::Rebuild(server) => {
+                let stale: Vec<Uuid> = self.threads.iter().filter(|(_, t)| {
+                    let meta = &t.read(cx).meta;
+                    crate::remote::split_root(meta.project_root.as_deref().unwrap_or(&meta.cwd)).is_some_and(|(id, _)| id == server)
+                }).map(|(id, _)| *id).collect();
+                for id in stale {
+                    if let Some(t) = self.threads.get(&id) {
+                        t.update(cx, |t, cx| { t.thread = bomb_core::transcript::Thread::new(); t.hydrated = false; t.markdown.clear(); cx.notify(); });
+                    }
+                    if self.selected == Some(id) { self.hydrate(id, cx); }
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Forget a server's projects and threads (after unpairing).
+    pub fn forget_server(&mut self, server: &str, cx: &mut Context<Self>) {
+        self.server_lists.remove(server);
+        if self.active_project.as_deref().is_some_and(|root| crate::remote::split_root(root).is_some_and(|(id, _)| id == server)) {
+            self.active_project = None;
+            self.selected = None;
+        }
+        self.combine_lists(cx);
+    }
+
+    /// Rebuild the combined project, thread and workspace lists from this Mac and every server.
+    fn combine_lists(&mut self, cx: &mut Context<Self>) {
+        let mut threads = self.local_threads.clone();
+        let mut workspaces = self.local_workspaces.clone();
+        let mut projects = self.local_projects.clone();
+        for (t, w, p) in self.server_lists.values() {
+            threads.extend(t.iter().cloned());
+            workspaces.extend(w.iter().cloned());
+            projects.extend(p.iter().cloned());
+        }
+        self.workspaces = workspaces;
+        self.projects = projects;
+        if self.active_project.is_none() { self.active_project = self.projects.first().cloned(); }
+        self.set_threads(threads, cx);
+    }
+
+    /// The core that owns a thread, from the project folder it belongs to.
+    pub fn core_of_thread(&self, id: Uuid, cx: &App) -> crate::runtime::Core {
+        let root = self.threads.get(&id).map(|t| { let meta = &t.read(cx).meta; meta.project_root.clone().unwrap_or_else(|| meta.cwd.clone()) }).unwrap_or_default();
+        crate::runtime::core_for_root(cx, &root)
+    }
+
+    pub fn core_of_workspace(&self, workspace: &str, cx: &App) -> crate::runtime::Core {
+        let root = self.workspaces.iter().find(|w| w.id == workspace).map(|w| w.project_root.clone()).unwrap_or_default();
+        crate::runtime::core_for_root(cx, &root)
+    }
+
+    /// True when the project in view lives on a paired server.
+    pub fn on_server(&self) -> bool {
+        self.active_project.as_deref().is_some_and(crate::remote::is_server_root)
     }
 
     pub fn refresh_projects(&mut self, cx: &mut Context<Self>) {
@@ -446,10 +635,8 @@ impl AppModel {
             move |res, cx| {
                 let _ = this.update(cx, |m, cx| {
                     if let Ok(list) = res {
-                        m.projects = list;
-                        if m.active_project.is_none() {
-                            m.active_project = m.projects.first().cloned();
-                        }
+                        m.local_projects = list;
+                        m.combine_lists(cx);
                         cx.notify();
                     }
                 });
@@ -458,11 +645,11 @@ impl AppModel {
     }
 
     pub fn refresh_services(&mut self, cx: &mut Context<Self>) {
-        let state = svc(cx);
+        let core = crate::runtime::core_for_root(cx, self.active_project.as_deref().unwrap_or_default());
         let this = cx.entity().downgrade();
         spawn_service(
             cx,
-            async move { services::backend_auth_status(&state).await },
+            async move { core.backend_auth_status().await },
             move |res, cx| {
                 let _ = this.update(cx, |m, cx| {
                     if let Ok(list) = res {
@@ -480,11 +667,11 @@ impl AppModel {
         if self.models_loading { return; }
         self.models_loading = true;
         cx.notify();
-        let state = svc(cx);
+        let core = crate::runtime::core_for_root(cx, self.active_project.as_deref().unwrap_or_default());
         let this = cx.entity().downgrade();
         spawn_service(
             cx,
-            async move { services::list_backends(&state).await },
+            async move { core.list_backends().await },
             move |res, cx| {
                 let _ = this.update(cx, |m, cx| {
                     m.models_loading = false;
@@ -850,21 +1037,26 @@ impl AppModel {
             return;
         }
         entity.update(cx, |t, _| t.loading = true);
-        let state = svc(cx);
+        let core = self.core_of_thread(id, cx);
+        let remote = core.is_remote();
         let weak = entity.downgrade();
         spawn_service(
             cx,
-            async move { services::get_session_transcript(&state, id.to_string()).await },
+            async move { core.snapshot(id.to_string()).await },
             move |res, cx| {
                 let _ = weak.update(cx, |t, cx| {
                     t.loading = false;
                     t.hydrated = true;
                     match res {
-                        Ok(rows) => {
+                        Ok(snapshot) => {
+                            let rows = snapshot.rows;
                             tracing::debug!(%id, rows = rows.len(), live = t.thread.entries.len(), "thread hydrated");
                             if t.thread.entries.is_empty() {
                                 t.thread.hydrate(&rows);
                                 t.after_hydrate(cx);
+                                // Saved rows drop an approval's id and choices; a server thread may be
+                                // waiting on one that was asked before this Mac connected.
+                                if remote { for approval in &snapshot.pending_approvals { t.apply(approval, cx); } }
                             }
                         }
                         Err(e) => tracing::warn!(%id, error = %e, "transcript load failed"),
@@ -975,14 +1167,13 @@ impl AppModel {
                     let ch = t.thread.note_prompt(&text, attachments, std::time::Instant::now());
                     t.absorb(&ch, cx);
                 });
-                let state = svc(cx);
+                let core = self.core_of_thread(Uuid::parse_str(&id).unwrap_or_default(), cx);
                 let this = cx.entity().downgrade();
                 let weak = t.downgrade();
                 spawn_service(
                     cx,
                     async move {
-                        services::send_prompt(
-                            &state,
+                        core.send_prompt(
                             id,
                             text,
                             Some(prefs.backend),
@@ -1015,7 +1206,6 @@ impl AppModel {
                 };
                 self.starting = true;
                 cx.notify();
-                let state = svc(cx);
                 let this = cx.entity().downgrade();
                 let backend = grok_config::Backend::from_key(&prefs.backend).unwrap_or_default();
                 let approval_mode = match prefs.mode.as_str() {
@@ -1047,14 +1237,15 @@ impl AppModel {
                 };
                 // Two steps so the thread is selected (and the prompt visible)
                 // the moment it exists, even if the send then fails.
-                let state2 = state.clone();
+                let core = crate::runtime::core_for_root(cx, &cwd);
+                let core2 = core.clone();
                 let text2 = text.clone();
                 let images2 = images.clone();
                 let mut prefs2 = prefs.clone();
                 prefs2.model = model;
                 spawn_service(
                     cx,
-                    async move { services::start_session(&state, cwd, opts).await },
+                    async move { core.start_session(cwd, opts).await.map(|id| services::SessionIdResponse { id }) },
                     move |res, cx| {
                         let _ = this.update(cx, |m, cx| match res {
                             Ok(started) => {
@@ -1104,14 +1295,8 @@ impl AppModel {
                                         async move {
                                             // The ACP handshake is still in flight right
                                             // after start_session; sending now is refused.
-                                            services::wait_until_idle(
-                                                &state2,
-                                                &sid,
-                                                std::time::Duration::from_secs(90),
-                                            )
-                                            .await?;
-                                            services::send_prompt(
-                                                &state2,
+                                            core2.wait_until_idle(&sid, std::time::Duration::from_secs(90)).await?;
+                                            core2.send_prompt(
                                                 sid,
                                                 text2,
                                                 Some(prefs2.backend),
@@ -1189,11 +1374,11 @@ impl AppModel {
 
     pub fn cancel_selected(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.selected else { return };
-        let state = svc(cx);
+        let core = self.core_of_thread(id, cx);
         let this = cx.entity().downgrade();
         spawn_service(
             cx,
-            async move { services::cancel_session(&state, id.to_string()).await },
+            async move { core.cancel_session(id.to_string()).await },
             move |res, cx| {
                 if let Err(e) = res {
                     let _ = this.update(cx, |m, cx| m.fail(e, cx));
@@ -1213,11 +1398,11 @@ impl AppModel {
             if let Some(t) = self.threads.get(&id) {
                 t.update(cx, |t, cx| { t.meta.approval_mode = Some(mode.to_string()); cx.notify(); });
             }
-            let state = svc(cx);
+            let core = self.core_of_thread(id, cx);
             let requested = mode.to_string();
             let mode = requested.clone();
             let this = cx.entity().downgrade();
-            spawn_service(cx, async move { services::set_approval_mode(&state, id.to_string(), mode).await }, move |result, cx| {
+            spawn_service(cx, async move { core.set_approval_mode(id.to_string(), mode).await }, move |result, cx| {
                 let _ = this.update(cx, |m, cx| {
                     if let Err(error) = result {
                         if m.selected == Some(id) && m.prefs.mode == requested { m.prefs.mode = previous.clone(); }
@@ -1270,12 +1455,12 @@ impl AppModel {
                 (t.id(), t.meta.live)
             };
             if live {
-                let state = svc(cx);
+                let core = self.core_of_thread(Uuid::parse_str(&id).unwrap_or_default(), cx);
                 let e = effort.to_string();
                 let this = cx.entity().downgrade();
                 spawn_service(
                     cx,
-                    async move { services::set_session_effort(&state, id, e).await },
+                    async move { core.set_session_effort(id, e).await },
                     move |res, cx| {
                         if let Ok(true) = res {
                             let _ = this.update(cx, |m, cx| {
@@ -1402,11 +1587,11 @@ impl AppModel {
     pub fn remove_thread(&mut self, id: Uuid, cx: &mut Context<Self>) {
         tracing::info!(%id, "delete: removing thread");
         self.archived.remove(&id);
-        let state = svc(cx);
+        let core = self.core_of_thread(id, cx);
         let this = cx.entity().downgrade();
         spawn_service(
             cx,
-            async move { services::remove_session(&state, id.to_string(), Some(true)).await },
+            async move { core.remove_session(id.to_string(), Some(true)).await },
             move |res, cx| {
                 let _ = this.update(cx, |m, cx| {
                     match res {
@@ -1433,11 +1618,11 @@ impl AppModel {
                 cx.notify();
             });
         }
-        let state = svc(cx);
+        let core = self.core_of_thread(id, cx);
         let this = cx.entity().downgrade();
         spawn_service(
             cx,
-            async move { services::rename_thread(&state, id.to_string(), label).await },
+            async move { core.rename_thread(id.to_string(), label).await },
             move |res, cx| {
                 let _ = this.update(cx, |m, cx| match res {
                     Ok(()) => m.refresh_threads(cx),
@@ -1461,10 +1646,10 @@ impl AppModel {
 
     /// Ask the thread's own agent to do the merge in its chat. With `then_close`, the feature is closed once the merge has landed.
     pub fn merge_to_main(&mut self, workspace: String, then_close: bool, cx: &mut Context<Self>) {
-        let state = svc(cx);
+        let core = self.core_of_workspace(&workspace, cx);
         let this = cx.entity().downgrade();
         let id = workspace.clone();
-        spawn_service(cx, async move { services::workspaces::merge_request(&state, id).await }, move |res, cx| {
+        spawn_service(cx, async move { core.merge_request(id).await }, move |res, cx| {
             let _ = this.update(cx, |m, cx| match res {
                 Ok(request) => {
                     m.review_open = false;
@@ -1487,10 +1672,10 @@ impl AppModel {
         // A resumed session can report idle before its turn starts; wait for the real end.
         if self.threads.get(&session).is_some_and(|t| t.read(cx).thread.presence.turn_active()) { return; }
         if !self.close_after_merge.remove(&w.id) { return; }
-        let state = svc(cx);
+        let core = self.core_of_workspace(&w.id, cx);
         let this = cx.entity().downgrade();
         let id = w.id.clone();
-        spawn_service(cx, async move { services::workspaces::is_merged(&state, &id).await }, move |res, cx| {
+        spawn_service(cx, async move { core.is_merged(&id).await }, move |res, cx| {
             let _ = this.update(cx, |m, cx| match res {
                 Ok(true) => m.close_feature(w.id.clone(), cx),
                 Ok(false) => { m.toast(ToastKind::Info, format!("“{}” was not closed because its work is not fully in main yet. Check the chat.", w.name)); cx.notify(); }
@@ -1503,10 +1688,10 @@ impl AppModel {
     pub fn close_feature(&mut self, workspace: String, cx: &mut Context<Self>) {
         if self.git_busy { return; }
         self.git_busy = true; cx.notify();
-        let state = svc(cx);
+        let core = self.core_of_workspace(&workspace, cx);
         let this = cx.entity().downgrade();
         let id = workspace.clone();
-        spawn_service(cx, async move { services::workspaces::close_feature(&state, id).await }, move |res, cx| {
+        spawn_service(cx, async move { core.close_feature(id).await }, move |res, cx| {
             let _ = this.update(cx, |m, cx| {
                 m.git_busy = false;
                 match res {
@@ -1577,7 +1762,8 @@ impl AppModel {
             move |res, cx| {
                 let _ = this.update(cx, |m, cx| match res {
                     Ok((p, list)) => {
-                        m.projects = list;
+                        m.local_projects = list;
+                        m.combine_lists(cx);
                         m.set_active_project(p, cx);
                     }
                     Err(e) => m.fail(e, cx),

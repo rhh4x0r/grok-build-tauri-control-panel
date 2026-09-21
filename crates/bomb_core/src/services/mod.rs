@@ -46,7 +46,7 @@ pub async fn get_config(state: &AppState) -> Result<GrokConfig, String> {
     Ok(state.config.read().await.clone())
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendInfo {
     pub id: String,
@@ -378,7 +378,7 @@ pub fn default_projects_dir() -> Result<PathBuf, String> {
 
 // ── Phase 1: Sessions ────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, serde::Deserialize)]
 pub struct SessionIdResponse {
     pub id: String,
 }

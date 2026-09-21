@@ -26,9 +26,18 @@ grok_permissions = { path = "../grok_permissions" }
 grok_persistence = { path = "../grok_persistence" }
 grok_worktree = { path = "../grok_worktree" }
 serde.workspace = true
+bomb_link = { path = "../bomb_link" }
+bomb_proto = { path = "../bomb_proto" }
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 vt100 = "0.16"
+
+[dev-dependencies]
+bomb_server = { path = "../bomb_server" }
+tempfile.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.7"

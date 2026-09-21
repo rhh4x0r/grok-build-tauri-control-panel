@@ -86,10 +86,31 @@ pub async fn dispatch(state: &AppState, origin: &str, method: &str, p: Value) ->
         "checkpoint" => out(workspaces::workspace_action(state, arg(&p, "id")?, "checkpoint".into(), arg::<Option<String>>(&p, "message")?.unwrap_or_else(|| "Checkpoint".into())).await?),
         "update_from_base" => out(workspaces::workspace_action(state, arg(&p, "id")?, "update".into(), String::new()).await?),
 
+        "branches" => { let root: String = arg(&p, "root")?; out(services::git_ui::branches(&root).await?) }
+        "thread_setup_check" => { let root: String = arg(&p, "root")?; out(services::thread_setup::check(&root).await?) }
+        "thread_setup_initialize" => { let root: String = arg(&p, "root")?; services::thread_setup::initialize(&root).await?; Ok(Value::Null) }
+        // A new empty Git project in this person's projects folder.
+        "create_project" => {
+            let name: String = arg(&p, "name")?;
+            let slug: String = name.trim().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c.to_ascii_lowercase() } else { '-' }).collect::<String>().trim_matches('-').to_string();
+            if slug.is_empty() || slug.len() > 64 { return Err("Give the project a short name using letters, digits or dashes.".into()); }
+            let path = server_projects_dir(state).join(&slug);
+            if path.exists() { return Err(format!("There is already a project named {slug} on this server.")); }
+            std::fs::create_dir_all(server_projects_dir(state)).map_err(|e| format!("Could not create the projects folder: {e}"))?;
+            services::thread_setup::create(&path).await?;
+            services::add_project(state, path.display().to_string()).await?;
+            Ok(json!(path.display().to_string()))
+        }
+
         // What this core can run
         "list_backends" => out(services::list_backends(state).await?),
         "backend_auth_status" => out(services::backend_auth_status(state).await?),
 
         other => Err(format!("unknown method `{other}`")),
     }
+}
+
+/// Where a person's projects live on a server: `~/projects`.
+pub fn server_projects_dir(state: &AppState) -> std::path::PathBuf {
+    state.paths.home_dir.join("projects")
 }

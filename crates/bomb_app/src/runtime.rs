@@ -25,6 +25,31 @@ impl Global for Tokio {}
 pub struct Services(pub Arc<AppState>);
 impl Global for Services {}
 
+pub use crate::core_router::Core;
+
+/// Where server connections deliver events and wake-ups.
+pub struct ServerInbox {
+    pub events: async_channel::Sender<ControlEvent>,
+    pub notices: async_channel::Sender<crate::remote::Notice>,
+}
+impl Global for ServerInbox {}
+
+/// Every paired server.
+pub struct Servers(pub Arc<crate::remote::Remotes>);
+impl Global for Servers {}
+
+pub fn servers(cx: &App) -> Arc<crate::remote::Remotes> {
+    cx.global::<Servers>().0.clone()
+}
+
+/// The core that owns a project folder: a paired server for `bomb-server://` roots, otherwise this Mac.
+pub fn core_for_root(cx: &App, root: &str) -> Core {
+    match servers(cx).for_root(root) {
+        Some(remote) => Core::Remote(remote),
+        None => Core::Local(services(cx)),
+    }
+}
+
 /// The shared backend, for views that need to hand an `Arc` to a future.
 pub fn services(cx: &App) -> Arc<AppState> {
     cx.global::<Services>().0.clone()
@@ -56,6 +81,16 @@ where
 pub fn start_bridge(cx: &mut App, model: WeakEntity<AppModel>) {
     let journal = cx.global::<Services>().0.journal.clone();
     let (tx, rx) = async_channel::unbounded::<ControlEvent>();
+    // Paired servers push their events into the same stream, and wake the app through notices.
+    let (notice_tx, notice_rx) = async_channel::unbounded::<crate::remote::Notice>();
+    cx.set_global(ServerInbox { events: tx.clone(), notices: notice_tx });
+    let notified = model.clone();
+    cx.spawn(async move |cx| {
+        while let Ok(notice) = notice_rx.recv().await {
+            if notified.update(cx, |m, cx| m.server_notice(notice, cx)).is_err() { break; }
+        }
+    })
+    .detach();
     cx.global::<Tokio>().0.spawn(async move {
         let mut events = journal.attach_local().events;
         while let Some((_, ev)) = events.recv().await {

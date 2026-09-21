@@ -1,7 +1,9 @@
 //! Bomb Code — GPUI desktop app.
 
 mod actions;
+mod core_router;
 mod models;
+mod remote;
 mod runtime;
 mod smoke;
 mod theme;
@@ -74,10 +76,12 @@ fn main() {
         theme::install(cx);
         cx.set_global(runtime::Tokio(handle));
         cx.set_global(runtime::Services(state));
+        cx.set_global(runtime::Servers(std::sync::Arc::new(remote::Remotes::default())));
         actions::init(cx);
 
         let model = cx.new(models::app::AppModel::new);
         runtime::start_bridge(cx, model.downgrade());
+        model.update(cx, |m, cx| m.load_servers(cx));
         cx.set_global(models::app::AppModelHandle(model.clone()));
         views::root::open_main_window(model.clone(), cx);
         smoke::maybe_run(model, cx);

@@ -45,12 +45,13 @@ impl Render for WorkLocation {
             self.choices = Default::default();
             self.error = None;
             let weak = cx.entity().downgrade();
+            let core = crate::runtime::core_for_root(cx, &root);
             spawn_service(
                 cx,
                 async move {
                     (
                         root.clone(),
-                        bomb_core::services::git_ui::branches(&root).await,
+                        core.branches(&root).await,
                     )
                 },
                 move |(root, res), cx| {

@@ -159,7 +159,26 @@ impl SidebarView {
                 .gap(px(Layout::SPACE_SM))
                 .h(px(32.))
                 .px(px(Layout::SPACE_SM))
-                .child(div().size(px(GROUP_ICON)).flex_shrink_0().text_color(ui.text_muted).child(Icon::from(if collapsed { Lucide::Folder } else { Lucide::FolderOpen })))
+                .child({
+                    // Server projects wear a server mark, tinted by the connection.
+                    let server = crate::runtime::servers(cx).for_root(&g.root);
+                    let (icon, color, hint) = match &server {
+                        Some(s) => match s.state() {
+                            crate::remote::LinkState::Connected => (Lucide::Server, ui.text_muted, format!("On {} · connected", s.config.name)),
+                            crate::remote::LinkState::Connecting => (Lucide::Server, ui.warning, format!("On {} · connecting…", s.config.name)),
+                            crate::remote::LinkState::Offline(why) => (Lucide::Server, ui.danger, format!("On {} · {why}", s.config.name)),
+                        },
+                        None if crate::remote::is_server_root(&g.root) => (Lucide::Server, ui.danger, "On a server this Mac is no longer paired with".to_string()),
+                        None => (if collapsed { Lucide::Folder } else { Lucide::FolderOpen }, ui.text_muted, "On this Mac".to_string()),
+                    };
+                    div()
+                        .id(SharedString::from(format!("home-{}", g.root)))
+                        .size(px(GROUP_ICON))
+                        .flex_shrink_0()
+                        .text_color(color)
+                        .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
+                        .child(Icon::from(icon))
+                })
                 .child(
                     div()
                         .id(SharedString::from(format!("project-{root}")))
@@ -857,8 +876,28 @@ impl Render for SidebarView {
                     ),
             )
             .child(div().flex().gap_1().px(px(Layout::SPACE_SM)).pb(px(Layout::SPACE_SM))
-                .child(Button::new("sidebar-add-project").ghost().small().icon(Lucide::FolderPlus).label("Add project")
-                    .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::actions::OpenProject), cx)))
+                .child({
+                    // With a server paired, a project's home is a choice: that server (default) or this Mac.
+                    let servers = crate::runtime::servers(cx).all();
+                    let button = Button::new("sidebar-add-project").ghost().small().icon(Lucide::FolderPlus).label("Add project");
+                    if servers.is_empty() {
+                        button.on_click(|_, window, cx| window.dispatch_action(Box::new(crate::actions::OpenProject), cx)).into_any_element()
+                    } else {
+                        let app = self.model.clone();
+                        button.dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+                            for server in &servers {
+                                let (app, id, name) = (app.clone(), server.config.id.clone(), server.config.name.clone());
+                                menu = menu.item(PopupMenuItem::new(format!("New project on {}…", server.config.name)).on_click(move |_, window, cx| {
+                                    open_server_project_dialog(app.clone(), id.clone(), name.clone(), window, cx)
+                                }));
+                            }
+                            let create = app.clone();
+                            menu.separator()
+                                .item(PopupMenuItem::new("New project on this Mac…").on_click(move |_, _, cx| create.update(cx, |m, cx| m.create_project(cx))))
+                                .item(PopupMenuItem::new("Open a folder on this Mac…").on_click(|_, window, cx| window.dispatch_action(Box::new(crate::actions::OpenProject), cx)))
+                        }).into_any_element()
+                    }
+                })
                 .child(Button::new("sidebar-new-chat").ghost().small().icon(Lucide::Plus).label("New chat")
                     .on_click(|_, window, cx| window.dispatch_action(Box::new(NewThread), cx))))
             .child(div().flex().items_center().gap_1().px(px(Layout::SPACE_SM)).pb(px(Layout::SPACE_XS))
@@ -1123,6 +1162,33 @@ pub fn open_rename_dialog(model: Entity<AppModel>, id: Uuid, current: String, wi
                 let label = input.read(cx).value().to_string();
                 if !label.trim().is_empty() {
                     model.update(cx, |m, cx| m.rename_thread(id, label, cx));
+                }
+                window.close_dialog(cx);
+                true
+            })
+    });
+}
+
+/// Name a new project that will live on a paired server.
+pub fn open_server_project_dialog(model: Entity<AppModel>, server: String, server_name: String, window: &mut Window, cx: &mut App) {
+    let input = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
+    let focus_input = input.clone();
+    window.open_dialog(cx, move |dialog, window, cx| {
+        let (model, server, input) = (model.clone(), server.clone(), input.clone());
+        let input_for_content = input.clone();
+        focus_input.update(cx, |s, cx| s.focus(window, cx));
+        dialog
+            .title(format!("New project on {server_name}"))
+            .w(px(420.))
+            .content(move |content, _, _| {
+                content
+                    .child(Input::new(&input_for_content))
+                    .child(div().pt_2().text_size(px(crate::theme::Type::SMALL)).child("Its threads run on the server, so they keep going with this Mac closed."))
+            })
+            .on_ok(move |_, window, cx| {
+                let name = input.read(cx).value().trim().to_string();
+                if !name.is_empty() {
+                    model.update(cx, |m, cx| m.create_server_project(server.clone(), name, cx));
                 }
                 window.close_dialog(cx);
                 true

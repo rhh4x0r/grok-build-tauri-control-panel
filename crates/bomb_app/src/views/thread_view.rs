@@ -414,6 +414,7 @@ impl ThreadView {
         let backend = t.meta.backend.clone();
         let model = t.meta.model.clone();
         let has_worktree = t.meta.worktree.is_some();
+        let on_server = crate::remote::is_server_root(t.meta.project_root.as_deref().unwrap_or(&t.meta.cwd));
         let app = self.model.clone();
         let review = self.model.read(cx).review.as_ref();
         let workspace = self.model.read(cx).active_workspace.clone().and_then(|id| {
@@ -509,7 +510,9 @@ impl ThreadView {
                 }
             })
             .child(div().w(px(1.)).h(px(14.)).mx_1().bg(ui.border))
-            .child(
+            // Terminals and the preview work on this Mac's files; server projects gain them later.
+            .when(!on_server, |el| {
+                el            .child(
                 action("thread-terminal", "Terminal", Lucide::Terminal, false)
                     .tooltip("Show or hide terminals for this thread")
                     .on_click({
@@ -519,13 +522,14 @@ impl ThreadView {
                         })
                     }),
             )
-            .child(
+                .child(
                 action("dev-preview", "Dev sidebar", Lucide::PanelRight, false)
                     .tooltip("Show or hide the development preview and server controls")
                     .on_click(|_, window, cx| {
                         window.dispatch_action(Box::new(crate::actions::ToggleDevPreview), cx)
                     }),
             )
+            })
             .when_some(id, |el, thread_id| {
                 el.child(
                     action("thread-more", "More thread actions", Lucide::Ellipsis, false)

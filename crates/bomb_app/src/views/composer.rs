@@ -253,7 +253,7 @@ impl ComposerView {
                 .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child("Initialize Git creates an empty initial commit. Existing files stay uncommitted and won’t appear in the isolated branch until you commit them."))
                 .child(Button::new("destination-init").small().label("Initialize Git").disabled(self.destination_busy).on_click(cx.listener(move |v,_,_,cx| {
                     v.destination_busy=true;let root=root.clone();let weak=cx.entity().downgrade();
-                    crate::runtime::spawn_service(cx,async move {bomb_core::services::thread_setup::initialize(&root).await},move |result,cx|{let _=weak.update(cx,|v,cx|{
+                    let core=crate::runtime::core_for_root(cx,&root);crate::runtime::spawn_service(cx,async move {core.thread_setup_initialize(&root).await},move |result,cx|{let _=weak.update(cx,|v,cx|{
                         v.destination_busy=false;v.destination_init=None;
                         v.destination_message=Some(match result {Ok(())=>"Git is ready. Press Send to start your thread.".into(),Err(e)=>e});cx.notify();
                     });});cx.notify();
@@ -689,7 +689,7 @@ impl ComposerView {
                 self.destination_busy=true;
                 self.destination_message=Some("Checking project folder…".into());
                 let weak=cx.entity().downgrade();
-                crate::runtime::spawn_service(cx,async move {(root.clone(),text, bomb_core::services::thread_setup::check(&root).await)},move |(root,text,result),cx| {
+                let core=crate::runtime::core_for_root(cx,&root);crate::runtime::spawn_service(cx,async move {(root.clone(),text, core.thread_setup_check(&root).await)},move |(root,text,result),cx| {
                     let _=weak.update(cx,|v,cx| {
                         v.destination_busy=false;
                         if v.model.read(cx).active_project.as_deref()!=Some(&root) || v.model.read(cx).selected.is_some() {v.destination_message=None;cx.notify();return;}
