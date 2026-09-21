@@ -145,3 +145,63 @@ async fn expired_links_and_garbage_are_refused() {
     let fresh = server.gateway.create_invite("max").unwrap();
     assert!(ask(&fresh, &mac, "gateway.pair", json!({ "secret": fresh.secret })).await.is_ok());
 }
+
+/// Stands in for `sudo bombd admin …`, which needs root and Linux.
+#[derive(Default)]
+struct FakeRoot(std::sync::Mutex<Vec<(bomb_server::admin::Verb, String)>>);
+struct FakeRootHandle(Arc<FakeRoot>);
+impl bomb_server::admin::Privileged for FakeRootHandle {
+    fn run(&self, verb: bomb_server::admin::Verb, account: &str) -> Result<(), String> {
+        assert!(bomb_server::admin::valid_account(account), "the gateway only ever asks about generated accounts");
+        self.0 .0.lock().unwrap().push((verb, account.to_string()));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn the_admin_invites_a_person_who_gets_their_own_account_and_can_be_locked_out() {
+    use bomb_server::admin::Verb;
+    let temp = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let root = Arc::new(FakeRoot::default());
+    let gateway = Gateway::open_with(&temp.path().join("gateway"), &address, Box::new(FakeRootHandle(root.clone()))).unwrap();
+    gateway.add_user("max", &temp.path().join("max.sock"), true).unwrap();
+    tokio::spawn(gateway.clone().serve(listener, std::future::pending()));
+    let max = Identity::generate("max").unwrap();
+    let max_link = gateway.create_invite("max").unwrap();
+    ask(&max_link, &max, "gateway.pair", json!({ "secret": max_link.secret })).await.unwrap();
+
+    let invited = ask(&max_link, &max, "gateway.invite_person", json!({ "label": "Sam" })).await.unwrap();
+    let account = invited["user"].as_str().unwrap().to_string();
+    assert!(bomb_server::admin::valid_account(&account));
+    assert_eq!(*root.0.lock().unwrap(), [(Verb::CreateUser, account.clone()), (Verb::StartCore, account.clone())]);
+    let registry = gateway.store().read().unwrap();
+    let sam_user = registry.users.iter().find(|u| u.name == account).unwrap();
+    assert!(!sam_user.admin);
+    assert_eq!(sam_user.socket, std::path::PathBuf::from(format!("/run/bombd/{account}.sock")));
+
+    // Sam pairs with the link, is not an admin, and cannot invite or lock anyone.
+    let sam = Identity::generate("sam").unwrap();
+    let sam_link = PairingLink::parse(invited["link"].as_str().unwrap()).unwrap();
+    assert_eq!(ask(&sam_link, &sam, "gateway.pair", json!({ "secret": sam_link.secret })).await.unwrap()["user"], account.as_str());
+    assert_eq!(ask(&sam_link, &sam, "gateway.whoami", Value::Null).await.unwrap()["admin"], false);
+    assert!(ask(&sam_link, &sam, "gateway.invite_person", json!({})).await.is_err());
+    assert!(ask(&sam_link, &sam, "gateway.lock_person", json!({ "user": "max" })).await.is_err());
+
+    // Locking Sam stops their core, removes their devices and refuses them from then on.
+    assert!(ask(&max_link, &max, "gateway.lock_person", json!({ "user": "max" })).await.unwrap_err().contains("yourself"));
+    ask(&max_link, &max, "gateway.lock_person", json!({ "user": account })).await.unwrap();
+    assert_eq!(root.0.lock().unwrap().last().unwrap(), &(Verb::LockUser, account.clone()));
+    assert!(ask(&sam_link, &sam, "gateway.whoami", Value::Null).await.unwrap_err().contains("not paired"));
+    assert!(gateway.create_invite(&account).is_err(), "no new links for a locked person");
+
+    // A one-person install has no way to create accounts, and says so.
+    let solo = Gateway::open(&temp.path().join("solo"), "127.0.0.1:1").unwrap();
+    solo.add_user("owner", &temp.path().join("o.sock"), true).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let solo_link = PairingLink { host: listener.local_addr().unwrap().to_string(), ..solo.create_invite("owner").unwrap() };
+    tokio::spawn(solo.clone().serve(listener, std::future::pending()));
+    ask(&solo_link, &max, "gateway.pair", json!({ "secret": solo_link.secret })).await.unwrap();
+    assert!(ask(&solo_link, &max, "gateway.invite_person", json!({})).await.unwrap_err().contains("one person"));
+}

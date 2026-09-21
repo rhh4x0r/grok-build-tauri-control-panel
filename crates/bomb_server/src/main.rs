@@ -5,6 +5,7 @@
 //!   bombd gateway  --data <dir> --listen <addr> --public <host:port>   the encrypted port (multi-user installs)
 //!   bombd add-user --data <dir> --name <name> --socket <path> [--admin]
 //!   bombd invite   --data <dir> --public <host:port> --user <name>     print a one-time pairing link
+//!   bombd admin    <verb> <account>                                    root-only helper the shared gateway calls through sudo
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,8 +47,15 @@ async fn main() -> anyhow::Result<()> {
             // Stop agents cleanly and flush history before exiting.
             let _ = bomb_core::services::shutdown_all(&state).await;
         }
+        Some("admin") => {
+            // Two fixed arguments, both validated inside; nothing else is accepted.
+            let (Some(verb), Some(account), None) = (args.0.get(1), args.0.get(2), args.0.get(3)) else { usage() };
+            bomb_server::admin::run(verb, account).map_err(anyhow::Error::msg)?;
+        }
         Some("gateway") => {
-            let gateway = Gateway::open(&PathBuf::from(args.required("--data")), &args.required("--public")).map_err(anyhow::Error::msg)?;
+            // `--shared` lets the admin invite people; each gets a Linux account through the sudo helper.
+            let privileged: Box<dyn bomb_server::admin::Privileged> = if args.has("--shared") { Box::new(bomb_server::admin::Sudo) } else { Box::new(bomb_server::admin::Unavailable) };
+            let gateway = Gateway::open_with(&PathBuf::from(args.required("--data")), &args.required("--public"), privileged).map_err(anyhow::Error::msg)?;
             let listener = tokio::net::TcpListener::bind(args.required("--listen")).await?;
             gateway.serve(listener, until_stopped()).await.map_err(anyhow::Error::msg)?;
         }

@@ -1,0 +1,3 @@
+# The gateway may run exactly one root command: the helper with its four verbs and a validated account name.
+bombd ALL=(root) NOPASSWD: /usr/local/bin/bombd admin create-user bc-*, /usr/local/bin/bombd admin lock-user bc-*, /usr/local/bin/bombd admin start-core bc-*, /usr/local/bin/bombd admin stop-core bc-*
+Defaults:bombd !requiretty

@@ -45,6 +45,8 @@ pub struct SettingsModel {
     pub server_invitee: Entity<InputState>,
     /// Devices per server id, as last listed.
     pub server_devices: std::collections::HashMap<String, Vec<serde_json::Value>>,
+    /// People per server id (admin only), as last listed.
+    pub server_people: std::collections::HashMap<String, Vec<serde_json::Value>>,
     /// A freshly made pairing link to show once, per server id.
     pub server_invite: Option<(String, String)>,
     pub allow_rules: Entity<TextareaState>,
@@ -84,8 +86,9 @@ impl SettingsModel {
             server_link: mk("bomb://pair?…  (pairing link from your server)", window, cx),
             server_name: mk("Name for this server, e.g. My VPS", window, cx),
             server_project: mk("new project name", window, cx),
-            server_invitee: mk("user name on the server (blank = another Mac of mine)", window, cx),
+            server_invitee: mk("Who is this for? e.g. Sam", window, cx),
             server_devices: Default::default(),
+            server_people: Default::default(),
             server_invite: None,
             allow_rules: cx.new(|cx| TextareaState::new(window, cx).placeholder("one pattern per line, e.g. Bash(cargo test *)").auto_grow(3, 8)),
             deny_rules: cx.new(|cx| TextareaState::new(window, cx).placeholder("one pattern per line, e.g. Bash(rm -rf *)").auto_grow(3, 8)),
@@ -183,20 +186,45 @@ impl SettingsModel {
         });
     }
 
-    /// A one-time link for another Mac, or (admin only) for another person on this server.
-    pub fn invite_to_server(&mut self, server: String, window: &mut Window, cx: &mut Context<Self>) {
+    /// A one-time link for another Mac of mine (`person` false), or, as admin, a new person with their own account.
+    pub fn invite_to_server(&mut self, server: String, person: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(remote) = crate::runtime::servers(cx).get(&server) else { return; };
-        let user = self.server_invitee.read(cx).value().trim().to_string();
-        self.server_invitee.update(cx, |s, cx| s.set_value("", window, cx));
-        let params = if user.is_empty() { serde_json::json!({}) } else { serde_json::json!({ "user": user }) };
+        let label = self.server_invitee.read(cx).value().trim().to_string();
+        if person { self.server_invitee.update(cx, |s, cx| s.set_value("", window, cx)); }
+        let (method, params) = if person { ("gateway.invite_person", serde_json::json!({ "label": label })) } else { ("gateway.create_invite", serde_json::json!({})) };
         let weak = cx.entity().downgrade();
-        crate::runtime::spawn_service(cx, async move { remote.gateway("gateway.create_invite", params).await }, move |res, cx| {
+        crate::runtime::spawn_service(cx, async move { remote.gateway(method, params).await }, move |res, cx| {
             let _ = weak.update(cx, |s, cx| {
                 match res {
-                    Ok(v) => s.server_invite = Some((server, v["link"].as_str().unwrap_or_default().to_string())),
+                    Ok(v) => { s.server_invite = Some((server.clone(), v["link"].as_str().unwrap_or_default().to_string())); if person { s.load_server_people(server, cx); } }
                     Err(e) => s.toast(ToastKind::Error, e, cx),
                 }
                 cx.notify();
+            });
+        });
+    }
+
+    pub fn load_server_people(&mut self, server: String, cx: &mut Context<Self>) {
+        let Some(remote) = crate::runtime::servers(cx).get(&server) else { return; };
+        let weak = cx.entity().downgrade();
+        crate::runtime::spawn_service(cx, async move { remote.gateway("gateway.list_users", serde_json::Value::Null).await }, move |res, cx| {
+            let _ = weak.update(cx, |s, cx| {
+                match res {
+                    Ok(list) => { s.server_people.insert(server, list.as_array().cloned().unwrap_or_default()); }
+                    Err(e) => s.toast(ToastKind::Error, e, cx),
+                }
+                cx.notify();
+            });
+        });
+    }
+
+    pub fn lock_server_person(&mut self, server: String, person: String, cx: &mut Context<Self>) {
+        let Some(remote) = crate::runtime::servers(cx).get(&server) else { return; };
+        let weak = cx.entity().downgrade();
+        crate::runtime::spawn_service(cx, async move { remote.gateway("gateway.lock_person", serde_json::json!({ "user": person })).await }, move |res, cx| {
+            let _ = weak.update(cx, |s, cx| {
+                if let Err(e) = res { s.toast(ToastKind::Error, e, cx); }
+                s.load_server_people(server, cx);
             });
         });
     }

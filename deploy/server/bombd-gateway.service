@@ -1,0 +1,23 @@
+# The one encrypted port. Runs unprivileged; reaches each person's core through /run/bombd.
+[Unit]
+Description=Bomb Code gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=bombd
+Group=bombd
+ExecStart=/usr/local/bin/bombd gateway --shared --data /var/lib/bombd --listen 0.0.0.0:7443 --public ${BOMBD_PUBLIC}
+EnvironmentFile=/etc/bombd/gateway.env
+Restart=on-failure
+RestartSec=2
+StateDirectory=bombd
+StateDirectoryMode=0700
+# sudo needs to gain privileges for the fixed `bombd admin` command only; everything else stays locked down.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/bombd
+
+[Install]
+WantedBy=multi-user.target

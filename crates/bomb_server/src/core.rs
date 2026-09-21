@@ -12,6 +12,10 @@ use tracing::{debug, info, warn};
 
 /// Listen on `socket` until `shutdown` resolves. The socket is private to its owner.
 pub async fn serve(state: Arc<AppState>, socket: &Path, shutdown: impl std::future::Future<Output = ()>) -> anyhow::Result<()> {
+    if let Some(listener) = inherited_listener()? {
+        info!("core listening on the socket systemd handed over");
+        return accept_loop(state, listener, shutdown).await;
+    }
     if socket.exists() {
         std::fs::remove_file(socket)?;
     }
@@ -26,6 +30,23 @@ pub async fn serve(state: Arc<AppState>, socket: &Path, shutdown: impl std::futu
         std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o660))?;
     }
     info!(socket = %socket.display(), "core listening");
+    accept_loop(state, listener, shutdown).await?;
+    let _ = std::fs::remove_file(socket);
+    Ok(())
+}
+
+/// On a shared server systemd owns the socket (so only the gateway's group can reach it) and passes it as fd 3.
+fn inherited_listener() -> anyhow::Result<Option<UnixListener>> {
+    let ours = std::env::var("LISTEN_PID").ok().and_then(|p| p.parse::<u32>().ok()) == Some(std::process::id());
+    if !ours || std::env::var("LISTEN_FDS").ok().as_deref() != Some("1") { return Ok(None); }
+    use std::os::unix::io::FromRawFd;
+    // SAFETY: systemd guarantees fd 3 is the one listening socket it opened for this service.
+    let listener = unsafe { std::os::unix::net::UnixListener::from_raw_fd(3) };
+    listener.set_nonblocking(true)?;
+    Ok(Some(UnixListener::from_std(listener)?))
+}
+
+async fn accept_loop(state: Arc<AppState>, listener: UnixListener, shutdown: impl std::future::Future<Output = ()>) -> anyhow::Result<()> {
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
@@ -41,7 +62,6 @@ pub async fn serve(state: Arc<AppState>, socket: &Path, shutdown: impl std::futu
             },
         }
     }
-    let _ = std::fs::remove_file(socket);
     Ok(())
 }
 

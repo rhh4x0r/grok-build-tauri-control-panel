@@ -1,0 +1,24 @@
+# One person's core, running as that person. Their projects, history and AI logins live in their own home.
+[Unit]
+Description=Bomb Code core for %i
+Requires=bombd-core@%i.socket
+
+[Service]
+User=%i
+ExecStart=/usr/local/bin/bombd core --socket /run/bombd/%i.sock
+Restart=on-failure
+RestartSec=2
+# Agents stop with the core, the same as quitting the desktop app.
+KillMode=control-group
+TimeoutStopSec=20
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/home/%i
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+# One person cannot starve the others.
+MemoryMax=70%
+CPUQuota=300%
+TasksMax=2048

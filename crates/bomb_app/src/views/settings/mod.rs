@@ -514,9 +514,9 @@ fn render_servers(cx: &mut App) -> AnyElement {
     let app = cx.global::<AppModelHandle>().0.clone();
     let pairing = app.read(cx).pairing;
     let servers = crate::runtime::servers(cx).all();
-    let (link, name, project, invitee, devices, invite) = {
+    let (link, name, project, invitee, devices, invite, people) = {
         let m = model.read(cx);
-        (m.server_link.clone(), m.server_name.clone(), m.server_project.clone(), m.server_invitee.clone(), m.server_devices.clone(), m.server_invite.clone())
+        (m.server_link.clone(), m.server_name.clone(), m.server_project.clone(), m.server_invitee.clone(), m.server_devices.clone(), m.server_invite.clone(), m.server_people.clone())
     };
     let pair_model = model.clone();
     let caption = |text: &str| div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(text.to_string());
@@ -579,16 +579,58 @@ fn render_servers(cx: &mut App) -> AnyElement {
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(div().w(px(260.)).child(Input::new(&invitee)))
-                .child(Button::new(SharedString::from(format!("server-invite-{id}"))).outline().small().label("Make a pairing link").on_click(move |_, window, cx| {
-                    m_invite.update(cx, |s, cx| s.invite_to_server(id_invite.clone(), window, cx));
+                .child(Button::new(SharedString::from(format!("server-invite-{id}"))).outline().small().label("Link for another Mac of mine").on_click(move |_, window, cx| {
+                    m_invite.update(cx, |s, cx| s.invite_to_server(id_invite.clone(), false, window, cx));
                 }))
                 .child(Button::new(SharedString::from(format!("server-devices-{id}"))).ghost().small().label("Show devices").on_click(move |_, _, cx| {
                     m_devices.update(cx, |s, cx| s.load_server_devices(id_devices.clone(), cx));
                 })),
         );
         if server.config.admin {
-            card = card.child(caption("As the admin you can make a link for another person on this server. You manage the server, so you can also read anything stored on it, including other people’s projects."));
+            let (m_person, id_person, m_people, id_people) = (model.clone(), id.clone(), model.clone(), id.clone());
+            card = card
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().w(px(260.)).child(Input::new(&invitee)))
+                        .child(Button::new(SharedString::from(format!("server-person-{id}"))).outline().small().label("Invite a person").on_click(move |_, window, cx| {
+                            m_person.update(cx, |s, cx| s.invite_to_server(id_person.clone(), true, window, cx));
+                        }))
+                        .child(Button::new(SharedString::from(format!("server-people-{id}"))).ghost().small().label("Show people").on_click(move |_, _, cx| {
+                            m_people.update(cx, |s, cx| s.load_server_people(id_people.clone(), cx));
+                        })),
+                )
+                .child(caption("Each person gets their own account on the server, with their own projects, threads and AI sign-ins. You manage the server, so you can read anything stored on it, including theirs. Only invite people who are comfortable with that."));
+            for person in people.get(&id).into_iter().flatten() {
+                let name = person["name"].as_str().unwrap_or_default().to_string();
+                let locked = person["locked"].as_bool().unwrap_or(false);
+                let is_admin = person["admin"].as_bool().unwrap_or(false);
+                let (m_lock, id_lock, lock_name) = (model.clone(), id.clone(), name.clone());
+                card = card.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .h(px(28.))
+                        .child(div().text_sm().font_family(ui.mono.clone()).child(name.clone()))
+                        .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child(if is_admin { "admin" } else if locked { "locked" } else { "active" }))
+                        .child(div().flex_1())
+                        .when(!is_admin && !locked, |el| {
+                            el.child(Button::new(SharedString::from(format!("server-lock-{name}"))).ghost().small().label("Lock out").on_click(move |_, window, cx| {
+                                let (m, server, person) = (m_lock.clone(), id_lock.clone(), lock_name.clone());
+                                window.open_alert_dialog(cx, move |dlg, _, _| {
+                                    let (m, server, person) = (m.clone(), server.clone(), person.clone());
+                                    dlg.confirm()
+                                        .title(format!("Lock out {person}?"))
+                                        .description("Their running threads stop, their Macs are disconnected and their account is locked. Their files stay on the server.")
+                                        .on_ok(move |_, _, cx| { m.update(cx, |s, cx| s.lock_server_person(server.clone(), person.clone(), cx)); true })
+                                });
+                            }))
+                        }),
+                );
+            }
         }
         if let Some((_, link_text)) = invite.as_ref().filter(|(for_server, _)| for_server == &id) {
             card = card.child(

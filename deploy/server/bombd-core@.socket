@@ -1,0 +1,14 @@
+# One per person. systemd owns the socket so that only the gateway's group can connect:
+# people are not in group bombd and cannot even look inside /run/bombd.
+[Unit]
+Description=Bomb Code core socket for %i
+
+[Socket]
+ListenStream=/run/bombd/%i.sock
+SocketUser=%i
+SocketGroup=bombd
+SocketMode=0660
+DirectoryMode=0750
+
+[Install]
+WantedBy=sockets.target

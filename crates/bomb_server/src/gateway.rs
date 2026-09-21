@@ -34,11 +34,17 @@ pub struct Gateway {
     /// `host:port` that Macs should dial, as written into pairing links.
     public: String,
     revoked: broadcast::Sender<String>,
+    /// How privileged work gets done: sudo on a shared server, unavailable on a one-person install.
+    privileged: Box<dyn crate::admin::Privileged>,
     failures: Mutex<HashMap<IpAddr, Vec<Instant>>>,
 }
 
 impl Gateway {
     pub fn open(data: &Path, public: &str) -> Result<Arc<Self>, String> {
+        Self::open_with(data, public, Box::new(crate::admin::Unavailable))
+    }
+
+    pub fn open_with(data: &Path, public: &str, privileged: Box<dyn crate::admin::Privileged>) -> Result<Arc<Self>, String> {
         let store = Store::open(data).map_err(|e| e.to_string())?;
         let identity_path = data.join("identity.json");
         let identity = match std::fs::read(&identity_path).ok().and_then(|bytes| serde_json::from_slice::<Identity>(&bytes).ok()) {
@@ -54,7 +60,7 @@ impl Gateway {
                 identity
             }
         };
-        Ok(Arc::new(Self { store, identity, public: public.to_string(), revoked: broadcast::channel(64).0, failures: Default::default() }))
+        Ok(Arc::new(Self { store, identity, public: public.to_string(), revoked: broadcast::channel(64).0, privileged, failures: Default::default() }))
     }
 
     pub fn store(&self) -> &Store {
@@ -242,6 +248,32 @@ impl Gateway {
                 if target != user.name && !user.admin { return Err("Only the server admin can invite other people.".into()); }
                 Ok(json!({ "link": self.create_invite(target)?.to_string() }))
             }
+            // Admin only: a new person gets their own Linux account and core, and a link for their first Mac.
+            "gateway.invite_person" if user.admin => {
+                let label: String = params.get("label").and_then(Value::as_str).unwrap_or("Invited person").chars().filter(|c| !c.is_control()).take(60).collect();
+                let account = crate::admin::new_account_name();
+                self.privileged.run(crate::admin::Verb::CreateUser, &account)?;
+                self.privileged.run(crate::admin::Verb::StartCore, &account)?;
+                self.add_user(&account, &crate::admin::socket_path(&account), false)?;
+                info!(%account, %label, "person invited");
+                Ok(json!({ "user": account, "label": label, "link": self.create_invite(&account)?.to_string() }))
+            }
+            // Admin only: stop someone's core, lock their account and cut every device they paired.
+            "gateway.lock_person" if user.admin => {
+                let target = params.get("user").and_then(Value::as_str).unwrap_or_default().to_string();
+                if target == user.name { return Err("You cannot lock yourself out.".into()); }
+                if !registry.users.iter().any(|u| u.name == target) { return Err("There is no such person on this server.".into()); }
+                self.privileged.run(crate::admin::Verb::LockUser, &target)?;
+                let devices: Vec<String> = self.store.update(|r| {
+                    if let Some(u) = r.users.iter_mut().find(|u| u.name == target) { u.locked = true; }
+                    r.invites.retain(|i| i.user != target);
+                    let ids = r.devices.iter().filter(|d| d.user == target).map(|d| d.id.clone()).collect();
+                    r.devices.retain(|d| d.user != target);
+                    ids
+                }).map_err(|e| e.to_string())?;
+                for id in devices { let _ = self.revoked.send(id); }
+                Ok(Value::Null)
+            }
             "gateway.list_users" if user.admin => Ok(json!(registry.users.iter().map(|u| json!({ "name": u.name, "admin": u.admin, "locked": u.locked })).collect::<Vec<_>>())),
             _ => Err(format!("unknown method `{method}`")),
         }
@@ -264,6 +296,7 @@ where
     client.send(&Frame::Message(Message::Response { id, ok, error })).await.map_err(|e| e.to_string())
 }
 
+/// Names the registry accepts: the installer's own login, or a generated `bc-…` account.
 pub fn valid_user_name(name: &str) -> bool {
     (2..=32).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') && !name.starts_with('-')
 }
