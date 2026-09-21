@@ -125,3 +125,66 @@ async fn a_client_that_falls_behind_is_told_to_resync_rather_than_losing_events_
     // Its cursor is now older than the backlog, so reconnecting demands a rebuild.
     assert!(state.journal.attach_remote(Some(attached.seq)).resync);
 }
+
+#[tokio::test]
+async fn files_terminals_and_previews_work_over_the_connection_and_stay_inside_the_project() {
+    use bomb_proto::client::StreamItem;
+    use bomb_proto::{Chunk, Frame, Message};
+    let temp = tempfile::tempdir().unwrap();
+    let state = core(temp.path()).await;
+    let socket = temp.path().join("core.sock");
+    tokio::spawn({ let (state, socket) = (state.clone(), socket.clone()); async move { bomb_server::core::serve(state, &socket, std::future::pending()).await.unwrap() } });
+    while !socket.exists() { tokio::time::sleep(Duration::from_millis(10)).await; }
+    let mac = attach(&socket, None).await.client;
+
+    let root = mac.request("create_project", json!({ "name": "site" })).await.unwrap().as_str().unwrap().to_string();
+    std::fs::write(std::path::Path::new(&root).join("index.html"), "<h1>hello</h1>").unwrap();
+    std::fs::create_dir(std::path::Path::new(&root).join("src")).unwrap();
+    std::fs::write(temp.path().join("secret.txt"), "not yours").unwrap();
+    std::os::unix::fs::symlink(temp.path().join("secret.txt"), std::path::Path::new(&root).join("link.txt")).unwrap();
+
+    // Browse and read, without .git and never outside the project, not even through a symlink.
+    let listing = mac.request("list_dir", json!({ "root": root })).await.unwrap();
+    let names: Vec<&str> = listing.as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"index.html") && names.contains(&"src") && !names.contains(&".git"), "{names:?}");
+    assert_eq!(mac.request("read_file", json!({ "root": root, "path": "index.html" })).await.unwrap()["text"], "<h1>hello</h1>");
+    for (folder, path) in [(root.as_str(), "../secret.txt"), (root.as_str(), "/etc/passwd"), (root.as_str(), "link.txt"), ("/etc", "passwd")] {
+        let error = mac.request("read_file", json!({ "root": folder, "path": path })).await.unwrap_err();
+        assert!(error.contains("inside the project") || error.contains("not one of your folders"), "{folder} {path}: {error}");
+    }
+
+    // A terminal: type a command, read its output, resize, close.
+    let (stream, mut output) = mac.open_stream();
+    assert!(mac.request("terminal_open", json!({ "root": "/etc", "stream": stream })).await.is_err());
+    mac.request("terminal_open", json!({ "root": root, "stream": stream, "rows": 20, "cols": 80 })).await.unwrap();
+    mac.send_frame(Frame::Chunk(Chunk { stream, data: "printf 'BOMB_%s\\n' REMOTE_OK; pwd\r".into() })).await.unwrap();
+    let mut screen = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !(screen.contains("BOMB_REMOTE_OK") && screen.contains("/projects/site")) {
+        assert!(tokio::time::Instant::now() < deadline, "terminal output never arrived: {screen}");
+        if let Ok(Some(StreamItem::Data(bytes))) = tokio::time::timeout(Duration::from_millis(500), output.recv()).await { screen.push_str(&String::from_utf8_lossy(&bytes)); }
+    }
+    mac.request("terminal_resize", json!({ "stream": stream, "rows": 30, "cols": 120 })).await.unwrap();
+    mac.send_frame(Frame::Message(Message::StreamEnd { stream, error: None })).await.unwrap();
+
+    // A preview: bytes reach a server that only listens on the core machine's loopback, and come back.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0u8; 64];
+        let n = socket.read(&mut request).await.unwrap();
+        socket.write_all(format!("HTTP/1.1 200 OK\r\n\r\nsaw {}", String::from_utf8_lossy(&request[..n]).trim()).as_bytes()).await.unwrap();
+    });
+    let (stream, mut reply) = mac.open_stream();
+    mac.request("forward_open", json!({ "port": port, "stream": stream })).await.unwrap();
+    mac.send_frame(Frame::Chunk(Chunk { stream, data: "GET / HTTP/1.1\r\n".into() })).await.unwrap();
+    let mut body = String::new();
+    while let Ok(Some(item)) = tokio::time::timeout(Duration::from_secs(5), reply.recv()).await {
+        match item { StreamItem::Data(bytes) => body.push_str(&String::from_utf8_lossy(&bytes)), StreamItem::End(_) => break }
+    }
+    assert!(body.contains("saw GET / HTTP/1.1"), "{body}");
+    let (stream, _) = mac.open_stream();
+    assert!(mac.request("forward_open", json!({ "port": 1, "stream": stream })).await.is_err(), "a closed port is reported, not hung");
+}

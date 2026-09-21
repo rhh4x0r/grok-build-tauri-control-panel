@@ -72,16 +72,30 @@ impl FileTree {
         }
         let weak = cx.entity().downgrade();
         let dir = path.clone();
+        // A server project's folders are listed by the server, relative to the folder this tree is rooted at.
+        let remote = crate::runtime::servers(cx).for_root(&path.to_string_lossy());
+        let base = self.root.clone().unwrap_or_else(|| path.clone());
         spawn_service(
             cx,
             async move {
-                let mut reader = tokio::fs::read_dir(dir).await?;
                 let mut entries = Vec::new();
-                while let Some(e) = reader.next_entry().await? {
-                    entries.push(Entry {
-                        path: e.path(),
-                        directory: e.file_type().await?.is_dir(),
-                    });
+                if let Some(remote) = remote {
+                    let relative = dir.strip_prefix(&base).unwrap_or(std::path::Path::new("")).to_string_lossy().into_owned();
+                    let listed = remote
+                        .request("list_dir", serde_json::json!({ "root": remote.path_of(&base.to_string_lossy()), "path": relative }))
+                        .await
+                        .map_err(std::io::Error::other)?;
+                    for item in listed.as_array().into_iter().flatten() {
+                        entries.push(Entry { path: dir.join(item["name"].as_str().unwrap_or_default()), directory: item["dir"].as_bool().unwrap_or(false) });
+                    }
+                } else {
+                    let mut reader = tokio::fs::read_dir(&dir).await?;
+                    while let Some(e) = reader.next_entry().await? {
+                        entries.push(Entry {
+                            path: e.path(),
+                            directory: e.file_type().await?.is_dir(),
+                        });
+                    }
                 }
                 entries.sort_by(|a, b| {
                     b.directory

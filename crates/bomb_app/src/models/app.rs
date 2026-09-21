@@ -35,6 +35,13 @@ pub struct ProjectGroup {
     pub threads: Vec<Uuid>,
 }
 
+/// Keeps the forwarded port open for as long as the server's dev server is in use.
+struct ServerPreview {
+    server: String,
+    _forward: crate::remote::live::ForwardGuard,
+    local_url: String,
+}
+
 /// How the sidebar orders projects and the threads inside them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SidebarSort {
@@ -154,6 +161,8 @@ pub struct AppModel {
     server_lists: HashMap<String, (Vec<ThreadDto>, Vec<grok_persistence::WorkspaceRecord>, Vec<String>)>,
     /// Which folder on this Mac is a copy of which server project.
     pub project_links: Vec<crate::remote::sync::Link>,
+    /// A dev server running on a paired server, reached through a forwarded local port.
+    server_preview: Option<ServerPreview>,
     /// A send, download or sync is running.
     pub syncing: bool,
     /// A pairing attempt is in flight.
@@ -220,6 +229,7 @@ impl AppModel {
             local_projects: Vec::new(),
             server_lists: HashMap::new(),
             project_links: Vec::new(),
+            server_preview: None,
             syncing: false,
             pairing: false,
             sidebar_sort: SidebarSort::default(),
@@ -659,6 +669,7 @@ impl AppModel {
             let device = remote.config.device_id.clone();
             spawn_service(cx, async move { remote.gateway("gateway.revoke_device", serde_json::json!({ "id": device })).await }, |_, _| {});
         }
+        if self.server_preview.as_ref().is_some_and(|p| p.server == server) { self.server_preview = None; self.dev_server = None; }
         crate::runtime::servers(cx).remove(&server);
         self.forget_server(&server, cx);
         self.save_servers(cx);
@@ -816,6 +827,7 @@ impl AppModel {
             move |res, cx| {
                 let _ = this.update(cx, |m, cx| {
                     if let Ok(s) = res {
+                        if m.server_preview.is_some() { return; }
                         let running = s.running;
                         m.dev_server = Some(s);
                         if running {
@@ -892,6 +904,7 @@ impl AppModel {
                     Ok(Ok(s)) => {
                         let running = s.running;
                         weak.update(cx, |m, cx| {
+                            if m.server_preview.is_some() { return; }
                             m.dev_server = Some(s);
                             if !running {
                                 m.dev_poll = None;
@@ -1923,7 +1936,48 @@ impl AppModel {
 
     // ── dev server ──────────────────────────────────────────────────────
 
+    /// The folder in view, when it is on a paired server.
+    fn server_folder_in_view(&self, cx: &App) -> Option<String> {
+        self.selected.and_then(|id| self.threads.get(&id)).map(|t| t.read(cx).meta.cwd.clone()).or_else(|| self.active_project.clone()).filter(|f| crate::remote::is_server_root(f))
+    }
+
+    /// Start or stop the dev server on the paired server, and carry its port to this Mac for the preview.
+    fn server_dev_toggle(&mut self, folder: String, cx: &mut Context<Self>) {
+        let Some(remote) = crate::runtime::servers(cx).for_root(&folder) else { return; };
+        let this = cx.entity().downgrade();
+        if self.server_preview.take().is_some() {
+            spawn_service(cx, async move { remote.call::<DevServerStatus>("stop_dev_server", serde_json::Value::Null).await }, move |res, cx| {
+                let _ = this.update(cx, |m, cx| { match res { Ok(s) => { m.dev_server = Some(s); m.toast(ToastKind::Info, "Dev server stopped"); } Err(e) => m.fail(e, cx) } cx.notify(); });
+            });
+            return;
+        }
+        let server = remote.config.id.clone();
+        spawn_service(cx, async move {
+            let mut status: DevServerStatus = remote.call("start_dev_server", serde_json::json!({ "root": remote.path_of(&folder) })).await?;
+            let port = status.port.ok_or_else(|| if status.message.is_empty() { "The dev server did not report a port.".to_string() } else { status.message.clone() })?;
+            let (local, guard) = crate::remote::live::forward_port(remote, port).await?;
+            let url = format!("http://127.0.0.1:{local}");
+            status.url = Some(url.clone());
+            status.cwd = Some(folder);
+            Ok::<_, String>((status, guard, url))
+        }, move |res, cx| {
+            let _ = this.update(cx, |m, cx| {
+                match res {
+                    Ok((status, guard, url)) => {
+                        m.toast(ToastKind::Success, format!("Dev server running on the server, shown here at {url}"));
+                        m.dev_server = Some(status);
+                        m.server_preview = Some(ServerPreview { server, _forward: guard, local_url: url });
+                    }
+                    Err(e) => m.fail(e, cx),
+                }
+                cx.notify();
+            });
+        });
+    }
+
     pub fn dev_server_toggle(&mut self, cx: &mut Context<Self>) {
+        if let Some(folder) = self.server_folder_in_view(cx) { self.server_dev_toggle(folder, cx); return; }
+        if self.server_preview.is_some() { self.fail("A dev server is running on a server project. Stop it from that project first.".into(), cx); return; }
         let running = self.dev_server.as_ref().map(|s| s.running).unwrap_or(false);
         let state = svc(cx);
         let this = cx.entity().downgrade();
@@ -1965,6 +2019,7 @@ impl AppModel {
     }
 
     pub fn dev_server_open(&mut self, cx: &mut Context<Self>) {
+        if let Some(preview) = &self.server_preview { cx.open_url(&preview.local_url); return; }
         let state = svc(cx);
         let this = cx.entity().downgrade();
         spawn_service(

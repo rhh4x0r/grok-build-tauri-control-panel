@@ -136,6 +136,33 @@ pub async fn dispatch(state: &AppState, origin: &str, method: &str, p: Value) ->
             Ok(json!(path.display().to_string()))
         }
 
+        // Looking at a server project's files from a Mac. Paths are confined to the person's own folders.
+        "list_dir" => {
+            let dir = own_path(state, &p).await?;
+            let show_ignored = arg::<Option<bool>>(&p, "show_hidden")?.unwrap_or(false);
+            let mut entries = Vec::new();
+            let mut reader = tokio::fs::read_dir(&dir).await.map_err(|e| e.to_string())?;
+            while let Some(entry) = reader.next_entry().await.map_err(|e| e.to_string())? {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name == ".git" || (!show_ignored && name.starts_with('.')) { continue; }
+                let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
+                entries.push(json!({ "name": name, "dir": is_dir }));
+                if entries.len() >= 5000 { break; }
+            }
+            Ok(json!(entries))
+        }
+        "read_file" => {
+            let file = own_path(state, &p).await?;
+            let meta = tokio::fs::metadata(&file).await.map_err(|e| e.to_string())?;
+            if !meta.is_file() { return Err("That is not a file.".into()); }
+            if meta.len() > 2 * 1024 * 1024 { return Err("That file is too large to show here.".into()); }
+            let bytes = tokio::fs::read(&file).await.map_err(|e| e.to_string())?;
+            match String::from_utf8(bytes) { Ok(text) => Ok(json!({ "text": text })), Err(_) => Ok(json!({ "binary": true })) }
+        }
+        "start_dev_server" => { let root = own_path(state, &p).await?; out(services::start_dev_server(state, Some(root.display().to_string()), None, Some(false)).await?) }
+        "stop_dev_server" => out(services::stop_dev_server(state).await?),
+        "dev_server_status" => out(services::dev_server_status(state).await?),
+
         // What this core can run
         "list_backends" => out(services::list_backends(state).await?),
         "backend_auth_status" => out(services::backend_auth_status(state).await?),
@@ -160,4 +187,20 @@ fn project_slug(name: &str) -> Result<String, String> {
 async fn own_project(state: &AppState, params: &Value) -> Result<String, String> {
     let root: String = arg(params, "root")?;
     if services::list_projects(state).await?.contains(&root) { Ok(root) } else { Err("That is not one of your projects on this server.".into()) }
+}
+
+/// `root` (a project or thread folder of this core) joined with the optional relative `path`, confined to that folder.
+pub async fn own_path(state: &AppState, params: &Value) -> Result<std::path::PathBuf, String> {
+    let root: String = arg(params, "root")?;
+    let mut allowed = services::list_projects(state).await?;
+    allowed.extend(state.persistence.list_workspaces().map_err(|e| e.to_string())?.into_iter().map(|w| w.path));
+    if !allowed.contains(&root) { return Err("That is not one of your folders on this server.".into()); }
+    let base = std::fs::canonicalize(&root).map_err(|e| e.to_string())?;
+    let relative: String = arg::<Option<String>>(params, "path")?.unwrap_or_default();
+    let relative = std::path::Path::new(&relative);
+    if relative.is_absolute() || relative.components().any(|c| matches!(c, std::path::Component::ParentDir)) { return Err("Paths must stay inside the project.".into()); }
+    // Resolve symlinks before checking, so a link cannot lead outside.
+    let full = std::fs::canonicalize(base.join(relative)).map_err(|e| e.to_string())?;
+    if !full.starts_with(&base) { return Err("Paths must stay inside the project.".into()); }
+    Ok(full)
 }

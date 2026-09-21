@@ -6,6 +6,7 @@
 //! [`Core`](crate::runtime::Core) can tell where a call belongs.
 
 pub mod keychain;
+pub mod live;
 pub mod sync;
 
 use std::collections::HashMap;
@@ -367,6 +368,46 @@ mod tests {
         sync::download_copy(&remote, &site, &copy, &scratch).await.unwrap();
         assert!(copy.join("about.html").exists());
         assert!(std::fs::read_dir(&scratch).unwrap().next().is_none(), "no bundles are left lying around");
+
+        // A terminal in the server project: typed here, run there, screen rendered here.
+        let terminal = live::open_terminal(remote.clone(), &site).await.unwrap();
+        terminal.write(b"printf 'BOMB_%s\\n' ON_SERVER; ls\r").unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !(terminal.screen().contents().contains("BOMB_ON_SERVER") && terminal.screen().contents().contains("about.html")) {
+            assert!(tokio::time::Instant::now() < deadline, "terminal screen: {}", terminal.screen().contents());
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        terminal.write(b"exit\r").unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !terminal.exited() { assert!(tokio::time::Instant::now() < deadline, "the shell's exit reaches this Mac"); tokio::time::sleep(Duration::from_millis(50)).await; }
+        assert!(live::open_terminal(remote.clone(), "bomb-server://other/etc").await.is_err());
+
+        // A dev server that only listens on the server's loopback loads through a local port here.
+        let dev = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dev_port = dev.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            loop {
+                let Ok((mut socket, _)) = dev.accept().await else { return };
+                let mut request = [0u8; 256];
+                let _ = socket.read(&mut request).await;
+                let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nfrom site").await;
+            }
+        });
+        let (local_port, guard) = live::forward_port(remote.clone(), dev_port).await.unwrap();
+        assert_ne!(local_port, dev_port);
+        let fetch = |port: u16| async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
+            socket.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").await?;
+            let mut body = String::new();
+            socket.read_to_string(&mut body).await?;
+            Ok::<_, std::io::Error>(body)
+        };
+        for _ in 0..2 { assert!(fetch(local_port).await.unwrap().ends_with("from site")); }
+        drop(guard);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(fetch(local_port).await.is_err(), "the local port closes with the preview");
 
         // The server only touches this person's registered projects, and only files it received itself.
         assert!(remote.request("branch_tips", json!({ "root": "/etc" })).await.unwrap_err().contains("not one of your projects"));

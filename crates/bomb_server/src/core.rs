@@ -85,9 +85,25 @@ where
     // Files a client is sending, by stream id. They live in a private folder and are removed after use.
     let transfer = state.paths.panel_dir.join("transfer");
     let mut uploads: std::collections::HashMap<u32, Upload> = Default::default();
+    // Terminals and forwarded connections this client has open, by stream id.
+    let mut live: std::collections::HashMap<u32, Live> = Default::default();
     while let Some(frame) = rx.recv().await? {
         let (id, method, mut params) = match frame {
             Frame::Message(Message::Request { id, method, params }) => (id, method, params),
+            Frame::Chunk(chunk) if live.contains_key(&chunk.stream) => {
+                // Keystrokes for a terminal, or bytes for a forwarded connection.
+                let gone = match live.get(&chunk.stream) {
+                    Some(Live::Terminal(terminal)) => terminal.write(&chunk.data).is_err(),
+                    Some(Live::Forward(to_socket)) => to_socket.send(chunk.data).await.is_err(),
+                    None => false,
+                };
+                if gone { live.remove(&chunk.stream); }
+                continue;
+            }
+            Frame::Message(Message::StreamEnd { stream, .. }) if live.contains_key(&stream) => {
+                live.remove(&stream);
+                continue;
+            }
             Frame::Chunk(chunk) => {
                 if !uploads.contains_key(&chunk.stream) {
                     if uploads.len() >= MAX_UPLOADS { anyhow::bail!("too many uploads at once"); }
@@ -109,6 +125,13 @@ where
             }
             Frame::Message(_) => continue,
         };
+        // These change what this connection has open, so they are answered here, in order.
+        if matches!(method.as_str(), "terminal_open" | "terminal_resize" | "forward_open") {
+            let result = open_live(&state, &method, &params, &mut live, &out).await;
+            let (ok, error) = match result { Ok(value) => (Some(value), None), Err(error) => (None, Some(error)) };
+            let _ = out.send(Frame::Message(Message::Response { id, ok, error })).await;
+            continue;
+        }
         // Only the server decides which file a request reads.
         if let Some(object) = params.as_object_mut() { object.remove("bundle_path"); }
         let upload = params.get("stream").and_then(serde_json::Value::as_u64).and_then(|n| uploads.remove(&(n as u32))).filter(|u| u.file.is_none());
@@ -185,5 +208,70 @@ async fn send_file(out: &mpsc::Sender<Frame>, stream: u32, path: &std::path::Pat
         let n = file.read(&mut buffer).await.map_err(|e| e.to_string())?;
         if n == 0 { return Ok(()); }
         out.send(Frame::Chunk(bomb_proto::Chunk { stream, data: bytes::Bytes::copy_from_slice(&buffer[..n]) })).await.map_err(|_| "connection closed".to_string())?;
+    }
+}
+
+const MAX_LIVE: usize = 32;
+
+enum Live {
+    Terminal(Arc<bomb_core::terminal::TerminalSession>),
+    /// Bytes headed for a TCP connection on this machine's loopback.
+    Forward(mpsc::Sender<bytes::Bytes>),
+}
+
+async fn open_live(state: &Arc<AppState>, method: &str, params: &serde_json::Value, live: &mut std::collections::HashMap<u32, Live>, out: &mpsc::Sender<Frame>) -> Result<serde_json::Value, String> {
+    let stream = params.get("stream").and_then(serde_json::Value::as_u64).ok_or("name a stream")? as u32;
+    let number = |name: &str| params.get(name).and_then(serde_json::Value::as_u64);
+    match method {
+        "terminal_resize" => {
+            if let Some(Live::Terminal(terminal)) = live.get(&stream) { terminal.resize(number("rows").unwrap_or(14) as u16, number("cols").unwrap_or(100) as u16); }
+            Ok(serde_json::Value::Null)
+        }
+        _ if live.len() >= MAX_LIVE => Err("Too many terminals and previews are open on this connection.".into()),
+        "terminal_open" => {
+            let folder = bomb_core::rpc::own_path(state, params).await?;
+            let out = out.clone();
+            // The PTY reader is a plain thread; hand its bytes to the connection without blocking it for long.
+            let tap: bomb_core::terminal::OutputTap = Box::new(move |bytes| {
+                let frame = match bytes {
+                    Some(bytes) => Frame::Chunk(bomb_proto::Chunk { stream, data: bytes::Bytes::copy_from_slice(bytes) }),
+                    None => Frame::Message(Message::StreamEnd { stream, error: None }),
+                };
+                let _ = out.blocking_send(frame);
+            });
+            let terminal = tokio::task::spawn_blocking(move || bomb_core::terminal::TerminalSession::spawn_tapped(&folder, tap)).await.map_err(|e| e.to_string())??;
+            terminal.resize(number("rows").unwrap_or(14) as u16, number("cols").unwrap_or(100) as u16);
+            live.insert(stream, Live::Terminal(terminal));
+            Ok(serde_json::Value::Null)
+        }
+        "forward_open" => {
+            let port = number("port").filter(|p| (1..=65535).contains(p)).ok_or("name a port")? as u16;
+            // Only this machine's own loopback, where a project's dev server listens.
+            let socket = tokio::time::timeout(std::time::Duration::from_secs(3), tokio::net::TcpStream::connect(("127.0.0.1", port))).await
+                .map_err(|_| "Nothing answered on that port.".to_string())?
+                .map_err(|e| format!("Nothing is listening on that port: {e}"))?;
+            let (mut from_socket, mut to_socket) = socket.into_split();
+            let (tx, mut rx) = mpsc::channel::<bytes::Bytes>(64);
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                while let Some(data) = rx.recv().await { if to_socket.write_all(&data).await.is_err() { break; } }
+                let _ = to_socket.shutdown().await;
+            });
+            let out = out.clone();
+            tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                let mut buffer = vec![0u8; 64 * 1024];
+                loop {
+                    match from_socket.read(&mut buffer).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => if out.send(Frame::Chunk(bomb_proto::Chunk { stream, data: bytes::Bytes::copy_from_slice(&buffer[..n]) })).await.is_err() { return; },
+                    }
+                }
+                let _ = out.send(Frame::Message(Message::StreamEnd { stream, error: None })).await;
+            });
+            live.insert(stream, Live::Forward(tx));
+            Ok(serde_json::Value::Null)
+        }
+        _ => Err("unknown method".into()),
     }
 }

@@ -730,6 +730,7 @@ dependencies = [
  "bomb_link",
  "bomb_proto",
  "bomb_server",
+ "bytes",
  "chrono",
  "gpui-kit",
  "gpui-wry",

@@ -74,10 +74,15 @@ impl TerminalPanel {
         self.loading = true;
         self.error = None;
         let cwd = self.cwd.clone();
+        let remote = crate::runtime::servers(cx).for_root(&cwd.to_string_lossy());
         let weak = cx.entity().downgrade();
         spawn_service(
             cx,
             async move {
+                // A server thread's terminal is a shell on the server, streamed here.
+                if let Some(remote) = remote {
+                    return crate::remote::live::open_terminal(remote, &cwd.to_string_lossy()).await;
+                }
                 tokio::task::spawn_blocking(move || TerminalSession::spawn(&cwd))
                     .await
                     .map_err(|e| e.to_string())
