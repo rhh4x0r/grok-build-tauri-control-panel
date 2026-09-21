@@ -46,6 +46,9 @@ fn recency_group(iso: &str) -> &'static str {
     }
 }
 
+/// Open threads shown per project before "View more".
+const VISIBLE_OPEN_THREADS: usize = 3;
+
 impl SidebarView {
     pub fn new(model: Entity<AppModel>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe(&model, |_, _, cx| cx.notify()).detach();
@@ -120,7 +123,20 @@ impl SidebarView {
         let add = app.clone();
         let add_root = root.clone();
         let hover = ui.hover;
-        let rows: Vec<_> = self.model.read(cx).workspaces.iter().filter(|w| w.project_root == root).cloned().collect();
+        let rows: Vec<_> = {
+            let m = self.model.read(cx);
+            let mut rows: Vec<_> = m.workspaces.iter().filter(|w| w.project_root == root).cloned().map(|w| {
+                let threads: Vec<_> = w.threads.iter().filter_map(|t| Uuid::parse_str(t).ok()).filter_map(|id| m.threads.get(&id)).collect();
+                let key = crate::models::app::SortKey {
+                    name: if let [only] = threads.as_slice() { only.read(cx).title() } else { w.name.clone() },
+                    updated: threads.iter().map(|t| t.read(cx).meta.updated_at.clone()).max().unwrap_or_default(),
+                    created: w.created_at.clone(),
+                };
+                (key, w)
+            }).collect();
+            crate::models::app::sort_rows(&mut rows, m.sidebar_sort);
+            rows.into_iter().map(|(_, w)| w).collect()
+        };
         let mut group = div().flex().flex_col().gap(px(Layout::SIDEBAR_LIST_GAP));
         group = group.child(
             div()
@@ -145,6 +161,24 @@ impl SidebarView {
                         .child(g.name.clone())
                         .on_click(move |_, _, cx| app.update(cx, |m, cx| m.set_active_project(root.clone(), cx))),
                 )
+                .child({
+                    let pinned = self.model.read(cx).pinned_projects.contains(&g.root);
+                    let pin_app = self.model.clone();
+                    let pin_root = g.root.clone();
+                    div()
+                        .id(SharedString::from(format!("pin-{}", g.root)))
+                        .size(px(20.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(6.))
+                        .text_color(if pinned { ui.text } else { Ui::alpha(ui.text_muted, 0.45) })
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(hover))
+                        .tooltip(move |window, cx| Tooltip::new(if pinned { "Unpin project" } else { "Pin project to the top" }).build(window, cx))
+                        .on_click(move |_, _, cx| pin_app.update(cx, |m, cx| m.toggle_pinned_project(pin_root.clone(), cx)))
+                        .child(div().size(px(12.)).child(Icon::from(if pinned { Lucide::PinOff } else { Lucide::Pin })))
+                })
                 .child(
                     div()
                         .id(SharedString::from(format!("new-{}", g.root)))
@@ -202,6 +236,27 @@ impl SidebarView {
             }
         }
         if collapsed { return group; }
+        // Only the few most recently active open threads show until "View more" is opened.
+        let more_key = format!("more:{}", g.root);
+        let show_all = self.expanded.contains(&more_key);
+        let hidden: std::collections::HashSet<String> = {
+            let m = self.model.read(cx);
+            let updated = |id: &Uuid| m.threads.get(id).map(|t| t.read(cx).meta.updated_at.clone()).unwrap_or_default();
+            let mut open: Vec<(String, bool, String)> = Vec::new();
+            for w in rows.iter().filter(|w| w.archived_at.is_none()) {
+                let live: Vec<Uuid> = w.threads.iter().filter_map(|t| Uuid::parse_str(t).ok()).filter(|id| !m.archived.contains(id)).collect();
+                if live.is_empty() { continue; }
+                if w.inline {
+                    for id in live { open.push((updated(&id), m.selected == Some(id), id.to_string())); }
+                } else {
+                    let current = m.active_workspace.as_deref() == Some(&w.id);
+                    open.push((live.iter().map(updated).max().unwrap_or_default(), current, w.id.clone()));
+                }
+            }
+            crate::models::app::hidden_rows(open, VISIBLE_OPEN_THREADS)
+        };
+        let hidden_count = hidden.len();
+        let hidden = if show_all { Default::default() } else { hidden };
         for archived in [false, true] {
             let archived_key = format!("archived:{}", g.root);
             let archive_open = self.expanded.contains(&archived_key);
@@ -232,6 +287,7 @@ impl SidebarView {
                 // available in the project overview; archived threads live below.
                 if !w.threads.iter().filter_map(|id| Uuid::parse_str(id).ok())
                     .any(|id| !self.model.read(cx).archived.contains(&id)) { continue; }
+                if hidden.contains(&w.id) { continue; }
                 let single_thread = if w.threads.len() == 1 { Uuid::parse_str(&w.threads[0]).ok() } else { None };
                 let app = self.model.clone();
                 let wid = w.id.clone();
@@ -367,12 +423,36 @@ impl SidebarView {
         for w in rows.iter().filter(|w| w.inline) {
             for id in &w.threads {
                 if let Ok(id) = Uuid::parse_str(id) {
-                    if self.model.read(cx).archived.contains(&id) { continue; }
+                    if self.model.read(cx).archived.contains(&id) || hidden.contains(&id.to_string()) { continue; }
                     if let Some(t) = self.model.read(cx).threads.get(&id).cloned() {
                         group = group.child(self.thread_row(id, &t, "", self.model.read(cx).selected == Some(id), ui, cx));
                     }
                 }
             }
+        }
+        if hidden_count > 0 {
+            let hover = ui.hover;
+            group = group.child(
+                div()
+                    .id(SharedString::from(more_key.clone()))
+                    .flex()
+                    .items_center()
+                    .gap(px(Layout::SPACE_XS))
+                    .h(px(28.))
+                    .ml(px(GROUP_INDENT - 6.))
+                    .px(px(6.))
+                    .rounded(px(6.))
+                    .text_size(px(crate::theme::Type::SMALL))
+                    .text_color(ui.text_muted)
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.expanded.remove(&more_key) { this.expanded.insert(more_key.clone()); }
+                        cx.notify();
+                    }))
+                    .child(div().size(px(13.)).child(Icon::from(if show_all { Lucide::ChevronUp } else { Lucide::ChevronDown })))
+                    .child(if show_all { "Show fewer threads".to_string() } else if hidden_count == 1 { "View 1 more thread".to_string() } else { format!("View {hidden_count} more threads") }),
+            );
         }
         // Archived conversations of this project: a collapsed shelf.
         let archived_threads: Vec<Uuid> = {
@@ -772,7 +852,23 @@ impl Render for SidebarView {
                     .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::actions::OpenProject), cx)))
                 .child(Button::new("sidebar-new-chat").ghost().small().icon(Lucide::Plus).label("New chat")
                     .on_click(|_, window, cx| window.dispatch_action(Box::new(NewThread), cx))))
-            .child(div().px(px(Layout::SPACE_SM)).pb(px(Layout::SPACE_XS)).child(Input::new(&self.search).cleanable(true).appearance(true)))
+            .child(div().flex().items_center().gap_1().px(px(Layout::SPACE_SM)).pb(px(Layout::SPACE_XS))
+                .child(div().flex_1().min_w_0().child(Input::new(&self.search).cleanable(true).appearance(true)))
+                .child({
+                    let app = self.model.clone();
+                    let current = self.model.read(cx).sidebar_sort;
+                    Button::new("sidebar-sort").ghost().small().icon(Lucide::ListFilter)
+                        .tooltip(format!("Sort projects and threads · {}", current.label()))
+                        .dropdown_menu(move |mut menu, _, _| {
+                            menu = menu.item(PopupMenuItem::new("Sort by").disabled(true));
+                            for sort in crate::models::app::SidebarSort::ALL {
+                                let app = app.clone();
+                                menu = menu.item(PopupMenuItem::new(sort.label()).checked(sort == current)
+                                    .on_click(move |_, _, cx| app.update(cx, |m, cx| m.set_sidebar_sort(sort, cx))));
+                            }
+                            menu
+                        })
+                }))
             .child(
                 div()
                     .id("thread-list")
@@ -786,7 +882,24 @@ impl Render for SidebarView {
                     .pb(px(Layout::SPACE_SM))
                     .map(|el| {
                         if query.is_empty() {
-                            el.gap(px(Layout::SIDEBAR_SECTION_GAP)).children(groups.iter().map(|g| self.group(g, &ui, cx)))
+                            let pinned_roots = self.model.read(cx).pinned_projects.clone();
+                            let (pinned, rest): (Vec<_>, Vec<_>) = groups.iter().partition(|g| pinned_roots.contains(&g.root));
+                            let heading = |label: &'static str| {
+                                div()
+                                    .px(px(Layout::SPACE_SM))
+                                    .pt(px(Layout::SPACE_XS))
+                                    .text_size(px(crate::theme::Type::SMALL))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(ui.text_faint)
+                                    .child(label)
+                            };
+                            el.gap(px(Layout::SIDEBAR_SECTION_GAP))
+                                .when(!pinned.is_empty(), |el| {
+                                    el.child(heading("Pinned"))
+                                        .children(pinned.iter().map(|g| self.group(g, &ui, cx)))
+                                        .when(!rest.is_empty(), |el| el.child(heading("Projects")))
+                                })
+                                .children(rest.iter().map(|g| self.group(g, &ui, cx)))
                                 .when(groups.iter().all(|g| g.threads.is_empty()), |el| {
                                     el.child(
                                         div()

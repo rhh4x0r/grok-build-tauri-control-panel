@@ -24,12 +24,64 @@ pub struct AppModelHandle(pub Entity<AppModel>);
 impl Global for AppModelHandle {}
 
 const ARCHIVED_KEY: &str = "archived_threads";
+const SIDEBAR_SORT_KEY: &str = "sidebar_sort";
+const PINNED_PROJECTS_KEY: &str = "pinned_projects";
 
 #[derive(Debug, Clone)]
 pub struct ProjectGroup {
     pub root: String,
     pub name: String,
     pub threads: Vec<Uuid>,
+}
+
+/// How the sidebar orders projects and the threads inside them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SidebarSort {
+    /// Last activity first; a project is as recent as its most recent thread.
+    #[default]
+    Recent,
+    /// Newest created first.
+    Created,
+    Alphabetical,
+}
+
+impl SidebarSort {
+    pub const ALL: [SidebarSort; 3] = [SidebarSort::Recent, SidebarSort::Created, SidebarSort::Alphabetical];
+    pub fn key(self) -> &'static str {
+        match self { Self::Recent => "recent", Self::Created => "created", Self::Alphabetical => "alphabetical" }
+    }
+    pub fn from_key(key: &str) -> Self {
+        Self::ALL.into_iter().find(|s| s.key() == key).unwrap_or_default()
+    }
+    pub fn label(self) -> &'static str {
+        match self { Self::Recent => "Most recent", Self::Created => "Time created", Self::Alphabetical => "Alphabetical" }
+    }
+}
+
+/// Ids of the open rows to tuck behind "View more": everything past the `keep` most recently changed,
+/// except the row the user is on. Each row is (last change, is current, id).
+pub fn hidden_rows(mut rows: Vec<(String, bool, String)>, keep: usize) -> HashSet<String> {
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    rows.into_iter().enumerate().filter(|(ix, (_, current, _))| *ix >= keep && !current).map(|(_, (_, _, id))| id).collect()
+}
+
+/// What the sidebar sorts by, for one project or one thread row.
+pub struct SortKey {
+    pub name: String,
+    pub updated: String,
+    pub created: String,
+}
+
+/// Order rows in place. Timestamps are ISO strings, so text order is time order; rows without activity go last.
+pub fn sort_rows<T>(rows: &mut [(SortKey, T)], sort: SidebarSort) {
+    rows.sort_by(|(a, _), (b, _)| {
+        let by_name = || a.name.to_lowercase().cmp(&b.name.to_lowercase());
+        match sort {
+            SidebarSort::Recent => b.updated.cmp(&a.updated).then_with(by_name),
+            SidebarSort::Created => b.created.cmp(&a.created).then_with(by_name),
+            SidebarSort::Alphabetical => by_name(),
+        }
+    });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +141,9 @@ pub struct AppModel {
     pub project_overviews: HashMap<String, Result<bomb_core::services::project_overview::ProjectOverview, String>>,
     pub overview_loading: HashSet<String>,
     pub overview_branch: Option<String>,
+    pub sidebar_sort: SidebarSort,
+    /// Project roots shown in the sidebar's Pinned section, in the order they were pinned.
+    pub pinned_projects: Vec<String>,
     /// Workspaces to close once their agent finishes merging.
     pub close_after_merge: HashSet<String>,
     pub active_workspace: Option<String>,
@@ -141,6 +196,8 @@ impl AppModel {
             project_overviews: HashMap::new(),
             overview_loading: HashSet::new(),
             overview_branch: None,
+            sidebar_sort: SidebarSort::default(),
+            pinned_projects: Vec::new(),
             close_after_merge: HashSet::new(),
             active_workspace: None,
             source_thread: None,
@@ -333,6 +390,7 @@ impl AppModel {
         self.refresh_services(cx);
         self.refresh_usage(cx);
         self.load_archived(cx);
+        self.load_sidebar_prefs(cx);
         self.refresh_backends(cx);
         self.refresh_dev_server(cx);
         self.refresh_mcp_names(cx);
@@ -610,7 +668,32 @@ impl AppModel {
                 });
             }
         }
-        groups
+        // Threads first, then projects by their most relevant thread.
+        let sort = self.sidebar_sort;
+        let key = |id: &Uuid| {
+            let t = self.threads.get(id).map(|t| t.read(cx));
+            SortKey {
+                name: t.map(|t| t.title()).unwrap_or_default(),
+                updated: t.map(|t| t.meta.updated_at.clone()).unwrap_or_default(),
+                created: t.map(|t| t.meta.created_at.clone()).unwrap_or_default(),
+            }
+        };
+        let mut keyed: Vec<(SortKey, ProjectGroup)> = groups
+            .into_iter()
+            .map(|mut g| {
+                let mut rows: Vec<(SortKey, Uuid)> = g.threads.iter().map(|id| (key(id), *id)).collect();
+                sort_rows(&mut rows, sort);
+                let project = SortKey {
+                    name: g.name.clone(),
+                    updated: rows.iter().map(|(k, _)| k.updated.clone()).max().unwrap_or_default(),
+                    created: rows.iter().map(|(k, _)| k.created.clone()).max().unwrap_or_default(),
+                };
+                g.threads = rows.into_iter().map(|(_, id)| id).collect();
+                (project, g)
+            })
+            .collect();
+        sort_rows(&mut keyed, sort);
+        keyed.into_iter().map(|(_, g)| g).collect()
     }
 
     pub fn selected_thread(&self) -> Option<Entity<ThreadModel>> {
@@ -1236,6 +1319,37 @@ impl AppModel {
         spawn_service(cx, async move { services::kv_set(&state, ARCHIVED_KEY, &raw).await }, |_, _| {});
     }
 
+    pub fn load_sidebar_prefs(&mut self, cx: &mut Context<Self>) {
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move {
+            let sort = services::kv_get(&state, SIDEBAR_SORT_KEY).await.ok().flatten();
+            let pinned = services::kv_get(&state, PINNED_PROJECTS_KEY).await.ok().flatten();
+            (sort, pinned)
+        }, move |(sort, pinned), cx| {
+            let _ = this.update(cx, |m, cx| {
+                if let Some(sort) = sort { m.sidebar_sort = SidebarSort::from_key(&sort); }
+                if let Some(pinned) = pinned.and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok()) { m.pinned_projects = pinned; }
+                cx.notify();
+            });
+        });
+    }
+
+    pub fn set_sidebar_sort(&mut self, sort: SidebarSort, cx: &mut Context<Self>) {
+        self.sidebar_sort = sort;
+        let state = svc(cx);
+        spawn_service(cx, async move { services::kv_set(&state, SIDEBAR_SORT_KEY, sort.key()).await }, |_, _| {});
+        cx.notify();
+    }
+
+    pub fn toggle_pinned_project(&mut self, root: String, cx: &mut Context<Self>) {
+        if let Some(ix) = self.pinned_projects.iter().position(|p| p == &root) { self.pinned_projects.remove(ix); } else { self.pinned_projects.push(root); }
+        let raw = serde_json::to_string(&self.pinned_projects).unwrap_or_else(|_| "[]".into());
+        let state = svc(cx);
+        spawn_service(cx, async move { services::kv_set(&state, PINNED_PROJECTS_KEY, &raw).await }, |_, _| {});
+        cx.notify();
+    }
+
     /// Hide a thread without deleting anything.
     pub fn archive_thread(&mut self, id: Uuid, cx: &mut Context<Self>) {
         self.archived.insert(id);
@@ -1382,7 +1496,11 @@ impl AppModel {
     // ── projects ────────────────────────────────────────────────────────
 
     pub fn create_project(&mut self, cx: &mut Context<Self>) {
-        let directory=std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(||PathBuf::from("/tmp"));
+        // New projects start in ~/Documents/BombCode rather than loose in the home folder.
+        let directory = match services::default_projects_dir() {
+            Ok(dir) if std::fs::create_dir_all(&dir).is_ok() => dir,
+            _ => std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp")),
+        };
         let rx=cx.prompt_for_new_path(&directory,Some("New project"));
         cx.spawn(async move |weak,cx| {
             let Ok(Ok(Some(path)))=rx.await else {return;};
@@ -1412,6 +1530,11 @@ impl AppModel {
     }
 
     pub fn add_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        // The whole home folder (or the disk) as one project makes every thread copy everything.
+        if path.parent().is_none() || std::env::var_os("HOME").is_some_and(|home| PathBuf::from(home) == path) {
+            self.fail("Choose a project folder inside your home folder, not the home folder itself. New projects go in Documents/BombCode.".into(), cx);
+            return;
+        }
         let p = path.display().to_string();
         let state = svc(cx);
         let this = cx.entity().downgrade();
@@ -1724,6 +1847,40 @@ pub fn project_name(root: &str) -> String {
 
 fn next_shortcut_mode(current: &str) -> &'static str {
     match current { "plan" => "ask", "ask" => "auto", _ => "plan" }
+}
+
+#[cfg(test)]
+mod sidebar_sort_tests {
+    use super::{sort_rows, SidebarSort, SortKey};
+    fn rows() -> Vec<(SortKey, &'static str)> {
+        let row = |name: &str, updated: &str, created: &str| SortKey { name: name.into(), updated: updated.into(), created: created.into() };
+        vec![
+            (row("beta", "2026-09-20T10:00:00Z", "2026-09-01T00:00:00Z"), "beta"),
+            (row("Alpha", "2026-09-19T10:00:00Z", "2026-09-10T00:00:00Z"), "alpha"),
+            (row("empty", "", ""), "empty"),
+            (row("gamma", "2026-09-21T10:00:00Z", "2026-08-01T00:00:00Z"), "gamma"),
+        ]
+    }
+    fn order(sort: SidebarSort) -> Vec<&'static str> {
+        let mut r = rows();
+        sort_rows(&mut r, sort);
+        r.into_iter().map(|(_, id)| id).collect()
+    }
+    #[test]
+    fn recent_created_and_alphabetical_orders() {
+        assert_eq!(order(SidebarSort::Recent), ["gamma", "beta", "alpha", "empty"]);
+        assert_eq!(order(SidebarSort::Created), ["alpha", "beta", "gamma", "empty"]);
+        assert_eq!(order(SidebarSort::Alphabetical), ["alpha", "beta", "empty", "gamma"]);
+        assert_eq!(SidebarSort::from_key("nonsense"), SidebarSort::Recent);
+    }
+    #[test]
+    fn only_the_most_recently_changed_rows_stay_visible_plus_the_current_one() {
+        let row = |at: &str, current: bool, id: &str| (at.to_string(), current, id.to_string());
+        let rows = vec![row("2026-09-01", false, "old"), row("2026-09-20", false, "a"), row("2026-09-19", false, "b"), row("2026-09-18", false, "c"), row("2026-08-01", true, "current")];
+        let hidden = super::hidden_rows(rows.clone(), 3);
+        assert_eq!(hidden, std::collections::HashSet::from(["old".to_string()]));
+        assert!(super::hidden_rows(rows[..3].to_vec(), 3).is_empty());
+    }
 }
 
 #[cfg(test)]

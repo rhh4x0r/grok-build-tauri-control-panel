@@ -365,18 +365,15 @@ fn resolve_projects_parent(parent: Option<String>) -> Result<PathBuf, String> {
         }
         return Ok(path);
     }
+    default_projects_dir()
+}
+
+/// Where new projects go unless the user picks somewhere else: `~/Documents/BombCode`.
+pub fn default_projects_dir() -> Result<PathBuf, String> {
     let home = std::env::var("HOME")
         .map(PathBuf::from)
         .map_err(|_| "HOME not set".to_string())?;
-    // Prefer existing project roots
-    for candidate in ["Projects", "projects", "Code", "code", "Developer", "dev"] {
-        let p = home.join(candidate);
-        if p.is_dir() {
-            return Ok(p);
-        }
-    }
-    // Default: ~/Projects (create on demand by caller)
-    Ok(home.join("Projects"))
+    Ok(home.join("Documents").join("BombCode"))
 }
 
 // ── Phase 1: Sessions ────────────────────────────────────────────────────
