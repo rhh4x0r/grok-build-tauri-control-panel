@@ -40,10 +40,6 @@ impl PreviewPanel {
         }
     }
 
-    pub fn set_project_root(&mut self, root: std::path::PathBuf, cx: &mut Context<Self>) {
-        self.project_root_override=Some(root); self.webview=None;self.loaded_url=None;self.sync_root(cx);cx.notify();
-    }
-
     pub fn reveal_file(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
         self.show_files = true;
         self.sync_root(cx);

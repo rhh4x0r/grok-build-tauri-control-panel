@@ -1,4 +1,4 @@
-//! Choose a project first, then connect an agent and plan the work together.
+//! One next step for connecting an agent, choosing a project and starting a chat.
 use crate::{
     models::app::{project_name, AppModel},
     theme::Ui,
@@ -16,10 +16,10 @@ pub enum Step {
     Conversation,
 }
 pub fn next_step(ready: bool, has_project: bool) -> Step {
-    if !has_project {
-        Step::Project
-    } else if !ready {
+    if !ready {
         Step::Connect
+    } else if !has_project {
+        Step::Project
     } else {
         Step::Conversation
     }
@@ -41,10 +41,10 @@ pub fn setup(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
     let action = model.clone();
     let (title, detail) = match step {
         Step::Connect if auth.is_none() => ("Check your connections".into(), "Refresh to detect installed providers and sign-in status.".into()),
-        Step::Connect if runnable => (format!("Connect {provider}"), "Your project is selected. Sign in to plan with your coding agent.".to_string()),
+        Step::Connect if runnable => (format!("Connect {provider}"), "Sign in to start a conversation with your coding agent.".to_string()),
         Step::Connect => ("Connect a coding agent".into(), format!("Install the {provider} CLI, then refresh connections. You can also choose another provider.")),
-        Step::Project => ("What would you like to work on?".into(), "Create a project or open a folder. You can choose your project before connecting an agent.".into()),
-        Step::Conversation => ("Let’s plan your project".into(), format!("Describe what you want to build in {}. We’ll work through the questions and plan together before you start building.", m.active_project.as_deref().map(project_name).unwrap_or_default())),
+        Step::Project => ("Choose a project".into(), "Select an existing project or add a folder to work in.".into()),
+        Step::Conversation => ("Ready to start".into(), format!("Start a conversation in {}. Describe what you want to do in the composer.", m.active_project.as_deref().map(project_name).unwrap_or_default())),
     };
     let mut content = div()
         .id("guided-welcome")
@@ -59,9 +59,9 @@ pub fn setup(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
         .child(
             div().flex().gap_4().text_size(px(11.)).children(
                 [
-                    ("1  Choose project", Step::Project),
-                    ("2  Connect agent", Step::Connect),
-                    ("3  Plan together", Step::Conversation),
+                    ("1  Connect", Step::Connect),
+                    ("2  Choose project", Step::Project),
+                    ("3  Start conversation", Step::Conversation),
                 ]
                 .into_iter()
                 .map(|(label, s)| {
@@ -140,100 +140,44 @@ pub fn setup(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                 );
         }
         Step::Project => {
-            let create = model.clone();
-            let open = model.clone();
             content = content.child(
-                div()
-                    .flex()
-                    .gap_3()
-                    .child(
-                        Button::new("welcome-new-project")
-                            .primary()
-                            .label("New project")
-                            .on_click(move |_, _, cx| {
-                                create.update(cx, |m, cx| m.create_project(cx));
+                Button::new("welcome-project")
+                    .primary()
+                    .label("Choose project")
+                    .dropdown_caret(true)
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for project in &projects {
+                            let app = action.clone();
+                            let path = project.clone();
+                            menu = menu.item(PopupMenuItem::new(project_name(project)).on_click(
+                                move |_, _, cx| {
+                                    app.update(cx, |m, cx| m.set_active_project(path.clone(), cx));
+                                },
+                            ));
+                        }
+                        let app = action.clone();
+                        menu.separator().item(
+                            PopupMenuItem::new("Add project…").on_click(move |_, _, cx| {
+                                app.update(cx, |m, cx| m.open_project(cx))
                             }),
-                    )
-                    .child(
-                        Button::new("welcome-open-project")
-                            .primary()
-                            .label("Open project")
-                            .on_click(move |_, _, cx| {
-                                open.update(cx, |m, cx| m.open_project(cx));
-                            }),
-                    ),
+                        )
+                    }),
             );
         }
         Step::Conversation => {
             content = content.child(
                 Button::new("welcome-start")
                     .primary()
-                    .label("Plan project work")
+                    .label("Start conversation")
                     .on_click(|_, window, cx| {
-                        window.dispatch_action(Box::new(crate::actions::NewFeature), cx)
+                        window.dispatch_action(Box::new(crate::actions::NewThread), cx)
                     }),
             );
         }
     }
-    // Recent projects remain available without requiring an agent connection.
-    if !projects.is_empty() {
-        let recent = model.clone();
-        content = content.child(
-            Button::new("welcome-recent-projects")
-                .ghost()
-                .label("Recent projects")
-                .dropdown_caret(true)
-                .dropdown_menu(move |mut menu, _, _| {
-                    for project in &projects {
-                        let app = recent.clone();
-                        let path = project.clone();
-                        menu = menu.item(PopupMenuItem::new(project_name(project)).on_click(
-                            move |_, _, cx| {
-                                app.update(cx, |m, cx| m.set_active_project(path.clone(), cx));
-                            },
-                        ));
-                    }
-                    menu
-                }),
-        );
-    }
-    let mut alternatives = div().flex().gap_3();
-    if step == Step::Conversation {
-        alternatives = alternatives.child(
-            Button::new("welcome-chat")
-                .ghost()
-                .label("Ordinary chat")
-                .on_click(|_, window, cx| {
-                    window.dispatch_action(Box::new(crate::actions::NewThread), cx);
-                }),
-        );
-    }
-    content = content
-        .child(
-            alternatives
-                .child(
-                    Button::new("welcome-temporary")
-                        .ghost()
-                        .label("Temporary chat")
-                        .on_click(move |_, _, cx| {
-                            temporary.update(cx, |m, cx| m.temporary_chat(cx));
-                        }),
-                )
-                .child(
-                    Button::new("welcome-settings")
-                        .ghost()
-                        .label("Connections & settings")
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(crate::actions::OpenSettings), cx);
-                        }),
-                ),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(ui.text_faint)
-                .child("Temporary chats are saved in ~/.bombcode/chats"),
-        );
+    content = content.child(Button::new("welcome-temporary").ghost().label("Temporary chat")
+        .on_click(move |_, _, cx| temporary.update(cx, |m, cx| m.temporary_chat(cx))))
+        .child(div().text_xs().text_color(ui.text_faint).child("No project needed · saved in ~/.bombcode/chats"));
     content.into_any_element()
 }
 
@@ -241,8 +185,8 @@ pub fn setup(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
 mod tests {
     use super::{next_step, Step};
     #[test]
-    fn setup_allows_project_selection_before_connection_then_planning() {
-        assert_eq!(next_step(false, false), Step::Project);
+    fn setup_prioritizes_connection_then_project_then_conversation() {
+        assert_eq!(next_step(false, false), Step::Connect);
         assert_eq!(next_step(false, true), Step::Connect);
         assert_eq!(next_step(true, false), Step::Project);
         assert_eq!(next_step(true, true), Step::Conversation);

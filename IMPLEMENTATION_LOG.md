@@ -645,3 +645,10 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 - Landing now permits unrelated untracked files without committing, stashing or moving them. It still blocks tracked/staged edits and lists their paths. Fast-forward integration uses --no-overwrite-ignore so Git rejects colliding ignored files as well as ordinary untracked files. Candidate cleanliness, exact review/approval, target revision and idle-workspace gates remain in force.
 - All 36 project-workflow tests passed. Added real-Git coverage for preserving unrelated planning records with the exact approved HEAD, colliding untracked and ignored files, file/directory collisions and staged edits. Existing dirty-checkout and retry tests now explicitly use tracked local changes. Workspace check and strict all-target Clippy passed.
 - Built and refreshed the workspace Preview bundle, verified its executable before signing, and passed strict signature verification. The live project and its files were not mutated during diagnosis. Preview must be reopened to load the fix; no live merge was performed. The current app was not terminated because persisted sessions include running/waiting-approval states.
+
+
+## 2026-09-20 — simple-app branch: remove the project planning workflow
+
+- On the new `simple-app` branch only (gpui-rewrite keeps everything), removed the project workflow surface: Project/Board/Git tabs, Attention, Next decision, Pause/Stop, feature board/editor/decision views, and the `project_work`, `features` and `feature_documents` core services.
+- Root, sidebar, palette, actions, welcome, project page and smoke fixture return to their pre-workflow (95795a4) form; AppModel, thread view, AppState and workspace idle checks drop their workflow hooks. Unrelated fixes from the same window (ACP terminal cancellation, late tool updates, effort persistence, scrollable tool output, dev server repairs) are kept.
+- Validation: `cargo check -p bomb_app` clean and the dev build launches. The test suite and BOMB_SMOKE run were not executed on the final state.

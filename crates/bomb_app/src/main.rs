@@ -64,10 +64,6 @@ fn main() {
             eprintln!("Smoke test timed out before the native UI completed.");
             std::process::exit(2);
         });
-        if let Err(error) = rt.block_on(smoke::prepare_workflow(&state)) {
-            eprintln!("Smoke fixture failed: {error}");
-            std::process::exit(1);
-        }
     }
     let handle = rt.handle().clone();
     // The runtime must outlive the UI loop; `run` never returns on macOS.

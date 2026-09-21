@@ -8,7 +8,7 @@ use gpui_kit::*;
 use uuid::Uuid;
 
 use crate::actions::{
-    NewFeature, OpenFeatures, CycleApprovalMode, DeleteThread, FindInThread, LandThread, NewThread, OpenProject, OpenSettings,
+    CycleApprovalMode, DeleteThread, FindInThread, LandThread, NewThread, OpenProject, OpenSettings,
     RevealProject, StopTurn, SyncThread, ToggleDevPreview, ToggleExplainer,
 };
 use crate::models::app::AppModel;
@@ -22,11 +22,6 @@ struct Entry {
 
 fn entries() -> Vec<Entry> {
     vec![
-        Entry { label: "Describe project work / new feature…", keywords: &["project", "task", "parallel", "idea"], icon: Lucide::Plus, action: Box::new(NewFeature) },
-        Entry { label: "Next decision in this project", keywords: &["needs", "approval", "review", "blocked"], icon: Lucide::Check, action: Box::new(crate::actions::NextProjectDecision) },
-        Entry { label: "Pause project · let active tasks finish", keywords: &["pause", "project"], icon: Lucide::Pause, action: Box::new(crate::actions::PauseProject) },
-        Entry { label: "Stop project · cancel active work", keywords: &["stop", "cancel", "project"], icon: Lucide::Square, action: Box::new(crate::actions::StopProject) },
-        Entry { label: "Project board", keywords: &["tasks", "board", "tracking"], icon: Lucide::GitBranch, action: Box::new(OpenFeatures) },
         Entry { label: "New thread", keywords: &["chat", "start"], icon: Lucide::Plus, action: Box::new(NewThread) },
         Entry { label: "Open project…", keywords: &["folder", "repo"], icon: Lucide::FolderOpen, action: Box::new(OpenProject) },
         Entry { label: "Find in conversation", keywords: &["search"], icon: Lucide::Search, action: Box::new(FindInThread) },

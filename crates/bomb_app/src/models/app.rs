@@ -100,8 +100,6 @@ pub struct AppModel {
     pub threads: HashMap<Uuid, Entity<ThreadModel>>,
     pub selected: Option<Uuid>,
     pub new_thread_open: bool,
-    pub features_open: bool,
-    pub project_feature_request: Option<String>,
     pub foundry_request: Option<String>,
     pub foundry_insert: Option<String>,
     pub foundry_close: bool,
@@ -122,8 +120,6 @@ pub struct AppModel {
     pub last_error: Option<String>,
     /// Pending toasts; the root view drains them into the notification layer.
     pub toasts: VecDeque<(ToastKind, String)>,
-    pub project_notices: VecDeque<(String,Option<String>,String)>,
-    last_project_notice: std::collections::HashMap<String,String>,
     /// A prompt is in flight for a not-yet-created thread.
     pub starting: bool,
     pub start_failure_serial: u64,
@@ -154,8 +150,6 @@ impl AppModel {
             threads: HashMap::new(),
             selected: None,
             new_thread_open: false,
-            features_open: false,
-            project_feature_request: None,
             foundry_request: None,
             foundry_insert: None,
             foundry_close: false,
@@ -171,7 +165,7 @@ impl AppModel {
             login: None,
             login_starting: false,
             last_error: None,
-            toasts: VecDeque::new(),project_notices:VecDeque::new(),last_project_notice:Default::default(),
+            toasts: VecDeque::new(),
             starting: false,
             start_failure_serial: 0,
             archived: HashSet::new(),
@@ -284,7 +278,6 @@ impl AppModel {
     }
 
     pub fn new_workspace_thread(&mut self, cx: &mut Context<Self>) {
-        self.features_open = false;
         self.new_thread_open = true;
         self.prefs.fast_mode = Some(false);
         if self.prefs.mode == "yolo" { self.prefs.mode = "plan".into(); }
@@ -303,7 +296,6 @@ impl AppModel {
     }
 
     pub fn inline_project(&mut self, root: String, cx: &mut Context<Self>) {
-        self.features_open = false;
         if let Some(w) = self.workspaces.iter().find(|w| w.project_root == root && w.inline) {
             self.open_workspace(w.id.clone(), cx);
         } else {
@@ -680,8 +672,6 @@ impl AppModel {
     // ── selection ───────────────────────────────────────────────────────
 
     pub fn select(&mut self, id: Option<Uuid>, cx: &mut Context<Self>) {
-        self.features_open = false;
-        cx.notify();
         if self.selected == id {
             return;
         }
@@ -735,8 +725,6 @@ impl AppModel {
 
     /// Deselect: the composer starts a fresh thread in the active project.
     pub fn new_thread(&mut self, cx: &mut Context<Self>) {
-        self.features_open = false;
-        cx.notify();
         self.prefs.fast_mode = Some(false);
         self.new_thread_open = true;
         if self.prefs.mode == "yolo" { self.prefs.mode = "plan".into(); }
@@ -776,8 +764,6 @@ impl AppModel {
 
     /// Return to the welcome screen without removing projects or conversations.
     pub fn open_home(&mut self, cx: &mut Context<Self>) {
-        self.features_open = false;
-        cx.notify();
         self.new_thread(cx);
         self.active_project = None;
         self.review = None;
@@ -852,17 +838,9 @@ impl AppModel {
                 }
                 ControlEvent::McpChanged { .. } => self.refresh_mcp_names(cx),
                 ControlEvent::Raw { payload, .. }
-                    if matches!(payload.get("channel").and_then(|c| c.as_str()), Some("provider_commands" | "foundry" | "project-work")) =>
+                    if matches!(payload.get("channel").and_then(|c| c.as_str()), Some("provider_commands" | "foundry")) =>
                 {
-                    if let Some(notice)=payload.get("notice").and_then(|v|v.as_str()) {
-                        if let Some(project)=payload["project"].as_str() {
-                            if self.last_project_notice.get(project).map(String::as_str)!=Some(notice) {
-                                self.last_project_notice.insert(project.into(),notice.into());
-                                self.project_notices.push_back((project.into(),payload["feature"].as_str().map(str::to_owned),notice.into()));
-                            }
-                        } else {self.toast(ToastKind::Info,notice.to_string());}
-                    }
-                    // Project and composer surfaces observe this model.
+                    // The composer observes AppModel; refresh its advertised command menu.
                     cx.notify();
                 }
                 ControlEvent::Raw { payload, session_id: Some(id) }
@@ -1406,8 +1384,6 @@ impl AppModel {
     }
 
     pub fn set_active_project(&mut self, root: String, cx: &mut Context<Self>) {
-        self.features_open = false;
-        cx.notify();
         self.new_thread_open = false;
         if self.prefs.mode == "yolo" { self.prefs.mode = "plan".into(); }
         self.source_thread = None;
