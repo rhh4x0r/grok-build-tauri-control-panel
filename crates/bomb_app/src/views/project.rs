@@ -65,11 +65,26 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                             let busy = m.syncing;
                             let app = model.clone();
                             if linked {
-                                Button::new("project-sync").outline().small().icon(Lucide::RefreshCw)
-                                    .label(if busy { "Syncing…" } else if on_server { "Sync with this Mac’s copy" } else { "Sync with server" })
-                                    .disabled(busy)
-                                    .tooltip("Sends new work each way. Nothing is overwritten: if both sides changed the same branch, it is kept for a merge.")
-                                    .on_click(move |_, _, cx| app.update(cx, |m, cx| m.sync_project(cx)))
+                                // The other copy is its own project; make the hop one click.
+                                let other = m.linked_project(&root).unwrap_or_default();
+                                let other_name = crate::runtime::servers(cx).for_root(&other).map(|s| s.config.name.clone());
+                                let open_app = model.clone();
+                                let open_root = other.clone();
+                                div().flex().gap_2()
+                                    .child(
+                                        Button::new("project-sync").outline().small().icon(Lucide::RefreshCw)
+                                            .label(if busy { "Syncing…" } else if on_server { "Sync with this Mac’s copy" } else { "Sync with server" })
+                                            .disabled(busy)
+                                            .tooltip("Sends new work each way. Nothing is overwritten: if both sides changed the same branch, it is kept for a merge.")
+                                            .on_click(move |_, _, cx| app.update(cx, |m, cx| m.sync_project(cx))),
+                                    )
+                                    .child(
+                                        Button::new("project-open-other").ghost().small()
+                                            .icon(if on_server { Lucide::Folder } else { Lucide::Server })
+                                            .label(match &other_name { Some(name) => format!("Open the copy on {name}"), None => "Open the copy on this Mac".to_string() })
+                                            .tooltip(if on_server { format!("{other} · start threads there to run agents on this Mac, or show it in Finder from its page") } else { "The same project on the server; threads there keep running with this Mac closed".to_string() })
+                                            .on_click(move |_, _, cx| open_app.update(cx, |m, cx| m.set_active_project(open_root.clone(), cx))),
+                                    )
                                     .into_any_element()
                             } else if on_server {
                                 Button::new("project-download").outline().small().icon(Lucide::ArrowDown)
