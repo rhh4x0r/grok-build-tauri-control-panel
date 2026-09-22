@@ -691,7 +691,7 @@ fn render_servers(cx: &mut App) -> AnyElement {
             .flex_col()
             .gap_2()
             .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Pair with a server"))
-            .child(caption("On the server, run `bombd up` (or `bombd invite`) and paste the link it prints. This Mac makes its own key for that server and keeps it in your keychain."))
+            .child(caption("On the server, run `bombd up` (or `bombd invite`) and paste the link it prints. This Mac makes its own key for that server and keeps it in a private file, like an SSH key."))
             .child(Input::new(&link))
             .child(
                 div()

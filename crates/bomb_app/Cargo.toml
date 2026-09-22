@@ -42,5 +42,3 @@ vt100 = "0.16"
 bomb_server = { path = "../bomb_server" }
 tempfile.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
-security-framework = "3.7"

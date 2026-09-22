@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 use tracing::{debug, info, warn};
 
 pub const SERVER_SCHEME: &str = "bomb-server://";
-/// Stored in the local settings table. Holds nothing secret: the device key lives in the keychain.
+/// Stored in the local settings table. Holds nothing secret: the device key lives in its own private file.
 pub const SERVERS_KEY: &str = "paired_servers";
 
 /// `bomb-server://<server>/<absolute path>`
@@ -43,7 +43,7 @@ pub fn is_server_root(root: &str) -> bool {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ServerConfig {
-    /// Stable local id, also the keychain account for this server's device key.
+    /// Stable local id, also the file name of this server's device key.
     pub id: String,
     /// What the person calls it.
     pub name: String,
