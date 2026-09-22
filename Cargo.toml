@@ -62,3 +62,8 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# Local copy of the rich-text crate with one fix: a line fragment must not re-wrap itself
+# (see vendor/gpui-base/BOMB_PATCH.md). Drop when an upstream release includes it.
+[patch.crates-io]
+gpui-base = { path = "vendor/gpui-base" }

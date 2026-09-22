@@ -20,16 +20,17 @@ use crate::runtime::{services as svc, spawn_service};
 use crate::theme::{Layout, Ui};
 use crate::views::motion::{breathe, fade_in};
 
-const TAIL_SLACK: f32 = 120.0;
-
 pub struct TranscriptView {
     thread: Entity<ThreadModel>,
-    scroll: ScrollHandle,
-    follow: bool,
+    /// Only the rows on screen are laid out; the list keeps measured heights for the rest and
+    /// follows the tail while the person stays at the bottom.
+    list: ListState,
+    /// Rows as of the last frame, rendered on demand by index.
+    rows: Vec<Row>,
     seen_tail: u64,
-    /// Frames left to keep forcing the bottom: freshly hydrated rows have no
-    /// measured bounds yet, so one `scroll_to_item` lands short.
-    pin_frames: u8,
+    /// Entries at or below this id were already there when the view opened; they do not animate in
+    /// (rows re-enter the screen whenever they scroll into view).
+    settled: u64,
     /// Find-in-conversation: query and the active hit (index into `matches`).
     search: Option<(String, usize)>,
     matches: Vec<usize>,
@@ -137,10 +138,14 @@ impl TranscriptView {
         cx.observe(&thread, |_, _, cx| cx.notify()).detach();
         Self {
             thread,
-            scroll: ScrollHandle::new(),
-            follow: true,
+            list: {
+                let list = ListState::new(0, ListAlignment::Bottom, px(400.));
+                list.set_follow_mode(FollowMode::Tail);
+                list
+            },
+            rows: Vec::new(),
             seen_tail: u64::MAX,
-            pin_frames: 0,
+            settled: u64::MAX,
             search: None,
             matches: Vec::new(),
             scrolled_to: None,
@@ -317,10 +322,50 @@ impl TranscriptView {
         })
     }
 
-    fn near_bottom(&self) -> bool {
-        let off = -self.scroll.offset().y;
-        let max = self.scroll.max_offset().y;
-        (max - off) <= px(TAIL_SLACK)
+    /// Fade a row in only when it is new; rows that were already in the thread appear at once.
+    fn enter(&self, kind: &'static str, id: u64, element: Div) -> AnyElement {
+        if id > self.settled { fade_in((kind, id), element).into_any_element() } else { element.into_any_element() }
+    }
+
+    /// One row of the thread, laid out only when the list needs it.
+    fn render_row(&self, ix: usize, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
+        let Some(row) = self.rows.get(ix) else { return div().into_any_element() };
+        let el = match row {
+            Row::User { id, text, images } => self.user_row(*id, text, images, ui),
+            Row::Agent { id, state, raw, streaming, last, at, images, attached } => {
+                self.agent_row(*id, state, raw, *streaming, *last, at, images, attached, ui, cx)
+            }
+            Row::Activity { first_id, items, collapsed } => self.activity_row(*first_id, items, *collapsed, ui, cx),
+            Row::GeneratingImage { id, args, running } => image_placeholder(*id, args, *running, ui),
+            Row::Plan { id, state, doc } => self.plan_row(*id, state, doc, ui, cx),
+            Row::Approval { id, card } => self.approval_row(*id, card, ui, cx),
+            Row::AnsweredApprovals { first_id, cards } => self.answered_group_row(*first_id, cards, ui, cx),
+            Row::Line { id, role, text } => self.line_row(*id, *role, text, ui),
+        };
+        let active_match = self.search.as_ref().and_then(|(_, at)| self.matches.get(*at).copied());
+        let el = if self.matches.contains(&ix) {
+            let mut bg = ui.warning;
+            bg.a = if active_match == Some(ix) { 0.22 } else { 0.10 };
+            div().rounded(px(8.)).bg(bg).child(el).into_any_element()
+        } else {
+            el
+        };
+        let count = self.rows.len();
+        // The column the thread reads in: centred, capped, with room above the first and below the last row.
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(Layout::CONTENT_MAX))
+                    .px_6()
+                    .when(ix == 0, |el| el.pt_8())
+                    .when(ix + 1 == count, |el| el.pb_10())
+                    .child(el),
+            )
+            .into_any_element()
     }
 
     // ── row renderers ───────────────────────────────────────────────────
@@ -397,7 +442,7 @@ impl TranscriptView {
                         .child(text.to_string()),
                 )
             });
-        fade_in(("user", id), bubble).into_any_element()
+        self.enter("user", id, bubble)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -434,10 +479,6 @@ impl TranscriptView {
             .py_1()
             .text_size(px(Layout::BODY_SIZE))
             .line_height(px(Layout::BODY_LINE))
-            // The kit lays out a line with inline code as separate boxes sized to the shaped text, then
-            // wraps each box again by summing single-character widths. With kerning on, the sum is a hair
-            // wider than the box, so a word drops onto the next line and overlaps it. No kerning, no gap.
-            .font_features(prose_font_features())
             .when(!raw.trim().is_empty() || streaming, |el| {
                 el.child(body_text)
             })
@@ -560,7 +601,7 @@ impl TranscriptView {
                 .when(technical,|el|el.child(div().id(("stage-raw",id)).max_h(px(240.)).overflow_y_scroll().child(TextView::markdown(("stage-raw-text",id),format!("```text\n{raw}\n```")).selectable(true))))
                 .into_any_element();
         }
-        fade_in(("agent", id), body).into_any_element()
+        self.enter("agent", id, body)
     }
 
     fn activity_row(
@@ -941,7 +982,7 @@ impl TranscriptView {
                     .child(code_it),
             )
             .child(div().text_sm().child(TextView::new(state).selectable(true)));
-        fade_in(("plan", id), card).into_any_element()
+        self.enter("plan", id, card)
     }
 
     fn approval_row(
@@ -1122,7 +1163,7 @@ impl TranscriptView {
             .when(!buttons.is_empty(), |el| {
                 el.child(div().flex().gap_2().pt_1().children(buttons))
             });
-        fade_in(("approval", id), body).into_any_element()
+        self.enter("approval", id, body)
     }
 
     /// An answered request: shield, outcome, the command on one line, and a chevron for the rest.
@@ -1223,15 +1264,15 @@ impl TranscriptView {
         let text = renamed.as_deref().unwrap_or(text);
         if role == Role::System {
             if let Some(notice) = model_switch_notice(text, ui) {
-                return fade_in(("switch", id), div().child(notice)).into_any_element();
+                return self.enter("switch", id, div().child(notice));
             }
         }
         let color = match role {
             Role::Error => ui.danger,
             _ => ui.text_faint,
         };
-        fade_in(
-            ("line", id),
+        self.enter(
+            "line", id,
             div()
                 .py_1()
                 .text_size(px(crate::theme::Type::SMALL))
@@ -1248,7 +1289,6 @@ impl TranscriptView {
                 })
                 .child(text.to_string()),
         )
-        .into_any_element()
     }
 }
 
@@ -1257,20 +1297,32 @@ impl Render for TranscriptView {
         let ui = Ui::of(cx);
         let rows = self.build_rows(cx);
         let tail_version = self.thread.read(cx).tail_version;
+        let hydrated = self.thread.read(cx).hydrated;
 
-        if !self.follow && self.near_bottom() {
-            self.follow = true;
+        // Rows already present when the thread finished loading do not animate in.
+        if self.settled == u64::MAX && hydrated {
+            self.settled = self.thread.read(cx).thread.entries.iter().map(|e| e.id).max().unwrap_or(0);
         }
-        if self.follow && tail_version != self.seen_tail {
-            self.pin_frames = 3;
-        }
-        self.seen_tail = tail_version;
-        let should_pin = self.follow && self.pin_frames > 0;
-
         let count = rows.len();
+        let previous = self.rows.len();
+        if count != previous {
+            if count > previous {
+                self.list.splice(previous..previous, count - previous);
+            } else {
+                self.list.reset(count);
+            }
+        }
+        if tail_version != self.seen_tail {
+            // The last rows changed shape (streaming text, a tool finishing): measure them afresh so the
+            // tail stays pinned to the real bottom.
+            self.list.remeasure_items(count.saturating_sub(3)..count);
+            self.seen_tail = tail_version;
+        }
+        self.rows = rows;
+
         // Find-in-conversation: which rows contain the query.
         self.matches = match &self.search {
-            Some((q, _)) => rows
+            Some((q, _)) => self.rows
                 .iter()
                 .enumerate()
                 .filter(|(_, r)| match r {
@@ -1284,70 +1336,15 @@ impl Render for TranscriptView {
                 .collect(),
             None => Vec::new(),
         };
-        let active_match = self
-            .search
-            .as_ref()
-            .and_then(|(_, ix)| self.matches.get(*ix).copied());
-        let match_bg = ui.warning;
-        let children: Vec<AnyElement> = rows
-            .iter()
-            .enumerate()
-            .map(|(i, row)| {
-                let el = match row {
-                    Row::User { id, text, images } => self.user_row(*id, text, images, &ui),
-                    Row::Agent {
-                        id,
-                        state,
-                        raw,
-                        streaming,
-                        last,
-                        at,
-                        images,
-                        attached,
-                    } => self.agent_row(
-                        *id, state, raw, *streaming, *last, at, images, attached, &ui, cx,
-                    ),
-                    Row::Activity {
-                        first_id,
-                        items,
-                        collapsed,
-                    } => self.activity_row(*first_id, items, *collapsed, &ui, cx),
-                    Row::GeneratingImage { id, args, running } => {
-                        image_placeholder(*id, args, *running, &ui)
-                    }
-                    Row::Plan { id, state, doc } => self.plan_row(*id, state, doc, &ui, cx),
-                    Row::Approval { id, card } => self.approval_row(*id, card, &ui, cx),
-                    Row::AnsweredApprovals { first_id, cards } => self.answered_group_row(*first_id, cards, &ui, cx),
-                    Row::Line { id, role, text } => self.line_row(*id, *role, text, &ui),
-                };
-                if self.matches.contains(&i) {
-                    let active = active_match == Some(i);
-                    let mut bg = match_bg;
-                    bg.a = if active { 0.22 } else { 0.10 };
-                    div().rounded(px(8.)).bg(bg).child(el).into_any_element()
-                } else {
-                    el
-                }
-            })
-            .collect();
-
+        let active_match = self.search.as_ref().and_then(|(_, ix)| self.matches.get(*ix).copied());
         if let Some(target) = active_match {
             if self.scrolled_to != Some(target) {
-                self.scroll.scroll_to_item(target);
+                self.list.pause_following_tail();
+                self.list.scroll_to_reveal_item(target);
                 self.scrolled_to = Some(target);
-                self.follow = false;
-            }
-        } else if should_pin && count > 0 {
-            self.scroll.scroll_to_item(count - 1);
-            let max = self.scroll.max_offset().y;
-            if max > px(0.) {
-                self.scroll.set_offset(point(px(0.), -max));
-            }
-            self.pin_frames -= 1;
-            if self.pin_frames > 0 {
-                cx.notify();
             }
         }
+        let match_bg = ui.warning;
         let marks: Vec<AnyElement> = if self.search.is_some() && count > 0 {
             self.matches
                 .iter()
@@ -1370,45 +1367,27 @@ impl Render for TranscriptView {
             Vec::new()
         };
 
+        let view = cx.entity().clone();
+        let empty = count == 0;
         div().relative().size_full().children(marks).child(
             div()
                 .id("transcript")
                 .size_full()
-                .overflow_y_scroll()
-                .track_scroll(&self.scroll)
-                .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, cx| {
-                    let dy = match ev.delta {
-                        ScrollDelta::Pixels(p) => f32::from(p.y),
-                        ScrollDelta::Lines(l) => l.y * 20.0,
-                    };
-                    if dy > 0.0 {
-                        this.follow = false;
-                        cx.notify();
-                    }
-                }))
                 .flex()
                 .flex_col()
-                .items_center()
-                .child(
-                    div()
-                        .w_full()
-                        .max_w(px(Layout::CONTENT_MAX))
-                        .px_6()
-                        .pt_8()
-                        .pb_10()
-                        .flex()
-                        .flex_col()
-                        .children(children)
-                        .when(count == 0, |el| {
-                            el.child(
-                                div()
-                                    .py_4()
-                                    .text_sm()
-                                    .text_color(ui.text_faint)
-                                    .child("Nothing here yet."),
-                            )
-                        }),
-                ),
+                .when(!empty, |el| {
+                    el.child(
+                        list(self.list.clone(), move |ix, _, cx| {
+                            let ui = Ui::of(cx);
+                            view.update(cx, |this, cx| this.render_row(ix, &ui, cx))
+                        })
+                        .flex_1()
+                        .size_full(),
+                    )
+                })
+                .when(empty, |el| {
+                    el.child(div().px_6().py_4().text_sm().text_color(ui.text_faint).child("Nothing here yet."))
+                }),
         )
     }
 }
@@ -2222,10 +2201,6 @@ fn copy_code_button(code: SharedString) -> AnyElement {
     gpui_kit::component::clipboard::Clipboard::new(("copy-code", id)).value(code).tooltip("Copy").into_any_element()
 }
 
-/// Chat prose is shaped without pair kerning or contextual forms so measured and drawn widths agree.
-fn prose_font_features() -> FontFeatures {
-    FontFeatures(Arc::new(vec![("kern".into(), 0), ("liga".into(), 0), ("calt".into(), 0)]))
-}
 
 /// What was asked, once. Agents send `<command>: {"command": "<command>"}`; show the command, not its echo.
 /// A waiting edit keeps its full text in view (`waiting`), because that is what is being approved.
