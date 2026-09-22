@@ -562,6 +562,13 @@ impl ThreadView {
                             }
                             if let Some(w) = workspace.clone().filter(|_| can_merge) {
                                 let app = app.clone();
+                                let branch = w.branch.clone();
+                                menu = menu.item(PopupMenuItem::new("New thread from here").on_click(move |_, _, cx| {
+                                    app.update(cx, |m, cx| m.new_thread_from(branch.clone(), cx))
+                                }));
+                            }
+                            if let Some(w) = workspace.clone().filter(|_| can_merge) {
+                                let app = app.clone();
                                 let merge_base = base.clone();
                                 menu = menu.item(PopupMenuItem::new(format!("Merge to {merge_base} & close")).on_click(move |_, _, cx| {
                                     app.update(cx, |m, cx| m.merge_to_main(w.id.clone(), true, cx))

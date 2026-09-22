@@ -80,6 +80,8 @@ pub async fn dispatch(state: &AppState, origin: &str, method: &str, p: Value) ->
         "review_workspace" => out(workspaces::review_workspace(state, arg(&p, "id")?).await?),
         "project_overview" => { let root: String = arg(&p, "root")?; out(project_overview::load_for_project(state, &root).await?) }
         "project_status" => { let root: String = arg(&p, "root")?; out(workspaces::project_status(&root).await?) }
+        "restack" => { let id: String = arg(&p, "id")?; out(workspaces::restack(state, id).await?) }
+        "stack_links" => { let root: String = arg(&p, "root")?; out(workspaces::stack_links(state, &root).await?) }
         "merge_request" => out(workspaces::merge_request(state, arg(&p, "id")?).await?),
         "is_merged" => { let id: String = arg(&p, "id")?; out(workspaces::is_merged(state, &id).await?) }
         "close_feature" => out(workspaces::close_feature(state, arg(&p, "id")?).await?),

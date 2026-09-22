@@ -165,6 +165,8 @@ pub struct AppModel {
     server_preview: Option<ServerPreview>,
     /// A provider sign-in to show in a server terminal: (folder on the server, command, title). The root view opens it.
     pub server_login_request: Option<(String, String, String)>,
+    /// Which threads build on which, per project root.
+    pub stacks: HashMap<String, Vec<bomb_core::services::workspaces::StackLink>>,
     /// For a linked project: which copy is ahead, as last checked.
     pub sync_state: HashMap<String, String>,
     /// A send, download or sync is running.
@@ -235,6 +237,7 @@ impl AppModel {
             project_links: Vec::new(),
             server_preview: None,
             server_login_request: None,
+            stacks: HashMap::new(),
             sync_state: HashMap::new(),
             syncing: false,
             pairing: false,
@@ -283,6 +286,7 @@ impl AppModel {
     pub fn refresh_project_overview(&mut self, cx: &mut Context<Self>) {
         let Some(root) = self.active_project.clone() else { return; };
         self.refresh_sync_state(cx);
+        self.refresh_stacks(cx);
         if !self.overview_loading.insert(root.clone()) { return; }
         let key = root.clone();
         let this = cx.entity().downgrade();
@@ -591,6 +595,21 @@ impl AppModel {
                 cx.notify();
             });
         });
+    }
+
+    /// Which threads in the project in view build on other threads.
+    pub fn refresh_stacks(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.active_project.clone() else { return; };
+        let core = crate::runtime::core_for_root(cx, &root);
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move { let links = core.stack_links(&root).await; (root, links) }, move |(root, links), cx| {
+            let _ = this.update(cx, |m, cx| { if let Ok(links) = links { m.stacks.insert(root, links); cx.notify(); } });
+        });
+    }
+
+    /// The open thread this workspace builds on, if any.
+    pub fn parent_link(&self, workspace: &str) -> Option<&bomb_core::services::workspaces::StackLink> {
+        self.stacks.values().flatten().find(|l| l.child == workspace)
     }
 
     /// Ask which copy is ahead, for the note beside the Sync button.
@@ -1166,6 +1185,13 @@ impl AppModel {
         cx.notify();
     }
 
+    /// A new thread that starts from another thread's branch instead of main.
+    pub fn new_thread_from(&mut self, branch: String, cx: &mut Context<Self>) {
+        self.new_thread(cx);
+        self.prefs.base_branch = Some(branch);
+        cx.notify();
+    }
+
     /// A folder-free chat still needs a private working directory for tools.
     pub fn temporary_chat(&mut self, cx: &mut Context<Self>) {
         let Some(home) = std::env::var_os("HOME") else { return; };
@@ -1465,6 +1491,10 @@ impl AppModel {
                             Ok(started) => {
                                 if let Ok(id) = Uuid::parse_str(&started.id) {
                                     m.selected = Some(id);
+                                    // Started on another thread's branch: say what that means once, up front.
+                                    if let Some(parent) = prefs2.base_branch.as_deref().and_then(|b| m.workspaces.iter().find(|w| w.branch == b && w.archived_at.is_none() && !w.inline)) {
+                                        m.toast(ToastKind::Info, format!("This thread builds on “{}”. Merge that one first; this one is brought up to date automatically and merges after it.", parent.name));
+                                    }
                                     if !m.threads.contains_key(&id) {
                                         let dto = ThreadDto {
                                             models_used: Vec::new(),
@@ -1885,17 +1915,63 @@ impl AppModel {
         if self.active_project.as_deref() == Some(&w.project_root) { self.refresh_project_overview(cx); }
         // A resumed session can report idle before its turn starts; wait for the real end.
         if self.threads.get(&session).is_some_and(|t| t.read(cx).thread.presence.turn_active()) { return; }
-        if !self.close_after_merge.remove(&w.id) { return; }
+        let then_close = self.close_after_merge.remove(&w.id);
+        // Only a thread other threads build on needs the after-merge check when it stays open.
+        let has_children = self.stacks.get(&w.project_root).into_iter().flatten().any(|l| l.parent == w.id);
+        if !then_close && !has_children { return; }
         let core = self.core_of_workspace(&w.id, cx);
         let this = cx.entity().downgrade();
         let id = w.id.clone();
         spawn_service(cx, async move { core.is_merged(&id).await }, move |res, cx| {
             let _ = this.update(cx, |m, cx| match res {
-                Ok(true) => m.close_feature(w.id.clone(), cx),
-                Ok(false) => { m.toast(ToastKind::Info, format!("“{}” was not closed because its work is not fully in main yet. Check the chat.", w.name)); cx.notify(); }
+                Ok(true) if then_close => m.close_feature(w.id.clone(), cx),
+                Ok(true) => m.restack_after_merge(w.clone(), cx),
+                Ok(false) if then_close => { m.toast(ToastKind::Info, format!("“{}” was not closed because its work is not fully in main yet. Check the chat.", w.name)); cx.notify(); }
+                Ok(false) => {}
                 Err(e) => m.fail(e, cx),
             });
         });
+    }
+
+    /// A parent thread's work landed and the thread stays open: bring its children up to date,
+    /// and hand any conflicted child to its own agent.
+    fn restack_after_merge(&mut self, parent: grok_persistence::WorkspaceRecord, cx: &mut Context<Self>) {
+        let core = self.core_of_workspace(&parent.id, cx);
+        let this = cx.entity().downgrade();
+        let id = parent.id.clone();
+        spawn_service(cx, async move { core.restack(id).await }, move |res, cx| {
+            let _ = this.update(cx, |m, cx| match res {
+                Ok(results) => {
+                    m.refresh_project_overview(cx);
+                    m.refresh_workspaces(cx);
+                    for r in results {
+                        use bomb_core::services::workspaces::Restack;
+                        match r.outcome {
+                            Restack::Updated => m.toast(ToastKind::Success, format!("“{}” was brought up to date now that “{}” is in main.", r.name, parent.name)),
+                            Restack::Skipped => m.toast(ToastKind::Info, format!("“{}” builds on “{}” but is busy or has unsaved edits; it is brought up to date next time.", r.name, parent.name)),
+                            Restack::NeedsHand(files) => {
+                                m.toast(ToastKind::Warning, format!("“{}” needs a hand: bringing in “{}” hit conflicts. Its agent has been asked to sort them out.", r.name, parent.name));
+                                m.ask_agent_to_finish_update(r.workspace.clone(), parent.name.clone(), files, cx);
+                            }
+                        }
+                    }
+                    cx.notify();
+                }
+                Err(e) => m.fail(e, cx),
+            });
+        });
+    }
+
+    /// Open the child's chat and ask its agent to finish the conflicted update.
+    fn ask_agent_to_finish_update(&mut self, workspace: String, parent_name: String, files: Vec<String>, cx: &mut Context<Self>) {
+        self.review_open = false;
+        self.open_workspace(workspace, cx);
+        if self.prefs.mode == "plan" { self.prefs.mode = "ask".into(); }
+        let list = files.iter().take(12).map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n");
+        let request = format!(
+            "“{parent_name}” was merged into main, and bringing the latest main into this branch hit conflicts in these files:\n{list}\n\nResolve the conflicts so the merge keeps this thread's changes and the new work from main, run `git add` on the resolved files and `git commit` to finish the merge in progress, and say when it is done."
+        );
+        self.send_prompt(request, vec![], cx);
     }
 
     /// Archive the thread and its chats; the branch is removed only when its work is already merged.

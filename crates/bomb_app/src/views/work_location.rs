@@ -149,39 +149,88 @@ impl Render for WorkLocation {
         if prefs.location == "new" {
             let branches = self.choices.branches.clone();
             let app = self.model.clone();
-            let default = self.choices.base.clone();
+            let default = if self.choices.base.is_empty() { "the default branch".to_string() } else { self.choices.base.clone() };
+            // Open threads in this project whose branch has saved changes not on the default branch yet.
+            let (threads, ahead_of): (Vec<(String, String)>, std::collections::HashMap<String, usize>) = {
+                let m = self.model.read(cx);
+                let ahead: std::collections::HashMap<String, usize> = m
+                    .project_overviews
+                    .get(&self.root)
+                    .and_then(|o| o.as_ref().ok())
+                    .map(|o| o.branches.iter().map(|b| (b.name.clone(), b.ahead)).collect())
+                    .unwrap_or_default();
+                let threads = m
+                    .workspaces
+                    .iter()
+                    .filter(|w| w.project_root == self.root && !w.inline && !w.shared_checkout && w.archived_at.is_none())
+                    .filter(|w| ahead.get(&w.branch).copied().unwrap_or(0) > 0)
+                    .map(|w| (w.name.clone(), w.branch.clone()))
+                    .collect();
+                (threads, ahead)
+            };
+            let chosen = prefs.base_branch.clone().unwrap_or_else(|| self.choices.base.clone());
+            let label = match threads.iter().find(|(_, b)| *b == chosen) {
+                Some((name, _)) => format!("Continue from {name}"),
+                None => format!("Start from {}", if chosen.is_empty() { default.clone() } else { chosen.clone() }),
+            };
+            let default_branch = self.choices.base.clone();
+            let builds_on = threads.iter().find(|(_, b)| *b == chosen).map(|(n, _)| n.clone());
             row = row.child(
                 Button::new("base-branch")
                     .ghost()
                     .small()
-                    .label(format!(
-                        "From {}",
-                        prefs
-                            .base_branch
-                            .as_deref()
-                            .unwrap_or(if default.is_empty() {
-                                "default branch"
-                            } else {
-                                &default
-                            })
-                    ))
+                    .label(label)
                     .dropdown_caret(true)
                     .dropdown_menu(move |mut menu, _, _| {
-                        for b in &branches {
-                            let branch = b.clone();
+                        let a = app.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(format!("Start from {default}"))
+                                .checked(chosen == default_branch)
+                                .on_click(move |_, _, cx| {
+                                    a.update(cx, |m, cx| { m.prefs.base_branch = None; cx.notify(); })
+                                }),
+                        );
+                        if !threads.is_empty() {
+                            menu = menu.separator();
+                        }
+                        for (name, branch) in &threads {
                             let a = app.clone();
-                            menu = menu.item(PopupMenuItem::new(b.clone()).on_click(
-                                move |_, _, cx| {
-                                    a.update(cx, |m, cx| {
-                                        m.prefs.base_branch = Some(branch.clone());
-                                        cx.notify();
-                                    })
-                                },
-                            ));
+                            let b = branch.clone();
+                            let n = ahead_of.get(branch).copied().unwrap_or(0);
+                            let note = if n == 1 { "1 saved change not in main yet".to_string() } else { format!("{n} saved changes not in main yet") };
+                            menu = menu.item(
+                                PopupMenuItem::new(format!("Continue from {name} · {note}"))
+                                    .checked(chosen == *branch)
+                                    .on_click(move |_, _, cx| {
+                                        a.update(cx, |m, cx| { m.prefs.base_branch = Some(b.clone()); cx.notify(); })
+                                    }),
+                            );
+                        }
+                        let others: Vec<String> = branches
+                            .iter()
+                            .filter(|b| **b != default_branch && !threads.iter().any(|(_, t)| t == *b))
+                            .cloned()
+                            .collect();
+                        if !others.is_empty() {
+                            menu = menu.separator();
+                        }
+                        for b in others {
+                            let a = app.clone();
+                            let branch = b.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(format!("Branch · {b}"))
+                                    .checked(chosen == b)
+                                    .on_click(move |_, _, cx| {
+                                        a.update(cx, |m, cx| { m.prefs.base_branch = Some(branch.clone()); cx.notify(); })
+                                    }),
+                            );
                         }
                         menu
                     }),
             );
+            if let Some(name) = builds_on {
+                row = row.child(format!("Builds on {name} · merge that thread first, then this one"));
+            }
         }
         let app = self.model.clone();
         row = row.child(

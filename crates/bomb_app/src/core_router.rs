@@ -179,6 +179,20 @@ impl Core {
         }
     }
 
+    pub async fn restack(&self, id: String) -> Result<Vec<services::workspaces::Restacked>, String> {
+        match self {
+            Self::Local(state) => services::workspaces::restack(state, id).await,
+            Self::Remote(r) => r.call("restack", json!({ "id": id })).await,
+        }
+    }
+
+    pub async fn stack_links(&self, root: &str) -> Result<Vec<services::workspaces::StackLink>, String> {
+        match self {
+            Self::Local(state) => services::workspaces::stack_links(state, root).await,
+            Self::Remote(r) => r.call("stack_links", json!({ "root": r.path_of(root) })).await,
+        }
+    }
+
     pub async fn merge_request(&self, id: String) -> Result<String, String> {
         match self {
             Self::Local(state) => services::workspaces::merge_request(state, id).await,

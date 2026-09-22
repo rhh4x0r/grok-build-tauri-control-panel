@@ -343,6 +343,15 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
             let agent = workspace
                 .and_then(|w| w.threads.iter().filter_map(|t| uuid::Uuid::parse_str(t).ok()).find_map(|id| m.threads.get(&id)))
                 .map(|t| { let meta = &t.read(cx).meta; if meta.model.is_empty() { meta.backend.clone() } else { meta.model.clone() } });
+            // Stacked threads: this one builds on another open thread, or others build on it.
+            let parent = workspace.and_then(|w| m.parent_link(&w.id)).cloned();
+            let children: Vec<String> = workspace
+                .map(|w| m.stacks.get(&root).into_iter().flatten().filter(|l| l.parent == w.id).map(|l| l.child.clone()).collect())
+                .unwrap_or_default();
+            let child_names: Vec<String> = children
+                .iter()
+                .filter_map(|id| m.workspaces.iter().find(|w| &w.id == id).map(|w| w.name.clone()))
+                .collect();
             let mut card = div()
                 .flex()
                 .flex_col()
@@ -384,6 +393,18 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                 .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(if b.ahead > 0 { ui.text } else { ui.text_muted }).child(
                     bomb_core::services::project_overview::describe_relation(b.ahead, b.behind, &b.base),
                 ))
+                .when_some(parent.as_ref(), |el, p| {
+                    el.child(div().flex().items_center().gap_1().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_muted)
+                        .child(Icon::from(Lucide::GitBranch).size(px(13.)))
+                        .child(format!("Builds on {}{}", p.parent_name, match p.behind_parent { 0 => String::new(), 1 => " · 1 newer change there".into(), n => format!(" · {n} newer changes there") })))
+                })
+                .when(!child_names.is_empty(), |el| {
+                    el.child(div().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_muted).child(format!(
+                        "{} built on this · when this merges, {} brought up to date",
+                        child_names.join(", "),
+                        if child_names.len() == 1 { "it is" } else { "they are" },
+                    )))
+                })
                 .child(div().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint).child(format!(
                     "{}{} files changed{}",
                     match (&agent, workspace) {
@@ -437,7 +458,17 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                                 .label("Open chat")
                                 .on_click(move |_, _, cx| open_app.update(cx, |m, cx| m.open_workspace(open_id.clone(), cx))),
                         )
-                        .when(b.ahead > 0 && !working, |el| {
+                        .when_some(parent.as_ref().filter(|_| b.ahead > 0 && !working), |el, p| {
+                            el.child(
+                                Button::new(SharedString::from(format!("feature-merge-wait-{}", w.id)))
+                                    .outline()
+                                    .small()
+                                    .label(format!("Merge {} first", p.parent_name))
+                                    .disabled(true)
+                                    .tooltip(format!("This thread builds on {}. Once that lands, this thread is brought up to date and can merge.", p.parent_name)),
+                            )
+                        })
+                        .when(b.ahead > 0 && !working && parent.is_none(), |el| {
                             el.child(
                                 Button::new(SharedString::from(format!("feature-merge-{}", w.id)))
                                     .primary()

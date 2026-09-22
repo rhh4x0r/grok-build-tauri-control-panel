@@ -331,11 +331,106 @@ pub async fn archive_workspace(state: &AppState, id: String) -> Result<(), Strin
     state.persistence.save_workspace(&w).map_err(err)
 }
 
+/// Threads build on each other when one started from another's branch. A chain, never a tree:
+/// each thread has at most one parent, and children wait for the parent to land before they merge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackLink {
+    pub child: String,
+    pub parent: String,
+    pub parent_name: String,
+    /// The parent has saved work the child has not picked up yet.
+    pub behind_parent: usize,
+}
+
+/// The parent of every thread that builds on another open thread in this project.
+pub async fn stack_links(state: &AppState, root: &str) -> Result<Vec<StackLink>, String> {
+    let open: Vec<WorkspaceRecord> = state.persistence.list_workspaces().map_err(err)?.into_iter()
+        .filter(|w| w.project_root == root && !w.inline && !w.shared_checkout && w.archived_at.is_none()).collect();
+    let mut links = Vec::new();
+    for w in &open {
+        let base = w.base_ref.trim().trim_start_matches("origin/");
+        let Some(parent) = open.iter().find(|p| p.id != w.id && p.branch == base) else { continue };
+        let counts = run_git(Path::new(root), &["rev-list", "--left-right", "--count", &format!("refs/heads/{}...refs/heads/{}", w.branch, parent.branch), "--"]).await.unwrap_or_default();
+        let behind_parent = counts.split_whitespace().nth(1).and_then(|n| n.parse().ok()).unwrap_or(0);
+        links.push(StackLink { child: w.id.clone(), parent: parent.id.clone(), parent_name: parent.name.clone(), behind_parent });
+    }
+    Ok(links)
+}
+
+/// The open thread this one builds on, if any.
+pub async fn parent_of(state: &AppState, w: &WorkspaceRecord) -> Result<Option<WorkspaceRecord>, String> {
+    let base = w.base_ref.trim().trim_start_matches("origin/").to_string();
+    Ok(state.persistence.list_workspaces().map_err(err)?.into_iter()
+        .find(|p| p.id != w.id && p.project_root == w.project_root && !p.inline && !p.shared_checkout && p.archived_at.is_none() && p.branch == base))
+}
+
+/// What happened to one child when its parent landed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Restack {
+    /// Brought up to date with `main` and now builds on it directly.
+    Updated,
+    /// Busy or unsaved: left alone, still pointing at the old parent branch.
+    Skipped,
+    /// The child and the new base changed the same lines; the merge was left for the child's agent.
+    NeedsHand(Vec<String>),
+}
+
+/// A parent's work is in `target` now: bring each child up to date with it and re-point the child at it,
+/// so the child's next merge goes there. Merges, never rebases: nothing is rewritten or force-pushed.
+pub async fn restack_children(state: &AppState, parent: &WorkspaceRecord, target: &str) -> Result<Vec<(WorkspaceRecord, Restack)>, String> {
+    let _gate = state.workspace_gate.lock().await;
+    let children: Vec<WorkspaceRecord> = state.persistence.list_workspaces().map_err(err)?.into_iter()
+        .filter(|c| c.project_root == parent.project_root && c.id != parent.id && !c.inline && !c.shared_checkout && c.archived_at.is_none()
+            && c.base_ref.trim().trim_start_matches("origin/") == parent.branch)
+        .collect();
+    let mut results = Vec::new();
+    for mut child in children {
+        let path = Path::new(&child.path);
+        let idle = ensure_idle(state, &child).is_ok();
+        let clean = path.exists() && state.worktrees.is_clean(path).await.unwrap_or(false);
+        if !idle || !clean { results.push((child, Restack::Skipped)); continue; }
+        let outcome = match state.worktrees.merge(path, target, &format!("Update with the latest {target} after {} was merged", parent.name)).await.map_err(err)? {
+            grok_worktree::MergeOutcome::Merged => Restack::Updated,
+            // Leave the conflicted merge in place: that is exactly what the child's agent is asked to finish.
+            grok_worktree::MergeOutcome::Conflicts { files } => Restack::NeedsHand(files),
+        };
+        child.base_ref = target.to_string();
+        state.persistence.save_workspace(&child).map_err(err)?;
+        results.push((child, outcome));
+    }
+    Ok(results)
+}
+
+/// One child's outcome, for the app: which thread, what happened, and the files left for its agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Restacked {
+    pub workspace: String,
+    pub name: String,
+    pub outcome: Restack,
+}
+
+/// A thread's work has landed but the thread stays open: bring the threads built on it up to date.
+/// Does nothing unless the target really contains the branch.
+pub async fn restack(state: &AppState, id: String) -> Result<Vec<Restacked>, String> {
+    let w = workspace(state, &id)?;
+    let base = merge_target(&w).await?;
+    let root = Path::new(&w.project_root);
+    let contained = run_git(root, &["merge-base", "--is-ancestor", &format!("refs/heads/{}", w.branch), &format!("refs/heads/{base}")]).await.is_ok();
+    if !contained { return Ok(Vec::new()); }
+    Ok(restack_children(state, &w, &base).await?.into_iter()
+        .map(|(c, outcome)| Restacked { workspace: c.id, name: c.name, outcome })
+        .collect())
+}
+
 /// The request sent to a thread's own agent so it performs the merge in its chat.
 pub async fn merge_request(state: &AppState, id: String) -> Result<String, String> {
     let w = workspace(state, &id)?;
     if w.inline || w.read_only || w.shared_checkout || w.archived_at.is_some() {
         return Err("Only an active thread with its own branch can be merged".into());
+    }
+    if let Some(parent) = parent_of(state, &w).await? {
+        return Err(format!("Merge “{}” first: this thread builds on it. Once that lands, this thread is brought up to date and can merge.", parent.name));
     }
     let base = merge_target(&w).await?;
     if w.branch == base { return Err(format!("This thread already works directly on {base}")); }
@@ -394,9 +489,16 @@ pub async fn close_feature(state: &AppState, id: String) -> Result<String, Strin
     // Delete only after Git confirms the target contains the branch, so unmerged work is never lost.
     // `-D` because `-d` compares with whatever the project folder has checked out, not with the target.
     let contained = run_git(root, &["merge-base", "--is-ancestor", &format!("refs/heads/{}", w.branch), &format!("refs/heads/{base}")]).await.is_ok();
+    // Threads built on this one now build on what it merged into.
+    let restacked = if contained { restack_children(state, &w, &base).await.unwrap_or_default() } else { Vec::new() };
     let removed = w.branch != base && contained && run_git(root, &["branch", "-D", &w.branch]).await.is_ok();
-    Ok(if removed { format!("Closed “{}” · its work is in {base}, so the branch was removed", w.name) }
-       else { format!("Closed “{}” · branch {} kept because it has work that is not in {base}", w.name, w.branch) })
+    let mut note = if removed { format!("Closed “{}” · its work is in {base}, so the branch was removed", w.name) }
+       else { format!("Closed “{}” · branch {} kept because it has work that is not in {base}", w.name, w.branch) };
+    let updated = restacked.iter().filter(|(_, r)| *r == Restack::Updated).count();
+    let hands: Vec<&str> = restacked.iter().filter_map(|(c, r)| matches!(r, Restack::NeedsHand(_)).then_some(c.name.as_str())).collect();
+    if updated > 0 { note.push_str(&format!(" · {updated} thread{} built on it brought up to date", if updated == 1 { "" } else { "s" })); }
+    if !hands.is_empty() { note.push_str(&format!(" · needs a hand: {}", hands.join(", "))); }
+    Ok(note)
 }
 
 /// Tidy a project: close threads and delete branches whose work is already in the default branch.
@@ -1070,6 +1172,53 @@ mod tests {
         run_git(&root, &["reset", "--hard", "HEAD~1"]).await.unwrap();
         let note = close_feature(&state, w.id.clone()).await.unwrap();
         assert!(note.contains("its work is in develop") && note.contains("branch was removed"), "{note}");
+    }
+
+    #[tokio::test]
+    async fn a_thread_built_on_another_waits_for_it_then_is_brought_up_to_date() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo"); std::fs::create_dir(&root).unwrap();
+        for args in [vec!["init", "-b", "main"], vec!["config", "user.name", "Test"], vec!["config", "user.email", "test@example.com"]] { run_git(&root, &args).await.unwrap(); }
+        std::fs::write(root.join("app.txt"), "one\n").unwrap();
+        run_git(&root, &["add", "-A"]).await.unwrap(); run_git(&root, &["commit", "-m", "initial"]).await.unwrap();
+        let home = temp.path().to_path_buf(); let grok = home.join("grok"); let panel = grok.join("panel");
+        let state = AppState::initialize_with_paths(grok_config::GrokPaths {
+            home_dir: home.clone(), grok_dir: grok.clone(), config_file: panel.join("config.toml"),
+            grok_cli_config_file: grok.join("config.toml"), worktrees_dir: home.join("worktrees"),
+            memory_dir: panel.join("memory"), sessions_dir: panel.join("sessions"), panel_dir: panel,
+            project_config_file: None, project_root: None,
+        }).await.unwrap();
+        let start = |prompt: &str, base: Option<String>| SpawnOptions { model: Some("mock".into()), prompt: Some(prompt.into()), base_ref: base, ..Default::default() };
+        // The backend thread commits some work but is not merged.
+        let backend = super::super::start_session(&state, root.display().to_string(), start("Backend API", None)).await.unwrap();
+        super::super::wait_until_idle(&state, &backend.id, std::time::Duration::from_secs(5)).await.unwrap();
+        let parent = list_workspaces(&state).await.unwrap()[0].clone();
+        std::fs::write(Path::new(&parent.path).join("api.txt"), "api\n").unwrap();
+        run_git(Path::new(&parent.path), &["add", "-A"]).await.unwrap(); run_git(Path::new(&parent.path), &["commit", "-m", "api"]).await.unwrap();
+        // The frontend thread starts from the backend's branch.
+        let frontend = super::super::start_session(&state, root.display().to_string(), start("Frontend", Some(parent.branch.clone()))).await.unwrap();
+        super::super::wait_until_idle(&state, &frontend.id, std::time::Duration::from_secs(5)).await.unwrap();
+        let child = list_workspaces(&state).await.unwrap().into_iter().find(|w| w.name != parent.name).unwrap();
+        assert!(Path::new(&child.path).join("api.txt").exists(), "the child sees the parent's unmerged work");
+        let links = stack_links(&state, &root.display().to_string()).await.unwrap();
+        assert_eq!(links, vec![StackLink { child: child.id.clone(), parent: parent.id.clone(), parent_name: parent.name.clone(), behind_parent: 0 }]);
+        // The parent gains a commit: the child is behind it.
+        std::fs::write(Path::new(&parent.path).join("api.txt"), "api v2\n").unwrap();
+        run_git(Path::new(&parent.path), &["commit", "-am", "api v2"]).await.unwrap();
+        assert_eq!(stack_links(&state, &root.display().to_string()).await.unwrap()[0].behind_parent, 1);
+        // Bottom-up only: the child cannot merge while the parent is open.
+        let refused = merge_request(&state, child.id.clone()).await.unwrap_err();
+        assert!(refused.contains("first") && refused.contains(&parent.name), "{refused}");
+        // The parent lands in main and is closed: the child is updated and now builds on main.
+        run_git(&root, &["merge", "--no-ff", &parent.branch, "-m", "merge backend"]).await.unwrap();
+        let note = close_feature(&state, parent.id.clone()).await.unwrap();
+        assert!(note.contains("1 thread built on it brought up to date"), "{note}");
+        let child = workspace(&state, &child.id).unwrap();
+        assert_eq!(child.base_ref, "main");
+        assert_eq!(std::fs::read_to_string(Path::new(&child.path).join("api.txt")).unwrap(), "api v2\n");
+        assert!(stack_links(&state, &root.display().to_string()).await.unwrap().is_empty());
+        assert!(merge_request(&state, child.id.clone()).await.unwrap().contains("into main"));
+        assert_eq!(merge_target(&child).await.unwrap(), "main");
     }
 
     #[tokio::test]
