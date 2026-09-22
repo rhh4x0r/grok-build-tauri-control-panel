@@ -26,6 +26,12 @@ use grok_events::{ControlEvent, EventBus};
 /// `explainer_model`; a rejected override falls back here.
 const DEFAULT_EXPLAINER_MODEL: &str = "";
 const TICK_SECS: u64 = 5;
+/// Narrations are at least this far apart unless something needs the person (an approval).
+const MIN_GAP: Duration = Duration::from_secs(20);
+/// A long quiet tool with only log lines still gets a word eventually.
+const LOG_ONLY_AFTER: Duration = Duration::from_secs(60);
+/// The cheapest capable narrator when Claude is signed in.
+pub const CHEAP_CLAUDE_NARRATOR: &str = "haiku";
 const ERROR_BACKOFF_SECS: u64 = 60;
 const MAX_BUFFER_LINES: usize = 60;
 const MAX_PROMPT_CHARS: usize = 3000;
@@ -48,6 +54,10 @@ struct SessionBuffer {
     /// `pushed` value at the time of the last explanation.
     explained_to: u64,
     last_explanation: String,
+    /// Something worth a sentence happened since the last narration: a tool finished, the agent
+    /// said something, the turn ended. Streaming chunks and log lines are context, not moments.
+    milestone: bool,
+    last_explained_at: Option<std::time::Instant>,
 }
 
 pub struct ExplainerService {
@@ -213,6 +223,12 @@ impl ExplainerService {
             if buf.lines.back().map(|b| b == &line).unwrap_or(false) {
                 return;
             }
+            let moment = match ev {
+                ControlEvent::ToolCall { event, .. } => !matches!(format!("{:?}", event.status).to_lowercase().as_str(), "running" | "pending" | "in_progress"),
+                ControlEvent::AgentMessage { .. } | ControlEvent::SessionStatusChanged { .. } | ControlEvent::ApprovalRequired { .. } => true,
+                _ => false,
+            };
+            buf.milestone |= moment;
             buf.lines.push_back(line);
             buf.pushed += 1;
             while buf.lines.len() > MAX_BUFFER_LINES {
@@ -251,6 +267,15 @@ impl ExplainerService {
             return;
         }
 
+        // Speak when something happened and enough time has passed, not on every tick.
+        if !urgent {
+            let mut buffers = self.buffers.lock().await;
+            let Some(buf) = buffers.get_mut(&sid) else { self.busy.store(false, Ordering::Release); return; };
+            let now = std::time::Instant::now();
+            if !narration_due(buf, now) { self.busy.store(false, Ordering::Release); return; }
+            buf.milestone = false;
+            buf.last_explained_at = Some(now);
+        }
         let result = self.explain_once(sid, urgent, approval_request_id).await;
         self.busy.store(false, Ordering::Release);
         if let Err(e) = result {
@@ -473,4 +498,36 @@ fn clip(s: &str, max: usize) -> String {
     }
     let clipped: String = s.chars().take(max).collect();
     format!("{clipped}…")
+}
+
+/// Whether a narration is worth a model call now: new lines, and either a moment worth mentioning
+/// with `MIN_GAP` elapsed, or a long stretch of log-only activity.
+fn narration_due(buf: &SessionBuffer, now: std::time::Instant) -> bool {
+    // Never narrated yet: a first moment may be spoken at once, but streaming alone still waits for one.
+    let since = buf.last_explained_at.map(|t| now.saturating_duration_since(t)).unwrap_or(MIN_GAP);
+    let unexplained = buf.pushed > buf.explained_to;
+    unexplained && ((buf.milestone && since >= MIN_GAP) || since >= LOG_ONLY_AFTER)
+}
+
+#[cfg(test)]
+mod pacing_tests {
+    use super::*;
+
+    #[test]
+    fn the_narrator_speaks_on_moments_at_most_every_twenty_seconds() {
+        let t0 = std::time::Instant::now();
+        let mut buf = SessionBuffer::default();
+        assert!(!narration_due(&buf, t0), "nothing new, nothing to say");
+        buf.pushed = 3;
+        assert!(!narration_due(&buf, t0), "streaming chunks alone are not a moment");
+        buf.milestone = true;
+        assert!(narration_due(&buf, t0), "first moment: speak at once");
+        buf.last_explained_at = Some(t0); buf.explained_to = 3; buf.milestone = false;
+        buf.pushed = 5; buf.milestone = true;
+        assert!(!narration_due(&buf, t0 + Duration::from_secs(5)), "a second moment 5 s later waits");
+        assert!(narration_due(&buf, t0 + MIN_GAP), "…until the gap has passed");
+        buf.milestone = false;
+        assert!(!narration_due(&buf, t0 + Duration::from_secs(30)), "log lines only: still quiet at 30 s");
+        assert!(narration_due(&buf, t0 + LOG_ONLY_AFTER), "a long quiet tool gets a word after a minute");
+    }
 }

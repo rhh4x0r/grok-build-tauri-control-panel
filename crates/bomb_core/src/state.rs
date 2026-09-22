@@ -234,13 +234,22 @@ impl AppState {
         // ELI12 narrator for the right panel (selected-thread side LLM calls).
         let explainer = {
             let cfg = config.read().await;
+            // Unless the person chose a narrator, use the cheapest capable one that is signed in:
+            // Claude's Haiku. Grok's default is its top model, which burns credits on summaries.
+            let (backend, model) = match (&cfg.explainer_backend, &cfg.explainer_model) {
+                (None, None) => {
+                    let claude_ready = grok_cli_wrapper::backend_auth::all(&cfg).await.iter().any(|a| a.backend == "claude" && a.logged_in && a.runnable);
+                    if claude_ready { (Some("claude".to_string()), Some(crate::explainer::CHEAP_CLAUDE_NARRATOR.to_string())) } else { (None, None) }
+                }
+                (b, m) => (b.clone(), m.clone()),
+            };
             ExplainerService::start(
                 grok_cli.clone(),
                 config.clone(),
                 event_bus.clone(),
                 cfg.explainer_enabled,
-                cfg.explainer_backend.clone(),
-                cfg.explainer_model.clone(),
+                backend,
+                model,
             )
         };
 

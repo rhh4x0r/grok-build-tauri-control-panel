@@ -8,8 +8,10 @@
 
 use std::time::{Duration, Instant};
 
-/// Silence longer than this during an active turn counts as a stall.
-pub const STALL_AFTER: Duration = Duration::from_secs(25);
+/// Silence longer than this during an active turn, with no tool running, counts as a stall.
+pub const STALL_AFTER: Duration = Duration::from_secs(45);
+/// A tool is allowed to run silently this long before the status line says it is taking a while.
+pub const LONG_TOOL_AFTER: Duration = Duration::from_secs(5 * 60);
 /// How long the "boom" (done) state is held before returning to idle.
 pub const BOOM_HOLD: Duration = Duration::from_millis(1000);
 
@@ -51,7 +53,7 @@ impl Phase {
 pub enum Stall {
     /// The agent is waiting on the user (approval). Not a fault.
     AwaitingUser,
-    /// A tool is still marked running with no output.
+    /// A tool has been running silently for a long time (`LONG_TOOL_AFTER`).
     ToolHang,
     /// Nothing at all has arrived since the prompt.
     NoFirstSignal,
@@ -98,6 +100,8 @@ pub struct Presence {
     pub context_tokens: Option<u64>,
     pub tool_count: usize,
     pub tools_active: usize,
+    /// When the tool now running started; long-running tools are normal, and their clock says so.
+    pub tool_started_at: Option<Instant>,
     pub last_tool: Option<String>,
     pub last_tool_status: Option<String>,
     /// Short free-text detail (last tool args, approval summary, error).
@@ -190,6 +194,7 @@ impl Presence {
 
     pub fn tool_started(&mut self, tool: &str, now: Instant) {
         self.tool_count += 1;
+        if self.tools_active == 0 { self.tool_started_at = Some(now); }
         let active = self.tools_active + 1;
         self.signal(
             Phase::Tools,
@@ -206,6 +211,7 @@ impl Presence {
 
     pub fn tool_finished(&mut self, tool: &str, status: &str, now: Instant) {
         let active = self.tools_active.saturating_sub(1);
+        if active == 0 { self.tool_started_at = None; }
         let next = if active > 0 || self.reply_chars == 0 {
             Phase::Tools
         } else {
@@ -249,7 +255,9 @@ impl Presence {
                 && !st.contains("fail")
                 && !st.contains("success"));
         if tool_busy {
-            return Some(Stall::ToolHang);
+            // Builds, tests and installs are quiet for minutes. Only a very long one is worth a word.
+            let since_tool = self.tool_started_at.map(|t| now.saturating_duration_since(t)).unwrap_or_default();
+            return (since_tool >= LONG_TOOL_AFTER).then_some(Stall::ToolHang);
         }
         if self.reply_chars == 0 && self.thought_chars == 0 && self.tool_count == 0 {
             return Some(Stall::NoFirstSignal);
@@ -309,6 +317,16 @@ impl Presence {
         }
     }
 
+    /// "12s", "1m 40s", "1h 05m": how long the current tool has been running.
+    pub fn tool_elapsed_label(&self, now: Instant) -> String {
+        let secs = self.tool_started_at.map(|t| now.saturating_duration_since(t).as_secs()).unwrap_or(0);
+        match secs {
+            s if s < 60 => format!("{s}s"),
+            s if s < 3600 => format!("{}m {:02}s", s / 60, s % 60),
+            s => format!("{}h {:02}m", s / 3600, (s % 3600) / 60),
+        }
+    }
+
     /// A status-row summary only. Providers sometimes send a complete shell
     /// script as the tool title; retain the original for transcript/details.
     pub fn last_tool_summary(&self) -> Option<String> {
@@ -328,11 +346,21 @@ impl Presence {
     pub fn label(&self, now: Instant) -> String {
         match self.stall(now) {
             Some(Stall::AwaitingUser) => return "Needs you".into(),
-            Some(Stall::ToolHang) => return "Quiet · tool".into(),
+            Some(Stall::ToolHang) => {
+                return match self.last_tool_summary() {
+                    Some(t) => format!("Still running · {t} · {} — taking a while", self.tool_elapsed_label(now)),
+                    None => format!("Still running · {} — taking a while", self.tool_elapsed_label(now)),
+                }
+            }
             Some(Stall::NoFirstSignal | Stall::StreamGap) => return "Quiet".into(),
             None => {}
         }
         match self.phase {
+            // A tool running for more than a few seconds shows its clock, so a long silent one reads as busy, not stuck.
+            Phase::Tools if self.tools_active > 0 && self.tool_started_at.is_some_and(|t| now.saturating_duration_since(t) >= Duration::from_secs(5)) => match self.last_tool_summary() {
+                Some(t) => format!("Running · {t} · {}", self.tool_elapsed_label(now)),
+                None => format!("Running · {}", self.tool_elapsed_label(now)),
+            },
             Phase::Tools => match self.last_tool_summary() {
                 Some(t) => format!("Running · {t}"),
                 None => "Running".into(),
@@ -491,7 +519,7 @@ mod tests {
             },
             now,
         );
-        let later = now + Duration::from_secs(30);
+        let later = now + STALL_AFTER;
         assert_eq!(p.stall(later), Some(Stall::StreamGap));
         assert_eq!(p.mood(later), Mood::Stream);
         assert_eq!(p.meter(later), MeterMode::Stall);
@@ -506,10 +534,18 @@ mod tests {
         p.signal(Phase::Think, Patch::default(), now);
         let later = now + STALL_AFTER;
         assert_eq!(p.stall(later), Some(Stall::NoFirstSignal));
-        p.tool_started("Bash", later);
-        let later2 = later + STALL_AFTER;
-        assert_eq!(p.stall(later2), Some(Stall::ToolHang));
-        assert_eq!(p.label(later2), "Quiet · tool");
+        p.tool_started("cargo test", later);
+        // A tool quiet for a minute is just running, with its clock showing.
+        let later2 = later + STALL_AFTER + Duration::from_secs(35);
+        assert_eq!(p.stall(later2), None);
+        assert_eq!(p.label(later2), "Running · cargo test · 1m 20s");
+        assert_eq!(p.meter(later2), MeterMode::Tools(p.progress()));
+        // Only a very long one gets a word about it.
+        let much_later = later + LONG_TOOL_AFTER;
+        assert_eq!(p.stall(much_later), Some(Stall::ToolHang));
+        assert_eq!(p.label(much_later), "Still running · cargo test · 5m 00s — taking a while");
+        p.tool_finished("cargo test", "completed", much_later);
+        assert_eq!(p.tool_started_at, None);
     }
 
     #[test]
