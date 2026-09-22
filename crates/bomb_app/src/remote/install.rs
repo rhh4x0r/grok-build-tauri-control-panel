@@ -52,13 +52,16 @@ pub fn setup_script(public: &str, port: u16) -> Result<String, String> {
 mkdir -p "$HOME/.local/bin" "$HOME/.bombd" "$HOME/.config/systemd/user"
 install -m 0755 "$HOME/.bombd-upload" "$HOME/.local/bin/bombd"
 rm -f "$HOME/.bombd-upload"
-cat > "$HOME/.config/systemd/user/bombd.service" <<'UNIT'
+# The service gets this login shell's PATH, so tools installed per user (mise, nvm, ~/.local/bin) are found.
+BOMB_PATH="$HOME/.local/bin:$PATH"
+cat > "$HOME/.config/systemd/user/bombd.service" <<UNIT
 [Unit]
 Description=Bomb Code server
 After=network-online.target
 
 [Service]
 ExecStart=%h/.local/bin/bombd up --data %h/.bombd --listen 0.0.0.0:{port} --public {public}
+Environment=PATH=$BOMB_PATH
 Restart=on-failure
 RestartSec=2
 
@@ -70,7 +73,7 @@ systemctl --user daemon-reload
 systemctl --user enable bombd.service >/dev/null 2>&1
 systemctl --user restart bombd.service
 for tool in git node claude codex grok; do command -v "$tool" >/dev/null 2>&1 || echo "BOMB_MISSING: $tool"; done
-if sudo -n ufw allow {port}/tcp >/dev/null 2>&1; then echo "BOMB_NOTE: Opened port {port} in the server's firewall."; else echo "BOMB_NOTE: Make sure TCP port {port} is open in your server's firewall and at your hosting provider."; fi
+if sudo -n ufw allow {port}/tcp >/dev/null 2>&1 || sudo -n firewall-cmd --permanent --add-port={port}/tcp >/dev/null 2>&1; then echo "BOMB_NOTE: Opened port {port} in the server's firewall."; else echo "BOMB_NOTE: Make sure TCP port {port} is open in the server's firewall (for ufw: sudo ufw allow {port}/tcp) and at your hosting provider."; fi
 tries=0
 until [ -S "$HOME/.bombd/core.sock" ] || [ "$tries" -ge 20 ]; do sleep 0.5; tries=$((tries+1)); done
 echo "BOMB_LINK: $("$HOME/.local/bin/bombd" invite --data "$HOME/.bombd" --public {public} --user "$("$HOME/.local/bin/bombd" owner-name)")"
