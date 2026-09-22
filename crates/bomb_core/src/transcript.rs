@@ -314,6 +314,16 @@ impl Thread {
                         || row.body.starts_with("→ prompt accepted")
                     {
                         self.protocol(&row.body);
+                    } else if let Some(outcome) = saved_approval_outcome(&row.body) {
+                        // The answer belongs to the request above it, not on a line of its own.
+                        let asked = self.entries.iter_mut().rev().find_map(|e| match &mut e.body {
+                            Body::Approval(card) if card.resolution.as_deref() == Some("restored") => Some(card),
+                            _ => None,
+                        });
+                        match asked {
+                            Some(card) => card.resolution = Some(outcome.to_string()),
+                            None => { self.push(Role::System, Body::Text(row.body.clone()), at); }
+                        }
                     } else {
                         self.push(Role::System, Body::Text(row.body.clone()), at);
                     }
@@ -1126,8 +1136,47 @@ fn clip_chars(text: &str, n: usize) -> String {
     }
 }
 
+/// The outcome saved beside an approval ("approval granted: allow-once", "approval cancelled").
+fn saved_approval_outcome(line: &str) -> Option<&str> {
+    if line == "approval cancelled" { return Some("cancelled"); }
+    line.strip_prefix("approval granted: ").map(str::trim).filter(|o| !o.is_empty())
+}
+
+/// How a request was answered, from the option id or kind an agent uses (`allow_once`, `allow-always`,
+/// `reject_once`, `cancelled`). `None` for a saved request whose answer was never recorded.
+pub fn approval_outcome_label(resolution: &str, kind: Option<&str>) -> Option<&'static str> {
+    let text = kind.unwrap_or(resolution).to_ascii_lowercase();
+    if resolution == "restored" { return None; }
+    Some(if text.contains("cancel") { "Cancelled" }
+        else if text.contains("reject") || text.contains("deny") { "Denied" }
+        else if text.contains("always") { "Always allowed" }
+        else { "Allowed" })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_saved_answer_joins_its_request_instead_of_adding_a_line() {
+        use grok_persistence::TranscriptEntry;
+        let row = |role: &str, body: &str, seq| TranscriptEntry { role: role.into(), body: body.into(), at: "2026-09-20T19:18:00Z".into(), seq };
+        let mut t = Thread::new();
+        t.hydrate(&[
+            row("approval", "Bash — ls node_modules", 1),
+            row("system", "approval granted: allow-once", 2),
+            row("approval", "Bash — cat vite.config.ts", 3),
+            row("system", "approval cancelled", 4),
+            row("approval", "Bash — never answered", 5),
+            row("system", "Thread created", 6),
+        ]);
+        let outcomes: Vec<_> = t.entries.iter().filter_map(|e| match &e.body { Body::Approval(a) => a.resolution.clone(), _ => None }).collect();
+        assert_eq!(outcomes, ["allow-once", "cancelled", "restored"]);
+        assert_eq!(t.entries.len(), 4, "the two answers did not become rows; the unrelated system line did");
+        assert_eq!(approval_outcome_label("allow-once", None), Some("Allowed"));
+        assert_eq!(approval_outcome_label("opt-7", Some("allow_always")), Some("Always allowed"));
+        assert_eq!(approval_outcome_label("reject_once", None), Some("Denied"));
+        assert_eq!(approval_outcome_label("cancelled", None), Some("Cancelled"));
+        assert_eq!(approval_outcome_label("restored", None), None);
+    }
     use super::*;
     use grok_events::ToolCallStatus;
     use std::time::Duration;

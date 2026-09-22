@@ -18,6 +18,9 @@ use crate::theme::{Layout, Ui};
 use crate::views::sidebar::SidebarView;
 use crate::views::thread_view::ThreadView;
 
+/// Window width under which the sidebar hides itself.
+const NARROW_WINDOW: f32 = 860.0;
+
 pub struct RootView {
     model: Entity<AppModel>,
     sidebar: Entity<SidebarView>,
@@ -26,6 +29,10 @@ pub struct RootView {
     review: Entity<crate::views::workspaces::ReviewPanel>,
     focus: FocusHandle,
     sidebar_open: bool,
+    /// The window got too narrow and the sidebar was tucked away for it; it returns when there is room.
+    sidebar_tucked: bool,
+    /// The user opened the sidebar themselves while the window was narrow; leave it alone until it is wide again.
+    sidebar_kept: bool,
     preview_open: bool,
     settings: Option<Entity<crate::views::settings::SettingsView>>,
     settings_open: bool,
@@ -80,6 +87,8 @@ impl RootView {
             preview,
             focus: cx.focus_handle(),
             sidebar_open: true,
+            sidebar_tucked: false,
+            sidebar_kept: false,
             preview_open: false,
             settings: None,
             settings_open: false,
@@ -142,6 +151,9 @@ impl RootView {
                 .when(!self.settings_open, |el| el.child(icon_button("toggle-sidebar", Lucide::PanelLeft).on_click(cx.listener(
                     |this, _, _, cx| {
                         this.sidebar_open = !this.sidebar_open;
+                        // A deliberate toggle wins over the automatic one until the window crosses the line again.
+                        this.sidebar_tucked = false;
+                        this.sidebar_kept = this.sidebar_open;
                         cx.notify();
                     },
                 ))))
@@ -188,6 +200,16 @@ impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::theme::follow_system(window, cx);
         self.drain_toasts(window, cx);
+        // Below this width the thread needs the room more than the list does.
+        let narrow = window.viewport_size().width < px(NARROW_WINDOW);
+        if narrow && self.sidebar_open && !self.sidebar_tucked && !self.sidebar_kept {
+            self.sidebar_open = false;
+            self.sidebar_tucked = true;
+        } else if !narrow {
+            if self.sidebar_tucked { self.sidebar_open = true; }
+            self.sidebar_tucked = false;
+            self.sidebar_kept = false;
+        }
         let ui = Ui::of(cx);
         if let Some(text) = self.model.update(cx, |m,_| m.foundry_insert.take()) {
             self.foundry_open = false;

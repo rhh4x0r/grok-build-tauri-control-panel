@@ -199,6 +199,8 @@ impl Render for FileTree {
                             )
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.selected = Some(path.clone());
+                                // A file: show it in Finder. A folder: open or close it here.
+                                if !entry.directory { super::transcript::reveal_in_finder(&path); }
                                 if entry.directory && !this.expanded.remove(&path) {
                                     this.expanded.insert(path.clone());
                                     this.load(path.clone(), cx);

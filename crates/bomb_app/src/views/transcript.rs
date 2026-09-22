@@ -120,6 +120,11 @@ enum Row {
         id: u64,
         card: ApprovalCard,
     },
+    /// Several answered requests in a row, folded into one line.
+    AnsweredApprovals {
+        first_id: u64,
+        cards: Vec<(u64, ApprovalCard)>,
+    },
     Line {
         id: u64,
         role: Role,
@@ -199,13 +204,16 @@ impl TranscriptView {
                     let running = items
                         .iter()
                         .any(|a| matches!(a, Activity::Tool { row, .. } if !row.is_terminal()));
-                    // Open while running; the user can override either way.
+                    let failed = items.iter().any(|a| matches!(a, Activity::Tool { row, .. } if row.status.contains("fail") || row.status.contains("denied")));
+                    // Closed by default, running or not: the header says what is happening. A group with a
+                    // failed step opens itself, because that is the one worth reading. The user can override.
+                    let _ = running;
                     let collapsed = if t.collapsed_groups.contains(&first_id) {
                         true
                     } else if t.expanded.contains(&first_id) {
                         false
                     } else {
-                        !running
+                        !failed
                     };
                     let image_rows: Vec<Row> = if t.meta.live && i > turn_start {
                         items
@@ -280,10 +288,18 @@ impl TranscriptView {
                             doc: doc.clone(),
                         });
                     }
-                    (Role::Approval, Body::Approval(card)) => rows.push(Row::Approval {
-                        id: e.id,
-                        card: card.clone(),
-                    }),
+                    (Role::Approval, Body::Approval(card)) => {
+                        // Answered requests next to each other share one line; a waiting one always stands alone.
+                        let answered = !card.is_open() && !card.plan_approval;
+                        match rows.last_mut() {
+                            Some(Row::AnsweredApprovals { cards, .. }) if answered => cards.push((e.id, card.clone())),
+                            Some(Row::Approval { id, card: previous }) if answered && !previous.is_open() && !previous.plan_approval => {
+                                let group = Row::AnsweredApprovals { first_id: *id, cards: vec![(*id, previous.clone()), (e.id, card.clone())] };
+                                *rows.last_mut().expect("just matched") = group;
+                            }
+                            _ => rows.push(Row::Approval { id: e.id, card: card.clone() }),
+                        }
+                    }
                     (role, Body::Text(s)) => rows.push(Row::Line {
                         id: e.id,
                         role: *role,
@@ -310,6 +326,9 @@ impl TranscriptView {
     // ── row renderers ───────────────────────────────────────────────────
 
     fn user_row(&self, id: u64, text: &str, images: &[Arc<Image>], ui: &Ui) -> AnyElement {
+        // The agent is told where attached files are; the person just sees that they are attached.
+        let (text, files) = split_attached_files(text);
+        let hover = ui.hover;
         let bubble = div()
             .w_full()
             .flex()
@@ -336,20 +355,48 @@ impl TranscriptView {
                     }),
                 ))
             })
-            .child(
-                div()
-                    .min_w_0()
-                    .max_w(relative(0.8))
-                    .bg(ui.bubble)
-                    .rounded(px(Layout::BUBBLE_RADIUS))
-                    .px(px(16.))
-                    .py(px(10.))
-                    .text_size(px(Layout::BODY_SIZE))
-                    .line_height(px(Layout::BODY_LINE))
-                    .text_color(ui.text)
-                    .whitespace_normal()
-                    .child(text.to_string()),
-            );
+            .when(!files.is_empty(), |el| {
+                el.child(div().flex().flex_wrap().gap_2().justify_end().max_w(relative(0.8)).children(files.iter().enumerate().map(|(ix, (path, size))| {
+                    let target = path.clone();
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
+                    let full = path.display().to_string();
+                    div()
+                        .id(("user-file", id * 64 + ix as u64))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .h(px(36.))
+                        .max_w(px(280.))
+                        .px_3()
+                        .rounded(px(10.))
+                        .border_1()
+                        .border_color(ui.border)
+                        .bg(ui.ink(0.03))
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(hover))
+                        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(format!("{full} · click to show in Finder")).build(window, cx))
+                        .on_click(move |_, _, _| reveal_in_finder(&target))
+                        .child(Icon::from(Lucide::File).size(px(15.)).text_color(ui.text_muted))
+                        .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(px(crate::theme::Type::SMALL)).child(name))
+                        .child(div().flex_shrink_0().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint).child(size.clone()))
+                })))
+            })
+            .when(!text.is_empty(), |el| {
+                el.child(
+                    div()
+                        .min_w_0()
+                        .max_w(relative(0.8))
+                        .bg(ui.bubble)
+                        .rounded(px(Layout::BUBBLE_RADIUS))
+                        .px(px(16.))
+                        .py(px(10.))
+                        .text_size(px(Layout::BODY_SIZE))
+                        .line_height(px(Layout::BODY_LINE))
+                        .text_color(ui.text)
+                        .whitespace_normal()
+                        .child(text.to_string()),
+                )
+            });
         fade_in(("user", id), bubble).into_any_element()
     }
 
@@ -374,6 +421,7 @@ impl TranscriptView {
         } else {
             TextView::new(state)
                 .selectable(true)
+                .code_block_actions(|block, _, _| copy_code_button(block.code()))
                 .on_link_click(move |href, _, _, cx| {
                     open_link(href, &link_cwd, cx);
                 })
@@ -386,6 +434,10 @@ impl TranscriptView {
             .py_1()
             .text_size(px(Layout::BODY_SIZE))
             .line_height(px(Layout::BODY_LINE))
+            // The kit lays out a line with inline code as separate boxes sized to the shaped text, then
+            // wraps each box again by summing single-character widths. With kerning on, the sum is a hair
+            // wider than the box, so a word drops onto the next line and overlaps it. No kerning, no gap.
+            .font_features(prose_font_features())
             .when(!raw.trim().is_empty() || streaming, |el| {
                 el.child(body_text)
             })
@@ -575,9 +627,18 @@ impl TranscriptView {
                         IconName::ChevronDown
                     }),
             )
-            .child(div().text_sm().text_color(color).child(summary));
+            ;
         if running {
-            header = header.child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child("working…"));
+            // What it is doing right now, with a breathing dot so a closed group still reads as alive.
+            let steps = items.iter().filter(|a| matches!(a, Activity::Tool { .. })).count();
+            let current = items.iter().rev().find_map(|a| match a { Activity::Tool { row, .. } if !row.is_terminal() => Some(row), _ => None });
+            let doing = current.map(running_label).unwrap_or_else(|| "Working".into());
+            header = header
+                .child(crate::views::motion::breathe(("act-live", first_id), 0.3, div().size(px(7.)).flex_shrink_0().rounded_full().bg(ui.accent)))
+                .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_sm().text_color(ui.text).child(doing))
+                .when(steps > 1, |el| el.child(div().flex_shrink_0().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child(format!("{steps} steps"))));
+        } else {
+            header = header.child(div().text_sm().text_color(color).child(summary));
         }
         // Un-collapsing a collapsed-by-default group needs the header click to
         // land in `expanded`; fix the toggle so a collapsed group opens.
@@ -890,13 +951,17 @@ impl TranscriptView {
         ui: &Ui,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // Once answered, a request is history: one quiet line that opens on demand.
+        if !card.is_open() && !card.plan_approval {
+            return self.answered_row(id, card, ui, cx);
+        }
         let sid = self.thread.read(cx).id();
         let rid = card.request_id.clone();
         let open = card.is_open();
         let mono = ui.mono.clone();
         let expanded = self.thread.read(cx).expanded.contains(&id);
         let thread = self.thread.clone();
-        let summary = approval_summary(&card.summary);
+        let summary = approval_summary(&card.summary, true);
 
         let mut buttons: Vec<AnyElement> = Vec::new();
         if open {
@@ -1060,6 +1125,95 @@ impl TranscriptView {
         fade_in(("approval", id), body).into_any_element()
     }
 
+    /// An answered request: shield, outcome, the command on one line, and a chevron for the rest.
+    fn answered_row(&self, id: u64, card: &ApprovalCard, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
+        let expanded = self.thread.read(cx).expanded.contains(&id);
+        let thread = self.thread.clone();
+        let resolution = card.resolution.clone().unwrap_or_default();
+        let kind = card.options.iter().find(|o| o.id == resolution).map(|o| o.kind.clone());
+        let outcome = bomb_core::transcript::approval_outcome_label(&resolution, kind.as_deref());
+        let refused = matches!(outcome, Some("Denied" | "Cancelled"));
+        let summary = approval_summary(&card.summary, false);
+        let first_line = summary.lines().next().unwrap_or_default().to_string();
+        let hover = ui.hover;
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .id(("approval-line", id))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .h(px(28.))
+                    .px_1()
+                    .ml(px(-4.))
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover))
+                    .on_click(move |_, _, cx| thread.update(cx, |t, cx| t.toggle_expanded(id, cx)))
+                    .child(div().size(px(13.)).flex_shrink_0().text_color(ui.text_faint).child(Icon::from(if expanded { Lucide::ChevronDown } else { Lucide::ChevronRight })))
+                    .child(Icon::from(Lucide::Shield).size(px(13.)).text_color(if refused { ui.warning } else { ui.text_faint }))
+                    .child(div().flex_shrink_0().text_size(px(crate::theme::Type::SMALL)).text_color(if refused { ui.warning } else { ui.text_muted }).child(outcome.unwrap_or("Asked")))
+                    .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(px(crate::theme::Type::SMALL)).font_family(ui.mono.clone()).text_color(ui.text_faint).child(first_line)),
+            )
+            .when(expanded, |el| {
+                el.child(
+                    div()
+                        .ml(px(22.))
+                        .my_1()
+                        .p_2()
+                        .rounded(px(6.))
+                        .bg(ui.ink(0.03))
+                        .text_size(px(crate::theme::Type::SMALL))
+                        .font_family(ui.mono.clone())
+                        .text_color(ui.text_muted)
+                        .whitespace_normal()
+                        .child(summary.clone()),
+                )
+                .when_some(card.explanation.clone(), |el, ex| el.child(div().ml(px(22.)).text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(ex)))
+            })
+            .into_any_element()
+    }
+
+    /// Several answered requests in a row: one line that counts them, opening to the individual lines.
+    fn answered_group_row(&self, first_id: u64, cards: &[(u64, ApprovalCard)], ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
+        // The group's own open state must not collide with its first member's.
+        let key = first_id ^ (1 << 62);
+        let expanded = self.thread.read(cx).expanded.contains(&key);
+        let thread = self.thread.clone();
+        let refused = cards.iter().filter(|(_, c)| matches!(c.resolution.as_deref(), Some(r) if r.contains("cancel") || r.contains("reject") || r.contains("deny"))).count();
+        let label = match refused {
+            0 => format!("{} requests allowed", cards.len()),
+            n if n == cards.len() => format!("{} requests not allowed", cards.len()),
+            n => format!("{} requests · {} allowed, {n} not", cards.len(), cards.len() - n),
+        };
+        let hover = ui.hover;
+        let mut group = div().flex().flex_col().child(
+            div()
+                .id(("approval-group", first_id))
+                .flex()
+                .items_center()
+                .gap_2()
+                .h(px(28.))
+                .px_1()
+                .ml(px(-4.))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .on_click(move |_, _, cx| thread.update(cx, |t, cx| t.toggle_expanded(key, cx)))
+                .child(div().size(px(13.)).flex_shrink_0().text_color(ui.text_faint).child(Icon::from(if expanded { Lucide::ChevronDown } else { Lucide::ChevronRight })))
+                .child(Icon::from(Lucide::Shield).size(px(13.)).text_color(if refused > 0 { ui.warning } else { ui.text_faint }))
+                .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(label)),
+        );
+        if expanded {
+            for (id, card) in cards {
+                group = group.child(div().pl(px(18.)).child(self.answered_row(*id, card, ui, cx)));
+            }
+        }
+        group.into_any_element()
+    }
+
     fn line_row(&self, id: u64, role: Role, text: &str, ui: &Ui) -> AnyElement {
         // Normalize old saved creation notices without rewriting conversation history.
         let renamed = (role == Role::System)
@@ -1163,6 +1317,7 @@ impl Render for TranscriptView {
                     }
                     Row::Plan { id, state, doc } => self.plan_row(*id, state, doc, &ui, cx),
                     Row::Approval { id, card } => self.approval_row(*id, card, &ui, cx),
+                    Row::AnsweredApprovals { first_id, cards } => self.answered_group_row(*first_id, cards, &ui, cx),
                     Row::Line { id, role, text } => self.line_row(*id, *role, text, &ui),
                 };
                 if self.matches.contains(&i) {
@@ -1624,7 +1779,7 @@ fn diff_block(id: impl Into<ElementId>, text: &str) -> AnyElement {
         .text_size(px(crate::theme::Type::SMALL)).min_w_0()
         .max_h(px(400.))
         .overflow_y_scroll().overflow_x_hidden()
-        .child(TextView::markdown(id, md).selectable(true))
+        .child(TextView::markdown(id, md).selectable(true).code_block_actions(|block, _, _| copy_code_button(block.code())))
         .into_any_element()
 }
 
@@ -1728,13 +1883,40 @@ fn open_path(path: &std::path::Path) {
     let _ = std::process::Command::new("open").arg(path).spawn();
 }
 
-/// Links in replies: web links open in the browser; relative paths open the
-/// local file (Finder's -50 came from treating `images/1.jpg` as a URL).
+/// Show a file selected in Finder (a folder is opened instead).
+pub(super) fn reveal_in_finder(path: &std::path::Path) {
+    let mut command = std::process::Command::new("open");
+    if path.is_dir() { command.arg(path); } else { command.arg("-R").arg(path); }
+    let _ = command.spawn();
+}
+
+/// Split a sent message into what the person typed and the files attached to it.
+/// The composer appends "Attached file(s) (open … path(s)):" followed by `- <path> (<size>)` lines.
+pub(super) fn split_attached_files(text: &str) -> (String, Vec<(std::path::PathBuf, String)>) {
+    let heading = ["Attached file (open it from this path):", "Attached files (open them from these paths):"];
+    let Some(start) = heading.iter().filter_map(|h| text.rfind(h)).max() else { return (text.to_string(), Vec::new()); };
+    // Only a note at the very end, made of well-formed lines, counts; anything else is the person's own text.
+    if start > 0 && !text[..start].ends_with('\n') { return (text.to_string(), Vec::new()); }
+    let mut files = Vec::new();
+    for line in text[start..].lines().skip(1) {
+        let parsed = line.strip_prefix("- ").and_then(|l| l.rsplit_once(" (")).and_then(|(path, size)| size.strip_suffix(')').map(|size| (path, size)));
+        match parsed {
+            Some((path, size)) if path.starts_with('/') => files.push((std::path::PathBuf::from(path), size.to_string())),
+            _ => return (text.to_string(), Vec::new()),
+        }
+    }
+    if files.is_empty() { return (text.to_string(), Vec::new()); }
+    (text[..start].trim_end().to_string(), files)
+}
+
+/// Links in replies: web links open in the browser; file paths are shown in Finder
+/// (Finder's -50 came from treating `images/1.jpg` as a URL).
 pub(super) fn open_link(href: &str, cwd: &std::path::Path, cx: &mut App) {
     if href.starts_with("http://") || href.starts_with("https://") || href.starts_with("mailto:") {
         cx.open_url(href);
     } else if let Some(p) = resolve_local(href, cwd, None) {
-        open_path(&p);
+        // A file an agent mentions: show where it is, rather than launching whatever app owns the type.
+        reveal_in_finder(&p);
     } else {
         cx.open_url(href);
     }
@@ -1779,7 +1961,7 @@ fn mono_block(id: impl Into<ElementId>, text: &str, mono: &SharedString, color: 
         .whitespace_normal()
         .max_h(px(260.))
         .overflow_y_scroll().overflow_x_hidden()
-        .child(TextView::markdown(id,format!("```text\n{text}\n```")).selectable(true))
+        .child(TextView::markdown(id,format!("```text\n{text}\n```")).selectable(true).code_block_actions(|block, _, _| copy_code_button(block.code())))
         .into_any_element()
 }
 
@@ -1892,6 +2074,23 @@ fn activity_summary(items: &[Activity]) -> String {
 }
 
 /// "Ran 2 commands · Edited 1 file · Read 3 files"
+/// A running step in a few words: "Running `npm test`", "Editing src/app.ts", "Reading 3 files…".
+fn running_label(row: &ToolRow) -> String {
+    let first = row.args.lines().next().unwrap_or_default().trim();
+    // Arguments often arrive as JSON; pull out the part a person would recognise.
+    let detail = serde_json::from_str::<serde_json::Value>(&row.args).ok().and_then(|v| {
+        ["command", "file_path", "path", "url", "pattern", "query"].iter().find_map(|k| v.get(*k).and_then(|x| x.as_str()).map(str::to_owned))
+    }).unwrap_or_else(|| first.to_string());
+    let detail: String = detail.lines().next().unwrap_or_default().chars().take(80).collect();
+    let verb = match tool_kind(&row.name) { "command" => "Running", "edit" => "Editing", "read" => "Reading", "web" => "Fetching", _ => "Working on" };
+    match (detail.is_empty(), tool_kind(&row.name)) {
+        (true, "command") => "Running a command".into(),
+        (true, _) => format!("{verb} {}", if row.name.is_empty() || row.name == "tool" { "a step" } else { row.name.as_str() }),
+        (false, "command") => format!("{verb} `{detail}`"),
+        (false, _) => format!("{verb} {detail}"),
+    }
+}
+
 pub fn tool_group_summary<'a>(rows: impl Iterator<Item = &'a ToolRow>) -> String {
     let (mut cmd, mut edit, mut read, mut web, mut other) = (0, 0, 0, 0, 0);
     let mut last_name = String::new();
@@ -1919,7 +2118,7 @@ pub fn tool_group_summary<'a>(rows: impl Iterator<Item = &'a ToolRow>) -> String
         parts.push(format!("Fetched {web} page{}", plural(web)));
     }
     if other > 0 {
-        if parts.is_empty() && other == 1 {
+        if parts.is_empty() && other == 1 && !last_name.is_empty() && last_name != "tool" {
             parts.push(last_name);
         } else {
             parts.push(format!("{other} other tool call{}", plural(other)));
@@ -1938,6 +2137,52 @@ fn plural(n: usize) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn attached_files_become_chips_and_leave_the_typed_text_alone() {
+        use super::split_attached_files as split;
+        let note = crate::views::composer::attached_files_note(&[("/Users/max/My Docs/spec (v2).pdf".into(), 2_400_000), ("/tmp/data.csv".into(), 1500)]);
+        let (text, files) = split(&format!("Summarise these\n\n{note}"));
+        assert_eq!(text, "Summarise these");
+        assert_eq!(files, [("/Users/max/My Docs/spec (v2).pdf".into(), "2.3 MB".to_string()), ("/tmp/data.csv".into(), "2 KB".to_string())]);
+        // Files only, nothing typed.
+        let (text, files) = split(&crate::views::composer::attached_files_note(&[("/tmp/a.txt".into(), 12)]));
+        assert_eq!((text.as_str(), files.len()), ("", 1));
+        // The person quoting the phrase mid-sentence, or lines that are not paths, stay as text.
+        for plain in ["no files here", "I saw Attached file (open it from this path): earlier", "Attached file (open it from this path):\n- not a path"] {
+            assert_eq!(split(plain), (plain.to_string(), Vec::new()), "{plain}");
+        }
+    }
+
+    #[test]
+    fn a_running_step_is_described_in_a_few_words() {
+        use bomb_core::transcript::ToolRow;
+        let row = |name: &str, args: &str| ToolRow { tool_id: "t".into(), name: name.into(), status: "running".into(), args: args.into(), result: None };
+        assert_eq!(super::running_label(&row("Bash", r#"{"command":"npm test\nsecond line"}"#)), "Running `npm test`");
+        assert_eq!(super::running_label(&row("Edit", r#"{"file_path":"src/app.ts","new_string":"x"}"#)), "Editing src/app.ts");
+        assert_eq!(super::running_label(&row("Read", "src/lib.rs")), "Reading src/lib.rs");
+        assert_eq!(super::running_label(&row("terminal", "")), "Running a command");
+        assert_eq!(super::running_label(&row("tool", "")), "Working on a step");
+        // A lone unnamed step no longer renders as the bare word "tool".
+        assert_eq!(super::tool_group_summary([row("tool", "")].iter()), "1 other tool call");
+        assert_eq!(super::tool_group_summary([row("Task", "")].iter()), "Task");
+    }
+
+    #[test]
+    fn a_request_shows_its_command_once() {
+        use super::approval_summary as a;
+        assert_eq!(a(r#"ls node_modules: {"command":"ls node_modules"}"#, false), "ls node_modules");
+        // Cut short by the agent, so the JSON no longer parses.
+        assert_eq!(a(r#"ls node_modules | grep x: {"command":"ls node_modules | gre…"#, true), "ls node_modules | grep x");
+        assert_eq!(a(r#"ls node_modules: {"command":"ls node_modules"}"#, true), "ls node_modules", "a pure echo is dropped even while waiting");
+        let scoped = r#"Shell: {"command":"rm file","path":"/tmp"}"#;
+        assert_eq!(a(scoped, true), scoped, "extra scope stays visible while waiting");
+        assert_eq!(a(scoped, false), "rm file");
+        assert_eq!(a(r#"Read: {"file_path":"/src/app.ts"}"#, false), "/src/app.ts");
+        let edit = r#"Edit: {"file_path":"/src/app.ts","new_string":"x"}"#;
+        assert_eq!(a(edit, false), "Edit /src/app.ts");
+        assert_eq!(a(edit, true), edit, "a waiting edit shows everything being approved");
+        assert_eq!(a("plain text", false), "plain text");
+    }
     // No glob import: `gpui_kit::*` carries a `test` macro that shadows `#[test]`.
     use super::{tool_group_summary, ToolRow};
 
@@ -1970,25 +2215,45 @@ mod tests {
 }
 
 /// Keep the requested target readable; preserve the full request in Details.
-fn approval_summary(summary: &str) -> String {
+/// A copy button in the corner of every code block: commands, output and diffs.
+fn copy_code_button(code: SharedString) -> AnyElement {
+    // Distinct per block so each button keeps its own "copied" tick.
+    let id = { use std::hash::{Hash, Hasher}; let mut h = std::collections::hash_map::DefaultHasher::new(); code.hash(&mut h); h.finish() };
+    gpui_kit::component::clipboard::Clipboard::new(("copy-code", id)).value(code).tooltip("Copy").into_any_element()
+}
+
+/// Chat prose is shaped without pair kerning or contextual forms so measured and drawn widths agree.
+fn prose_font_features() -> FontFeatures {
+    FontFeatures(Arc::new(vec![("kern".into(), 0), ("liga".into(), 0), ("calt".into(), 0)]))
+}
+
+/// What was asked, once. Agents send `<command>: {"command": "<command>"}`; show the command, not its echo.
+/// A waiting edit keeps its full text in view (`waiting`), because that is what is being approved.
+fn approval_summary(summary: &str, waiting: bool) -> String {
     if let Some(start) = summary.find('{') {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&summary[start..]) {
-            // Shell commands and edits need their complete scope visible.
-            if value.get("command").is_none()
-                && value.get("new_string").is_none()
-                && value.get("content").is_none()
-            {
-                if let Some(path) = value
-                    .get("file_path")
-                    .or_else(|| value.get("path"))
-                    .and_then(|v| v.as_str())
-                {
-                    return path.to_string();
-                }
+            if let Some(command) = value.get("command").and_then(|v| v.as_str()) {
+                // While waiting, only drop the JSON when it is a pure echo: anything extra in it
+                // (a working folder, say) is part of what is being approved.
+                let lead = summary[..start].trim().trim_end_matches(':').trim();
+                let echo = lead == command && value.as_object().is_some_and(|o| o.keys().all(|k| matches!(k.as_str(), "command" | "description" | "timeout" | "run_in_background")));
+                return if waiting && !echo { summary.to_string() } else { command.to_string() };
             }
+            if let Some(path) = value.get("file_path").or_else(|| value.get("path")).and_then(|v| v.as_str()) {
+                // An edit's full text stays available under the chevron; the line names the file.
+                let editing = value.get("new_string").is_some() || value.get("content").is_some();
+                if editing && waiting { return summary.to_string(); }
+                return if editing { format!("Edit {path}") } else { path.to_string() };
+            }
+            let lead = summary[..start].trim().trim_end_matches(':').trim();
+            if !lead.is_empty() { return lead.to_string(); }
         }
     }
-    summary.to_string()
+    // A summary cut short no longer parses; the text before its JSON echo is still the command.
+    match summary.find(": {\"") {
+        Some(cut) if !summary[..cut].trim().is_empty() => summary[..cut].trim().to_string(),
+        _ => summary.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -1997,7 +2262,7 @@ mod approval_display_tests {
     #[test]
     fn read_target_is_concise_but_commands_and_invalid_payloads_remain_visible() {
         assert_eq!(
-            approval_summary(r#"Read /tmp/a.png: {"file_path":"/tmp/a.png"}"#),
+            approval_summary(r#"Read /tmp/a.png: {"file_path":"/tmp/a.png"}"#, true),
             "/tmp/a.png"
         );
         for text in [
@@ -2005,7 +2270,7 @@ mod approval_display_tests {
             "Read: {broken",
             r#"Edit: {"path":"a","new_string":"b"}"#,
         ] {
-            assert_eq!(approval_summary(text), text);
+            assert_eq!(approval_summary(text, true), text);
         }
     }
 }

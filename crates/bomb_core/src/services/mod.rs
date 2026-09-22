@@ -1261,7 +1261,7 @@ pub async fn remove_session(
     state.persistence.delete_session(id).map_err(err)?;
     if let Some((worktree, root, _branch, _)) = wt_ctx {
         // Only remove managed worktrees (never the project root itself).
-        if worktree != root && worktree.starts_with(state.worktrees.worktrees_root()) {
+        if worktree != root && state.worktrees.is_managed(&root, &worktree) {
             if let Err(e) = state
                 .worktrees
                 .remove(&root, &worktree.display().to_string(), true)

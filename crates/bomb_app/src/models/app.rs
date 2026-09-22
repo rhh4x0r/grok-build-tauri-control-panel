@@ -26,6 +26,7 @@ impl Global for AppModelHandle {}
 const ARCHIVED_KEY: &str = "archived_threads";
 const SIDEBAR_SORT_KEY: &str = "sidebar_sort";
 const PINNED_PROJECTS_KEY: &str = "pinned_projects";
+const PROJECT_INTRO_KEY: &str = "project_intro_seen";
 
 #[derive(Debug, Clone)]
 pub struct ProjectGroup {
@@ -141,6 +142,10 @@ pub struct AppModel {
     pub project_overviews: HashMap<String, Result<bomb_core::services::project_overview::ProjectOverview, String>>,
     pub overview_loading: HashSet<String>,
     pub overview_branch: Option<String>,
+    /// The project page's explanation of the default branch has been dismissed.
+    pub project_intro_seen: bool,
+    /// Projects whose "In main" column is showing every card.
+    pub show_all_merged: HashSet<String>,
     pub sidebar_sort: SidebarSort,
     /// Project roots shown in the sidebar's Pinned section, in the order they were pinned.
     pub pinned_projects: Vec<String>,
@@ -196,6 +201,8 @@ impl AppModel {
             project_overviews: HashMap::new(),
             overview_loading: HashSet::new(),
             overview_branch: None,
+            project_intro_seen: false,
+            show_all_merged: HashSet::new(),
             sidebar_sort: SidebarSort::default(),
             pinned_projects: Vec::new(),
             close_after_merge: HashSet::new(),
@@ -1325,11 +1332,36 @@ impl AppModel {
         spawn_service(cx, async move {
             let sort = services::kv_get(&state, SIDEBAR_SORT_KEY).await.ok().flatten();
             let pinned = services::kv_get(&state, PINNED_PROJECTS_KEY).await.ok().flatten();
-            (sort, pinned)
-        }, move |(sort, pinned), cx| {
+            let intro = services::kv_get(&state, PROJECT_INTRO_KEY).await.ok().flatten();
+            (sort, pinned, intro)
+        }, move |(sort, pinned, intro), cx| {
             let _ = this.update(cx, |m, cx| {
                 if let Some(sort) = sort { m.sidebar_sort = SidebarSort::from_key(&sort); }
+                m.project_intro_seen = intro.as_deref() == Some("1");
                 if let Some(pinned) = pinned.and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok()) { m.pinned_projects = pinned; }
+                cx.notify();
+            });
+        });
+    }
+
+    pub fn dismiss_project_intro(&mut self, cx: &mut Context<Self>) {
+        self.project_intro_seen = true;
+        let state = svc(cx);
+        spawn_service(cx, async move { services::kv_set(&state, PROJECT_INTRO_KEY, "1").await }, |_, _| {});
+        cx.notify();
+    }
+
+    /// Close finished threads and delete branches whose work is already in the default branch.
+    pub fn cleanup_merged(&mut self, root: String, cx: &mut Context<Self>) {
+        if self.git_busy { return; }
+        self.git_busy = true; cx.notify();
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move { services::workspaces::cleanup_merged(&state, root).await }, move |res, cx| {
+            let _ = this.update(cx, |m, cx| {
+                m.git_busy = false;
+                match res { Ok(note) => m.toast(ToastKind::Success, note), Err(e) => m.fail(e, cx) }
+                m.refresh_workspaces(cx); m.refresh_threads(cx); m.refresh_project_overview(cx);
                 cx.notify();
             });
         });

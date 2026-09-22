@@ -362,6 +362,34 @@ pub async fn close_feature(state: &AppState, id: String) -> Result<String, Strin
        else { format!("Closed “{}” · branch {} kept because it has work that is not in {base}", w.name, w.branch) })
 }
 
+/// Tidy a project: close threads and delete branches whose work is already in the default branch.
+/// Nothing unmerged, busy or checked out is touched.
+pub async fn cleanup_merged(state: &AppState, root: String) -> Result<String, String> {
+    let path = Path::new(&root);
+    let default = default_branch(path).await?;
+    let current = state.worktrees.current_branch(path).await.unwrap_or_default();
+    let workspaces: Vec<WorkspaceRecord> = state.persistence.list_workspaces().map_err(err)?.into_iter().filter(|w| w.project_root == root && !w.inline && !w.shared_checkout).collect();
+    let branches = run_git(path, &["for-each-ref", "--format=%(refname:short)", "refs/heads/"]).await.map_err(err)?;
+    let (mut removed, mut kept) = (0usize, 0usize);
+    for branch in branches.lines().map(str::trim).filter(|b| !b.is_empty() && *b != default && *b != current) {
+        let workspace = workspaces.iter().find(|w| w.branch == branch);
+        let target = default.clone();
+        let merged = run_git(path, &["merge-base", "--is-ancestor", &format!("refs/heads/{branch}"), &format!("refs/heads/{target}")]).await.is_ok();
+        if !merged { continue; }
+        let done = match workspace.filter(|w| w.archived_at.is_none()) {
+            // An open thread goes through the same close as the button, which refuses while it is busy.
+            Some(w) => close_feature(state, w.id.clone()).await.is_ok_and(|note| note.contains("branch was removed")),
+            None => run_git(path, &["branch", "-D", branch]).await.is_ok(),
+        };
+        if done { removed += 1 } else { kept += 1 }
+    }
+    Ok(match (removed, kept) {
+        (0, 0) => "Nothing to clean up.".into(),
+        (r, 0) => format!("Removed {r} finished branch{}.", if r == 1 { "" } else { "es" }),
+        (r, k) => format!("Removed {r} finished branch{} · kept {k} still in use.", if r == 1 { "" } else { "es" }),
+    })
+}
+
 /// All destructive operations require a concrete confirmation in the view.
 pub async fn workspace_action(
     state: &AppState,
@@ -904,6 +932,33 @@ mod tests {
         workspace_action(&state,existing_w.id,"push-main".into(),String::new()).await.unwrap();
         assert!(run_git(&remote,&["show-ref","--verify","refs/heads/main"]).await.is_ok());
         super::super::shutdown_all(&state).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_only_branches_whose_work_is_already_merged() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo"); std::fs::create_dir(&root).unwrap();
+        for args in [vec!["init", "-b", "main"], vec!["config", "user.name", "Test"], vec!["config", "user.email", "test@example.com"]] { run_git(&root, &args).await.unwrap(); }
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        run_git(&root, &["add", "-A"]).await.unwrap(); run_git(&root, &["commit", "-m", "initial"]).await.unwrap();
+        // merged-a and merged-b are in main; unmerged has its own work; checked-out is where the folder is.
+        for b in ["merged-a", "merged-b", "unmerged"] { run_git(&root, &["branch", b]).await.unwrap(); }
+        run_git(&root, &["checkout", "-q", "unmerged"]).await.unwrap();
+        std::fs::write(root.join("b.txt"), "work\n").unwrap();
+        run_git(&root, &["add", "-A"]).await.unwrap(); run_git(&root, &["commit", "-m", "work"]).await.unwrap();
+        run_git(&root, &["checkout", "-q", "-b", "checked-out", "main"]).await.unwrap();
+        let home = temp.path().to_path_buf(); let grok = home.join("grok"); let panel = grok.join("panel");
+        let state = AppState::initialize_with_paths(grok_config::GrokPaths {
+            home_dir: home.clone(), grok_dir: grok.clone(), config_file: panel.join("config.toml"),
+            grok_cli_config_file: grok.join("config.toml"), worktrees_dir: home.join("worktrees"),
+            memory_dir: panel.join("memory"), sessions_dir: panel.join("sessions"), panel_dir: panel,
+            project_config_file: None, project_root: None,
+        }).await.unwrap();
+        assert_eq!(cleanup_merged(&state, root.display().to_string()).await.unwrap(), "Removed 2 finished branches.");
+        let left = run_git(&root, &["for-each-ref", "--format=%(refname:short)", "refs/heads/"]).await.unwrap();
+        let mut left: Vec<&str> = left.lines().collect(); left.sort();
+        assert_eq!(left, ["checked-out", "main", "unmerged"]);
+        assert_eq!(cleanup_merged(&state, root.display().to_string()).await.unwrap(), "Nothing to clean up.");
     }
 
     #[tokio::test]

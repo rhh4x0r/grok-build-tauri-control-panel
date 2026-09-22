@@ -58,12 +58,53 @@ impl Render for SettingsView {
                         routing_page(),
                         mcp_page(),
                         memory_page(),
-                        worktrees_page(),
                         permissions_page(cx),
-                        diagnostics_page(),
+                        advanced_page(),
                     ]),
             )
     }
+}
+
+// ── One pattern for every list in Settings ──────────────────────────────
+// A group has a title and a one-line description. Inside it, each thing is a
+// row: what it is on the left, its controls on the right, a hairline beneath.
+// Actions for the whole list sit in a toolbar above; "add" inputs sit below.
+
+/// A row in a settings list. Rows may wrap into a second line of detail.
+fn list_row(ui: &Ui) -> Div {
+    div().flex().flex_col().gap_1().w_full().min_h(px(40.)).py_2().justify_center().border_b_1().border_color(ui.hairline(0.06))
+}
+
+/// The main line of a row: name and facts on the left, controls pushed right by a `flex_1` spacer.
+fn row_line() -> Div {
+    div().flex().items_center().gap_2().w_full()
+}
+
+fn row_title(text: impl Into<SharedString>) -> Div {
+    div().text_sm().font_weight(FontWeight::MEDIUM).child(text.into())
+}
+
+fn row_meta(text: impl Into<SharedString>, ui: &Ui) -> Div {
+    div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child(text.into())
+}
+
+fn tag(text: impl Into<SharedString>, ui: &Ui) -> Div {
+    div().px_1p5().rounded(px(4.)).text_size(px(crate::theme::Type::SMALL)).bg(ui.ink(0.06)).text_color(ui.text_muted).child(text.into())
+}
+
+/// Shown instead of rows when a list has nothing in it.
+fn empty_list(text: impl Into<SharedString>, ui: &Ui) -> Div {
+    div().py_3().text_sm().text_color(ui.text_faint).child(text.into())
+}
+
+/// Buttons that act on the whole list, above it.
+fn toolbar() -> Div {
+    div().flex().items_center().gap_2().pb_1()
+}
+
+/// Inputs for adding to a list, below it.
+fn add_row() -> Div {
+    div().flex().items_center().gap_2().pt_3()
 }
 
 // ── General ─────────────────────────────────────────────────────────────
@@ -190,17 +231,18 @@ fn general_page(cx: &App) -> SettingPage {
 // ── MCP ─────────────────────────────────────────────────────────────────
 
 fn mcp_page() -> SettingPage {
-    SettingPage::new("MCP")
-        .description("Servers the agent can attach. Secrets live in ~/.grok/mcp_credentials.json, never in the config.")
+    SettingPage::new("Tools (MCP)")
+        .description("Extra tools an agent can use, such as GitHub or a browser. Secrets are stored separately from these settings.")
         .group(
             SettingGroup::new()
-                .title("Servers")
+                .title("Tool servers")
+                .description("Turn one on to make it available when you start a thread.")
                 .item(SettingItem::render(|_, _, cx| render_mcp_servers(cx))),
         )
         .group(
             SettingGroup::new()
                 .title("Credentials")
-                .description("Referenced by name from server templates (GITHUB_TOKEN, LINEAR_API_KEY, …).")
+                .description("Keys a tool server needs, saved by name (GITHUB_TOKEN, LINEAR_API_KEY, …).")
                 .item(SettingItem::render(|_, _, cx| render_credentials(cx))),
         )
 }
@@ -229,10 +271,7 @@ fn render_mcp_servers(cx: &mut App) -> AnyElement {
         .gap_2()
         .w_full()
         .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
+            toolbar()
                 .child(
                     Button::new("mcp-add")
                         .outline()
@@ -267,36 +306,24 @@ fn render_mcp_servers(cx: &mut App) -> AnyElement {
             let (n1, n2, n3, n4) = (name.clone(), name.clone(), name.clone(), name.clone());
             let mut badges: Vec<String> = Vec::new();
             if s.high_risk {
-                badges.push("high-risk".into());
+                badges.push("can change things outside the project".into());
             }
             if s.requires_approval {
-                badges.push("needs approval".into());
+                badges.push("asks before each use".into());
             }
             if s.read_only {
-                badges.push("read-only".into());
+                badges.push("read only".into());
             }
             for k in &s.credential_keys {
                 badges.push(format!("needs {k}"));
             }
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .p_3()
-                .rounded(px(8.))
-                .border_1()
-                .border_color(ui.border)
+            list_row(&ui)
                 .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(div().size(px(8.)).rounded_full().bg(dot))
-                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(s.name.clone()))
-                        .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child(format!("{} · {}", s.kind, s.transport.as_str())))
-                        .children(badges.into_iter().map(|b| {
-                            div().px_1p5().rounded(px(4.)).text_size(px(crate::theme::Type::SMALL)).bg(ui.ink(0.06)).text_color(ui.text_muted).child(b)
-                        }))
+                    row_line()
+                        .child(div().size(px(8.)).flex_shrink_0().rounded_full().bg(dot))
+                        .child(row_title(s.name.clone()))
+                        .child(row_meta(format!("{} · {}", s.kind, s.transport.as_str()), &ui))
+                        .children(badges.into_iter().map(|b| tag(b, &ui)))
                         .child(div().flex_1())
                         .child(
                             Switch::new(SharedString::from(format!("auto-{name}")))
@@ -339,29 +366,26 @@ fn render_credentials(cx: &mut App) -> AnyElement {
         (m.credentials.clone(), m.cred_key.clone(), m.cred_value.clone())
     };
     let save_model = model.clone();
+    let none = creds.is_empty();
     div()
         .flex()
         .flex_col()
-        .gap_2()
         .w_full()
+        .when(none, |el| el.child(empty_list("No keys saved yet.", &ui)))
         .children(creds.into_iter().map(|c| {
             let m = model.clone();
             let k = c.key.clone();
-            div()
-                .flex()
-                .items_center()
-                .gap_3()
-                .child(div().text_sm().font_family(ui.mono.clone()).child(c.key.clone()))
-                .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child(c.masked.clone()))
+            list_row(&ui).child(
+                row_line()
+                .child(row_title(c.key.clone()).font_family(ui.mono.clone()))
+                .child(row_meta(c.masked.clone(), &ui))
                 .child(div().flex_1())
                 .child(Button::new(SharedString::from(format!("cred-rm-{}", c.key))).ghost().small().label("Remove").on_click(move |_, _, cx| {
                     m.update(cx, |s, cx| s.remove_credential(k.clone(), cx));
-                }))
+                })))
         }))
         .child(
-            div()
-                .flex()
-                .gap_2()
+            add_row()
                 .child(div().w(px(220.)).child(Input::new(&key)))
                 .child(div().flex_1().child(Input::new(&value).mask_toggle()))
                 .child(Button::new("cred-save").small().label("Save").on_click(move |_, window, cx| {
@@ -375,8 +399,8 @@ fn render_credentials(cx: &mut App) -> AnyElement {
 
 fn memory_page() -> SettingPage {
     SettingPage::new("Memory")
-        .description("Notes injected into every new thread: global ones always, project ones for that project.")
-        .group(SettingGroup::new().item(SettingItem::render(|_, _, cx| render_memory(cx))))
+        .description("Things every new thread should know. Notes for everything are always included; project notes only in that project.")
+        .group(SettingGroup::new().title("Notes").description("Add, edit or remove what agents are told at the start of a thread.").item(SettingItem::render(|_, _, cx| render_memory(cx))))
 }
 
 fn render_memory(cx: &mut App) -> AnyElement {
@@ -441,30 +465,18 @@ fn render_memory(cx: &mut App) -> AnyElement {
                 .flex()
                 .flex_col()
                 .gap_1p5()
-                .when(entries.is_empty(), |el| el.child(div().text_sm().text_color(ui.text_faint).py_2().child("No notes in this scope.")))
+                .when(entries.is_empty(), |el| el.child(empty_list("No notes here yet.", &ui)))
                 .children(entries.into_iter().map(|e| {
                     let m_edit = model.clone();
                     let m_rm = model.clone();
                     let entry = e.clone();
                     let id = e.id.clone();
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .p_3()
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(ui.border)
+                    list_row(&ui)
                         .child(div().text_sm().whitespace_normal().child(e.content.clone()))
                         .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .children(e.tags.iter().map(|t| {
-                                    div().px_1p5().rounded(px(4.)).text_size(px(crate::theme::Type::SMALL)).bg(ui.ink(0.06)).text_color(ui.text_muted).child(t.clone())
-                                }))
-                                .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child(e.updated_at.format("%b %-d, %Y").to_string()))
+                            row_line()
+                                .children(e.tags.iter().map(|t| tag(t.clone(), &ui)))
+                                .child(row_meta(e.updated_at.format("%b %-d, %Y").to_string(), &ui))
                                 .child(div().flex_1())
                                 .child(Button::new(SharedString::from(format!("mem-edit-{}", e.id))).ghost().small().label("Edit").on_click(move |_, window, cx| {
                                     m_edit.update(cx, |s, cx| s.edit_memory(&entry, window, cx));
@@ -476,9 +488,7 @@ fn render_memory(cx: &mut App) -> AnyElement {
                 })),
         )
         .child(
-            div()
-                .flex()
-                .gap_2()
+            add_row()
                 .child(div().flex_1().child(Input::new(&add)))
                 .child(div().w(px(200.)).child(Input::new(&tags)))
                 .child(Button::new("mem-add").small().label("Add").on_click(move |_, window, cx| {
@@ -488,13 +498,7 @@ fn render_memory(cx: &mut App) -> AnyElement {
         .into_any_element()
 }
 
-// ── Worktrees ───────────────────────────────────────────────────────────
-
-fn worktrees_page() -> SettingPage {
-    SettingPage::new("Worktrees")
-        .description("Every thread in a git project works in its own worktree under ~/.grok/worktrees.")
-        .group(SettingGroup::new().item(SettingItem::render(|_, _, cx| render_worktrees(cx))))
-}
+// ── Advanced: thread folders ────────────────────────────────────────────
 
 fn render_worktrees(cx: &mut App) -> AnyElement {
     let ui = Ui::of(cx);
@@ -510,11 +514,11 @@ fn render_worktrees(cx: &mut App) -> AnyElement {
         .gap_3()
         .w_full()
         .child(
-            div().flex().items_center().gap_2().child(Button::new("wt-refresh").ghost().small().label("Refresh").on_click(move |_, _, cx| {
+            toolbar().child(Button::new("wt-refresh").ghost().small().label("Refresh").on_click(move |_, _, cx| {
                 refresh_model.update(cx, |s, cx| s.load_worktrees(cx));
             })),
         )
-        .when(repos.is_empty(), |el| el.child(div().text_sm().text_color(ui.text_faint).child("No projects yet.")))
+        .when(repos.is_empty(), |el| el.child(empty_list("No projects yet.", &ui)))
         .children(repos.into_iter().map(|(repo, list)| {
             let m_prune = model.clone();
             let m_create = model.clone();
@@ -524,14 +528,12 @@ fn render_worktrees(cx: &mut App) -> AnyElement {
                 .flex_col()
                 .gap_1p5()
                 .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(crate::models::app::project_name(&repo)))
-                        .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child(repo.clone()))
+                    row_line()
+                        .pt_2()
+                        .child(row_title(crate::models::app::project_name(&repo)))
+                        .child(row_meta(repo.clone(), &ui))
                         .child(div().flex_1())
-                        .child(Button::new(SharedString::from(format!("prune-{repo}"))).ghost().small().label("Prune").on_click(move |_, _, cx| {
+                        .child(Button::new(SharedString::from(format!("prune-{repo}"))).ghost().small().label("Clear missing folders").tooltip("Forget folders that no longer exist on disk").on_click(move |_, _, cx| {
                             m_prune.update(cx, |s, cx| s.prune_worktrees(r1.clone(), cx));
                         })),
                 )
@@ -540,15 +542,11 @@ fn render_worktrees(cx: &mut App) -> AnyElement {
                     let m_rm = model.clone();
                     let path = w.path.display().to_string();
                     let (repo_rm, name_rm) = (repo.clone(), w.name.clone());
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .pl_3()
-                        .h(px(28.))
-                        .child(div().text_sm().font_family(ui.mono.clone()).child(w.name.clone()))
-                        .when_some(w.branch.clone(), |el, b| el.child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(b)))
-                        .when(w.locked, |el| el.child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.warning).child("locked")))
+                    list_row(&ui).pl_3().child(
+                    row_line()
+                        .child(row_title(w.name.clone()).font_family(ui.mono.clone()))
+                        .when_some(w.branch.clone(), |el, b| el.child(row_meta(b, &ui)))
+                        .when(w.locked, |el| el.child(tag("locked", &ui)))
                         .child(div().flex_1())
                         .child(Button::new(SharedString::from(format!("diff-{}", w.id))).ghost().small().label("Diff").on_click(move |_, _, cx| {
                             m_diff.update(cx, |s, cx| s.show_diff(path.clone(), cx));
@@ -564,7 +562,7 @@ fn render_worktrees(cx: &mut App) -> AnyElement {
                                     true
                                 })
                             });
-                        }))
+                        })))
                 }))
                 .child(
                     div()
@@ -662,7 +660,7 @@ fn permissions_page(cx: &App) -> SettingPage {
                     .description("Replaces the rule lists below with the preset's rules."),
                 ),
         )
-        .group(SettingGroup::new().title("Rules").item(SettingItem::render(|_, _, cx| render_rules(cx))))
+        .group(SettingGroup::new().title("Rules").description("One per line. A matching Allow rule skips the question; a matching Deny rule refuses without asking.").item(SettingItem::render(|_, _, cx| render_rules(cx))))
 }
 
 impl SettingsModel {
@@ -673,7 +671,6 @@ impl SettingsModel {
 }
 
 fn render_rules(cx: &mut App) -> AnyElement {
-    let ui = Ui::of(cx);
     let model = settings(cx);
     let (allow, deny) = {
         let m = model.read(cx);
@@ -685,9 +682,9 @@ fn render_rules(cx: &mut App) -> AnyElement {
         .flex_col()
         .gap_2()
         .w_full()
-        .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child("Allow"))
+        .child(row_title("Allow without asking"))
         .child(Textarea::new(&allow))
-        .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child("Deny"))
+        .child(row_title("Never allow").pt_2())
         .child(Textarea::new(&deny))
         .child(div().flex().child(Button::new("rules-save").small().label("Save rules").on_click(move |_, _, cx| {
             save_model.update(cx, |s, cx| s.save_rules(cx));
@@ -695,15 +692,27 @@ fn render_rules(cx: &mut App) -> AnyElement {
         .into_any_element()
 }
 
-// ── Diagnostics ─────────────────────────────────────────────────────────
+// ── Advanced ────────────────────────────────────────────────────────────
 
-fn diagnostics_page() -> SettingPage {
-    SettingPage::new("Diagnostics")
-        .group(SettingGroup::new().title("Runtime").item(SettingItem::render(|_, _, cx| render_runtime(cx))))
+fn advanced_page() -> SettingPage {
+    SettingPage::new("Advanced")
+        .description("For troubleshooting. You rarely need anything here.")
         .group(
             SettingGroup::new()
-                .title("Protocol log")
-                .description("Raw ACP and stderr lines from the selected thread.")
+                .title("Thread folders")
+                .description("Each thread works in its own copy of the project. Closing a feature removes its folder; clear leftovers here.")
+                .item(SettingItem::render(|_, _, cx| render_worktrees(cx))),
+        )
+        .group(
+            SettingGroup::new()
+                .title("This app")
+                .description("What is installed and where things are stored.")
+                .item(SettingItem::render(|_, _, cx| render_runtime(cx))),
+        )
+        .group(
+            SettingGroup::new()
+                .title("Connection log")
+                .description("Raw messages between the app and the agent for the thread you have open.")
                 .item(SettingItem::render(|_, _, cx| render_protocol_log(cx))),
         )
 }
@@ -716,29 +725,26 @@ fn render_runtime(cx: &mut App) -> AnyElement {
     let m_sd = model.clone();
     let m_rf = model.clone();
     let row = |k: &str, v: String, ui: &Ui| {
-        div()
-            .flex()
-            .gap_3()
-            .h(px(22.))
-            .items_center()
-            .child(div().w(px(140.)).text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child(k.to_string()))
-            .child(div().text_size(px(crate::theme::Type::SMALL)).font_family(ui.mono.clone()).text_color(ui.text).child(v))
+        list_row(ui).child(
+            row_line()
+                .child(div().w(px(180.)).flex_shrink_0().child(row_title(k.to_string())))
+                .child(div().min_w_0().text_size(px(crate::theme::Type::SMALL)).font_family(ui.mono.clone()).text_color(ui.text_muted).whitespace_normal().child(v)),
+        )
     };
     div()
         .flex()
         .flex_col()
-        .gap_1()
         .w_full()
         .when_some(runtime, |el, r| {
-            el.child(row("status", r.message.clone(), &ui))
-                .child(row("grok binary", format!("{}{}", r.grok_binary, if r.grok_binary_exists { "" } else { " (missing)" }), &ui))
-                .child(row("grok version", r.grok_version.clone().unwrap_or_else(|| "?".into()), &ui))
-                .child(row("config", r.config_path.clone(), &ui))
-                .child(row("worktrees", r.worktrees_dir.clone(), &ui))
-                .child(row("home", r.home_dir.clone(), &ui))
-                .child(row("live sessions", r.session_count.to_string(), &ui))
-                .child(row("MCP servers", r.mcp_count.to_string(), &ui))
-                .child(row("XAI_API_KEY", if r.xai_api_key_present { "present".into() } else { "not set".into() }, &ui))
+            el.child(row("Status", r.message.clone(), &ui))
+                .child(row("Grok program", format!("{}{}", r.grok_binary, if r.grok_binary_exists { "" } else { " (missing)" }), &ui))
+                .child(row("Grok version", r.grok_version.clone().unwrap_or_else(|| "?".into()), &ui))
+                .child(row("Settings file", r.config_path.clone(), &ui))
+                .child(row("Thread folders", r.worktrees_dir.clone(), &ui))
+                .child(row("App data", r.home_dir.clone(), &ui))
+                .child(row("Agents running now", r.session_count.to_string(), &ui))
+                .child(row("Tool servers", r.mcp_count.to_string(), &ui))
+                .child(row("xAI API key", if r.xai_api_key_present { "set".into() } else { "not set".into() }, &ui))
         })
         .child(
             div()
@@ -786,7 +792,7 @@ fn render_protocol_log(cx: &mut App) -> AnyElement {
         .font_family(ui.mono.clone())
         .text_color(ui.text_muted)
         .whitespace_normal()
-        .when(lines.is_empty(), |el| el.child("Select a thread in the main window to see its protocol log."))
+        .when(lines.is_empty(), |el| el.child("Open a thread in the main window to see its messages here."))
         .children(lines.into_iter().rev().map(|l| div().child(l)))
         .into_any_element()
 }

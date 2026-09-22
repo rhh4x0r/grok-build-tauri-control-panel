@@ -183,9 +183,19 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                         .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::actions::NewThread), cx)),
                 ),
         )
-        .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(format!(
-            "The finished version of your project. Every thread works on its own copy, and {base} only changes when you merge a thread into it."
-        )))
+        .when(!m.project_intro_seen, |el| {
+            let app = model.clone();
+            el.child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_3()
+                    .child(div().flex_1().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(format!(
+                        "The finished version of your project. Every thread works on its own copy, and {base} only changes when you merge a thread into it."
+                    )))
+                    .child(Button::new("project-intro-dismiss").ghost().small().label("Got it").on_click(move |_, _, cx| app.update(cx, |m, cx| m.dismiss_project_intro(cx)))),
+            )
+        })
         .child(div().text_size(px(crate::theme::Type::BODY)).child(match waiting {
             0 => format!("Nothing is waiting. Everything finished is already in {base}."),
             1 => format!("1 feature has work that is not in {base} yet."),
@@ -218,6 +228,11 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
     ];
     let mut board = div().id("feature-board").flex().gap_3().items_start().overflow_x_scroll();
     for ((title, hint), cards) in titles.into_iter().zip(columns) {
+        // Finished work piles up: show a handful, and offer to tidy it away.
+        let merged_column = title == "In main";
+        let total = cards.len();
+        let show_all = m.show_all_merged.contains(&root);
+        let cards: Vec<_> = if merged_column && !show_all { cards.into_iter().take(MERGED_SHOWN).collect() } else { cards };
         let mut column = panel(ui)
             .flex_1()
             .min_w(px(250.))
@@ -227,7 +242,24 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                     .items_center()
                     .gap_2()
                     .child(section(title, ui))
-                    .child(badge(cards.len().to_string(), ui)),
+                    .child(badge(total.to_string(), ui))
+                    .child(div().flex_1())
+                    .when(merged_column && total > 0, |el| {
+                        let (app, project) = (model.clone(), root.clone());
+                        el.child(Button::new("project-cleanup").ghost().small().label("Clean up").disabled(busy)
+                            .tooltip("Close these threads and delete their branches. Only work that is already merged is removed.")
+                            .on_click(move |_, window, cx| {
+                                use gpui_kit::component::WindowExt;
+                                let (app, project) = (app.clone(), project.clone());
+                                window.open_alert_dialog(cx, move |d, _, _| {
+                                    let (app, project) = (app.clone(), project.clone());
+                                    d.confirm()
+                                        .title("Clean up finished work?")
+                                        .description("Threads and branches whose work is already merged are closed and removed. Chats move to the archive. Anything unmerged, busy or checked out is left alone.")
+                                        .on_ok(move |_, _, cx| { app.update(cx, |m, cx| m.cleanup_merged(project.clone(), cx)); true })
+                                });
+                            }))
+                    }),
             )
             .child(div().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint).child(hint));
         if cards.is_empty() {
@@ -370,6 +402,14 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
             }
             column = column.child(card);
         }
+        if merged_column && total > MERGED_SHOWN {
+            let (app, project) = (model.clone(), root.clone());
+            column = column.child(
+                Button::new("project-merged-more").ghost().small()
+                    .label(if show_all { "Show fewer".to_string() } else { format!("Show all {total}") })
+                    .on_click(move |_, _, cx| app.update(cx, |m, cx| { if !m.show_all_merged.remove(&project) { m.show_all_merged.insert(project.clone()); } cx.notify(); })),
+            );
+        }
         board = board.child(column);
     }
     page = page.child(board);
@@ -464,6 +504,9 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
     }
     page.child(prs).into_any_element()
 }
+/// Cards shown in the "In main" column before "Show all".
+const MERGED_SHOWN: usize = 5;
+
 fn panel(ui: &Ui) -> Div {
     div()
         .flex()

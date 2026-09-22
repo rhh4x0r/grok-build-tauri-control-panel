@@ -26,6 +26,8 @@ pub struct SidebarView {
     active_ix: usize,
     collapsed: std::collections::HashSet<String>,
     expanded: std::collections::HashSet<String>,
+    /// The project last seen as the one in view, to notice when the user moves to another.
+    last_active: Option<String>,
 }
 
 /// Recency bucket for thread search results.
@@ -66,7 +68,7 @@ impl SidebarView {
             }
         })
         .detach();
-        Self { model, search, active_ix: 0, collapsed: Default::default(), expanded: Default::default() }
+        Self { model, search, active_ix: 0, collapsed: Default::default(), expanded: Default::default(), last_active: None }
     }
 
     fn query(&self, cx: &App) -> String {
@@ -116,7 +118,19 @@ impl SidebarView {
     /// `+`, chevron) at 28px, then its workspace and conversation rows 2px
     /// apart. Git state shows as one 11px subline only when it says something.
     fn group(&self, g: &ProjectGroup, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
-        let collapsed = self.collapsed.contains(&g.root);
+        // Only the project you are in is open by default; a click on the chevron overrides either way.
+        let open_key = format!("project-open:{}", g.root);
+        let in_view = self.model.read(cx).active_project.as_deref() == Some(g.root.as_str());
+        let collapsed = if self.collapsed.contains(&g.root) { true } else if self.expanded.contains(&open_key) { false } else { !in_view };
+        // A closed project still says when it needs you or is busy.
+        let (running, waiting) = {
+            let m = self.model.read(cx);
+            g.threads.iter().filter(|id| !m.archived.contains(id)).filter_map(|id| m.threads.get(id)).fold((false, false), |(run, wait), t| {
+                let t = t.read(cx);
+                let asks = t.thread.open_approvals().count() > 0 || t.meta.status.contains("wait") || t.meta.status.contains("approv");
+                (run || t.thread.presence.turn_active() || t.meta.status == "running", wait || asks)
+            })
+        };
         let root = g.root.clone();
         let root2 = root.clone();
         let app = self.model.clone();
@@ -161,6 +175,18 @@ impl SidebarView {
                         .child(g.name.clone())
                         .on_click(move |_, _, cx| app.update(cx, |m, cx| m.set_active_project(root.clone(), cx))),
                 )
+                .when(collapsed && (running || waiting), |el| {
+                    let (color, hint) = if waiting { (ui.warning, "A thread here is waiting for your permission") } else { (ui.accent, "A thread here is working") };
+                    el.child(
+                        div()
+                            .id(SharedString::from(format!("busy-{}", g.root)))
+                            .size(px(7.))
+                            .flex_shrink_0()
+                            .rounded_full()
+                            .bg(color)
+                            .tooltip(move |window, cx| Tooltip::new(hint).build(window, cx)),
+                    )
+                })
                 .child({
                     let pinned = self.model.read(cx).pinned_projects.contains(&g.root);
                     let pin_app = self.model.clone();
@@ -205,36 +231,13 @@ impl SidebarView {
                         .cursor_pointer()
                         .hover(move |s| s.bg(hover))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            if !this.collapsed.remove(&root2) { this.collapsed.insert(root2.clone()); }
+                            if collapsed { this.collapsed.remove(&root2); this.expanded.insert(open_key.clone()); }
+                            else { this.expanded.remove(&open_key); this.collapsed.insert(root2.clone()); }
                             cx.notify();
                         }))
                         .child(div().size(px(12.)).child(Icon::from(if collapsed { Lucide::ChevronRight } else { Lucide::ChevronDown }))),
                 ),
         );
-        if let Some(status) = self.model.read(cx).project_status.get(&g.root) {
-            if status.error.is_none() {
-                let mut parts: Vec<String> = vec![status.branch.clone()];
-                if status.behind > 0 { parts.push(format!("{} behind", status.behind)); }
-                if status.ahead > 0 { parts.push(format!("{} ahead", status.ahead)); }
-                if status.dirty { parts.push("uncommitted".into()); }
-                if parts.len() > 1 {
-                    group = group.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(Layout::SPACE_XS))
-                            .pl(px(GROUP_INDENT))
-                            .pr(px(Layout::SPACE_SM))
-                            .h(px(14.))
-                            .text_size(px(crate::theme::Type::CAPTION))
-                            .line_height(px(16.))
-                            .text_color(ui.subline())
-                            .child(div().size(px(13.)).child(Icon::from(Lucide::GitBranch)))
-                            .child(parts.join(" · ")),
-                    );
-                }
-            }
-        }
         if collapsed { return group; }
         // Only the few most recently active open threads show until "View more" is opened.
         let more_key = format!("more:{}", g.root);
@@ -788,6 +791,12 @@ impl Render for SidebarView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = Ui::of(cx);
         let groups = self.model.read(cx).groups(cx);
+        let active = self.model.read(cx).active_project.clone();
+        if active != self.last_active {
+            // Arriving in a project opens it, even if it was closed by hand earlier.
+            if let Some(root) = &active { self.collapsed.remove(root); }
+            self.last_active = active;
+        }
         let auth = self.model.read(cx).auth.clone();
         let query = self.query(cx);
         div()

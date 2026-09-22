@@ -51,6 +51,9 @@ pub fn apply_mode(dark: bool, cx: &mut App) {
                 let theme = Theme::global_mut(cx);
                 theme.mode = if dark { ThemeMode::Dark } else { ThemeMode::Light };
                 theme.apply_config(&cfg);
+                // The theme file has no syntax colors, and the kit's fallback is its light palette in both
+                // modes (dark blue keywords on a dark panel). Use the palette made for the mode.
+                theme.highlight_theme = if dark { gpui_kit::component::highlighter::HighlightTheme::default_dark() } else { gpui_kit::component::highlighter::HighlightTheme::default_light() };
                 theme.font_family = FONT_SANS.into();
                 theme.mono_font_family = FONT_MONO.into();
             }

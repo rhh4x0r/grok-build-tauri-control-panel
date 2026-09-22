@@ -62,10 +62,15 @@ pub struct CreateWorktreeRequest {
     pub prefer_grok_cli: bool,
 }
 
+/// Where a project keeps its threads' folders, relative to the project folder.
+pub const PROJECT_THREADS_DIR: &str = ".bombcode/threads";
+
 pub struct WorktreeManager {
     grok_cli: Arc<GrokCli>,
-    /// Root under which managed worktrees are placed (e.g. ~/.grok/worktrees).
+    /// Shared root for thread folders outside any project (the older layout, e.g. ~/.grok/worktrees).
     worktrees_root: PathBuf,
+    /// New thread folders go inside their project, where the person can see them.
+    in_project: bool,
 }
 
 impl WorktreeManager {
@@ -73,7 +78,44 @@ impl WorktreeManager {
         Self {
             grok_cli,
             worktrees_root,
+            in_project: true,
         }
+    }
+
+    /// Keep new thread folders under the shared root instead of inside each project.
+    pub fn outside_projects(mut self) -> Self {
+        self.in_project = false;
+        self
+    }
+
+    /// The folder a project's threads live in.
+    pub fn project_threads_dir(repo: &Path) -> PathBuf {
+        repo.join(PROJECT_THREADS_DIR)
+    }
+
+    /// True for folders this app created and may remove: inside the project's threads folder, or under the shared root.
+    pub fn is_managed(&self, repo: &Path, path: &Path) -> bool {
+        let inside = |base: &Path| {
+            let base = std::fs::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
+            path != base && path.starts_with(&base)
+        };
+        inside(&Self::project_threads_dir(repo)) || inside(&self.worktrees_root)
+    }
+
+    /// Make Git ignore the threads folder for this clone only, without touching the project's `.gitignore`.
+    async fn hide_threads_dir(repo: &Path) -> Result<()> {
+        let common = run_git(repo, &["rev-parse", "--git-common-dir"]).await?;
+        let common = PathBuf::from(common.trim());
+        let common = if common.is_absolute() { common } else { repo.join(common) };
+        let exclude = common.join("info").join("exclude");
+        let existing = tokio::fs::read_to_string(&exclude).await.unwrap_or_default();
+        if existing.lines().any(|l| l.trim() == "/.bombcode/") { return Ok(()); }
+        tokio::fs::create_dir_all(common.join("info")).await?;
+        let mut text = existing;
+        if !text.is_empty() && !text.ends_with('\n') { text.push('\n'); }
+        text.push_str("# Bomb Code keeps each thread's working copy here\n/.bombcode/\n");
+        tokio::fs::write(&exclude, text).await?;
+        Ok(())
     }
 
     pub fn worktrees_root(&self) -> &Path {
@@ -116,9 +158,15 @@ impl WorktreeManager {
             }
         }
 
-        let path = self
-            .worktrees_root
-            .join(format!("{}-{}", req.name, &Uuid::new_v4().to_string()[..8]));
+        let parent = if self.in_project {
+            let dir = Self::project_threads_dir(repo);
+            tokio::fs::create_dir_all(&dir).await?;
+            Self::hide_threads_dir(repo).await?;
+            dir
+        } else {
+            self.worktrees_root.clone()
+        };
+        let path = parent.join(format!("{}-{}", req.name, &Uuid::new_v4().to_string()[..8]));
         let branch = format!("{THREAD_BRANCH_PREFIX}{}", req.name);
         let base = req.base_ref.as_deref().unwrap_or("HEAD");
 
@@ -387,6 +435,41 @@ fn parse_porcelain(out: &str) -> Vec<WorktreeInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_threads_folder_lives_inside_its_project_and_git_does_not_see_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("game");
+        std::fs::create_dir(&repo).unwrap();
+        for args in [vec!["init", "-q", "-b", "main"], vec!["config", "user.name", "Test"], vec!["config", "user.email", "test@example.com"], vec!["commit", "-q", "--allow-empty", "-m", "initial"]] { run_git(&repo, &args).await.unwrap(); }
+        let manager = WorktreeManager::new(Arc::new(GrokCli::new("/nonexistent/grok")), temp.path().join("shared"));
+        let request = |name: &str| CreateWorktreeRequest { name: name.into(), base_ref: None, prefer_grok_cli: false };
+
+        let thread = manager.create(&repo, request("add-scores")).await.unwrap();
+        let repo_real = std::fs::canonicalize(&repo).unwrap();
+        assert!(thread.path.starts_with(repo_real.join(".bombcode/threads")), "{}", thread.path.display());
+        assert!(manager.is_managed(&repo, &thread.path));
+        assert!(!manager.is_managed(&repo, &repo_real), "the project folder itself is never ours to remove");
+        // The project's own status stays clean, and its .gitignore was not touched.
+        assert_eq!(run_git(&repo, &["status", "--porcelain"]).await.unwrap().trim(), "");
+        assert!(!repo.join(".gitignore").exists());
+        // A second thread does not add the ignore rule twice.
+        manager.create(&repo, request("fix-bug")).await.unwrap();
+        let exclude = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
+        assert_eq!(exclude.matches("/.bombcode/").count(), 1);
+        // Work in the thread is a normal checkout of its own branch, and removal works from the new place.
+        std::fs::write(thread.path.join("scores.txt"), "1").unwrap();
+        assert!(!manager.is_clean(&thread.path).await.unwrap());
+        assert_eq!(run_git(&repo, &["status", "--porcelain"]).await.unwrap().trim(), "");
+        manager.remove(&repo, &thread.path.display().to_string(), true).await.unwrap();
+        assert!(!thread.path.exists());
+
+        // The older shared location is still available and still recognised.
+        let shared = WorktreeManager::new(Arc::new(GrokCli::new("/nonexistent/grok")), temp.path().join("shared")).outside_projects();
+        let elsewhere = shared.create(&repo, request("old-style")).await.unwrap();
+        assert!(elsewhere.path.starts_with(std::fs::canonicalize(temp.path().join("shared")).unwrap()));
+        assert!(shared.is_managed(&repo, &elsewhere.path));
+    }
 
     #[test]
     fn parse_worktree_list() {

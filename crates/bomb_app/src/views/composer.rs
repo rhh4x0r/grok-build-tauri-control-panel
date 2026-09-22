@@ -30,8 +30,57 @@ const MAX_TOTAL_BYTES: usize = 12 * 1024 * 1024;
 pub struct Attachment {
     pub name: String,
     pub mime: String,
+    /// Image data sent to the agent. Empty for other files, which travel as a path.
     pub bytes: Vec<u8>,
-    pub image: Arc<Image>,
+    /// Thumbnail, for images.
+    pub image: Option<Arc<Image>>,
+    /// Where a non-image file lives. The agent runs on this machine and opens it itself.
+    pub path: Option<std::path::PathBuf>,
+    pub size: u64,
+}
+
+/// The files a pasted string refers to, when every line of it is the path (or `file://` URL) of an existing file.
+/// Anything else, including prose that merely contains a path, is ordinary text and returns `None`.
+pub fn pasted_file_paths(text: &str) -> Option<Vec<std::path::PathBuf>> {
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if lines.is_empty() || lines.len() > MAX_ATTACHMENTS { return None; }
+    let mut paths = Vec::new();
+    for line in lines {
+        let path = match line.strip_prefix("file://") {
+            // File URLs percent-encode spaces and the like.
+            Some(rest) => std::path::PathBuf::from(percent_decode(rest.strip_prefix("localhost").unwrap_or(rest))),
+            None => std::path::PathBuf::from(line),
+        };
+        if !path.is_absolute() || !path.is_file() { return None; }
+        paths.push(path);
+    }
+    Some(paths)
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let byte = (bytes[i] == b'%').then(|| bytes.get(i + 1..i + 3)).flatten().and_then(|h| std::str::from_utf8(h).ok()).and_then(|h| u8::from_str_radix(h, 16).ok());
+        match byte {
+            Some(byte) => { out.push(byte); i += 3; }
+            None => { out.push(bytes[i]); i += 1; }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// What gets added to a message for attached files that are not images.
+pub fn attached_files_note(files: &[(std::path::PathBuf, u64)]) -> String {
+    let size = |bytes: u64| match bytes {
+        b if b >= 1024 * 1024 => format!("{:.1} MB", b as f64 / (1024.0 * 1024.0)),
+        b if b >= 1024 => format!("{} KB", b.div_ceil(1024)),
+        b => format!("{b} bytes"),
+    };
+    let mut note = String::from(if files.len() == 1 { "Attached file (open it from this path):" } else { "Attached files (open them from these paths):" });
+    for (path, bytes) in files { note.push_str(&format!("\n- {} ({})", path.display(), size(*bytes))); }
+    note
 }
 
 pub struct ComposerView {
@@ -658,9 +707,12 @@ impl ComposerView {
         self.routing_suggestion=None;
         self.destination_ready=None;self.destination_message=None;self.destination_init=None;
         if self.model.read(cx).selected.is_none() { self.sent_draft=Some((text.clone(),self.attachments.clone(),self.model.read(cx).start_failure_serial)); }
+        let files: Vec<(std::path::PathBuf, u64)> = self.attachments.iter().filter_map(|a| a.path.clone().map(|p| (p, a.size))).collect();
+        let text = if files.is_empty() { text } else if text.is_empty() { attached_files_note(&files) } else { format!("{text}\n\n{}", attached_files_note(&files)) };
         let images: Vec<ImageInput> = self
             .attachments
             .drain(..)
+            .filter(|a| a.path.is_none())
             .map(|a| ImageInput {
                 mime_type: a.mime,
                 data: base64::engine::general_purpose::STANDARD.encode(&a.bytes),
@@ -699,13 +751,7 @@ impl ComposerView {
 
     fn attach_path(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
         let Some(format) = format_for_path(path) else {
-            self.model.update(cx, |m, cx| {
-                m.toast(
-                    ToastKind::Warning,
-                    format!("Not an image: {}", path.display()),
-                );
-                cx.notify();
-            });
+            self.attach_file(path, cx);
             return;
         };
         match std::fs::read(path) {
@@ -726,6 +772,25 @@ impl ComposerView {
         }
     }
 
+    /// Any file that is not an image: attached by path, so size and type do not matter.
+    fn attach_file(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        let warn = |this: &mut Self, message: String, cx: &mut Context<Self>| this.model.update(cx, |m, cx| { m.toast(ToastKind::Warning, message); cx.notify(); });
+        let Ok(meta) = std::fs::metadata(path) else { return warn(self, format!("Could not read {}", path.display()), cx); };
+        if meta.is_dir() { return warn(self, "Folders can’t be attached. Name the folder in your message instead.".into(), cx); }
+        if self.attachments.len() >= MAX_ATTACHMENTS { return warn(self, format!("You can attach up to {MAX_ATTACHMENTS} files at once."), cx); }
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if self.attachments.iter().any(|a| a.path.as_deref() == Some(path.as_path())) { return; }
+        self.attachments.push(Attachment {
+            name: path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "file".into()),
+            mime: String::new(),
+            bytes: Vec::new(),
+            image: None,
+            path: Some(path),
+            size: meta.len(),
+        });
+        cx.notify();
+    }
+
     fn attach_bytes(
         &mut self,
         name: String,
@@ -743,7 +808,7 @@ impl ComposerView {
             self.model.update(cx, |m, cx| {
                 m.toast(
                     ToastKind::Warning,
-                    "Attachment limit: 8 images, 12 MB total.",
+                    "Attachment limit: 8 files, and 12 MB of images in total.",
                 );
                 cx.notify();
             });
@@ -753,8 +818,10 @@ impl ComposerView {
         self.attachments.push(Attachment {
             name,
             mime: mime_for(format).to_string(),
+            size: bytes.len() as u64,
             bytes,
-            image,
+            image: Some(image),
+            path: None,
         });
         cx.notify();
     }
@@ -777,14 +844,20 @@ impl ComposerView {
                     took = true;
                 }
                 ClipboardEntry::ExternalPaths(paths) => {
+                    // Files copied in Finder: images as images, everything else by reference.
                     for p in paths.paths() {
-                        if format_for_path(p).is_some() {
-                            self.attach_path(p, cx);
-                            took = true;
-                        }
+                        self.attach_path(p, cx);
+                        took = true;
                     }
                 }
-                ClipboardEntry::String(_) => {}
+                // Some apps (screenshot tools, file managers) put a file on the clipboard as its path.
+                // Text that is nothing but paths to existing files is an attachment, not something to type.
+                ClipboardEntry::String(text) => {
+                    if let Some(paths) = pasted_file_paths(text.text()) {
+                        for p in &paths { self.attach_path(p, cx); }
+                        took = true;
+                    }
+                }
             }
         }
         took
@@ -812,21 +885,24 @@ impl ComposerView {
                 .px_4()
                 .pt_3()
                 .children(self.attachments.iter().enumerate().map(|(ix, a)| {
-                    div()
+                    let tile = div()
                         .id(("att", ix))
                         .relative()
-                        .size(px(56.))
+                        .h(px(56.))
                         .rounded(px(8.))
                         .overflow_hidden()
                         .border_1()
                         .border_color(border)
                         .cursor_pointer()
-                        .on_click(cx.listener(move |this, _, _, cx| this.remove_attachment(ix, cx)))
-                        .child(
-                            img(a.image.clone())
-                                .size_full()
-                                .object_fit(ObjectFit::Cover),
-                        )
+                        .on_click(cx.listener(move |this, _, _, cx| this.remove_attachment(ix, cx)));
+                    let tile = match &a.image {
+                        Some(image) => tile.w(px(56.)).child(img(image.clone()).size_full().object_fit(ObjectFit::Cover)),
+                        // Other files: an icon and the name, wide enough to read.
+                        None => tile.max_w(px(220.)).pl_3().pr(px(26.)).flex().items_center().gap_2().bg(ui.ink(0.04))
+                            .child(Icon::from(Lucide::File).size(px(16.)).text_color(ui.text_muted))
+                            .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(px(crate::theme::Type::SMALL)).child(a.name.clone())),
+                    };
+                    tile
                         .child(
                             div()
                                 .absolute()
@@ -1790,8 +1866,11 @@ impl Render for ComposerView {
             }))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
                 if ev.keystroke.key == "escape" && this.foundry_setup {this.foundry_setup=false;cx.stop_propagation();cx.notify();return;}
-                let k = &ev.keystroke;
-                if k.modifiers.platform && k.key == "v" && this.paste_from_clipboard(cx) {
+            }))
+            // ⌘V reaches the text box as its own Paste action before any key listener here runs, so
+            // attachments are taken in the capture phase, on the way down. Plain text is left to the box.
+            .capture_action(cx.listener(|this, _: &gpui_kit::component::input::Paste, _, cx| {
+                if this.paste_from_clipboard(cx) {
                     cx.stop_propagation();
                 }
             }))
@@ -2150,3 +2229,33 @@ mod slash_tests {
 
 #[path = "model_suggestions.rs"]
 mod model_suggestions;
+
+#[cfg(test)]
+mod attachment_tests {
+    #[test]
+    fn a_pasted_path_to_a_real_file_is_an_attachment_but_prose_is_not() {
+        use super::pasted_file_paths as paths;
+        let dir = std::env::temp_dir().join(format!("bomb-paste-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shot = dir.join("CleanShot 2026-09-21 at 5.50.14 PM.png");
+        let notes = dir.join("notes.txt");
+        std::fs::write(&shot, b"png").unwrap();
+        std::fs::write(&notes, b"n").unwrap();
+        assert_eq!(paths(&shot.display().to_string()), Some(vec![shot.clone()]));
+        assert_eq!(paths(&format!("  {}\n{}\n", shot.display(), notes.display())), Some(vec![shot.clone(), notes.clone()]));
+        assert_eq!(paths(&format!("file://{}", shot.display().to_string().replace(' ', "%20"))), Some(vec![shot.clone()]));
+        // Ordinary text, a path inside a sentence, a missing file, a folder and a relative path all stay text.
+        for text in ["hello".to_string(), format!("look at {}", shot.display()), dir.join("missing.png").display().to_string(), dir.display().to_string(), "src/main.rs".to_string(), String::new()] {
+            assert_eq!(paths(&text), None, "{text}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn other_files_are_named_by_path_and_size() {
+        let one = super::attached_files_note(&[("/Users/max/spec.pdf".into(), 2_400_000)]);
+        assert_eq!(one, "Attached file (open it from this path):\n- /Users/max/spec.pdf (2.3 MB)");
+        let two = super::attached_files_note(&[("/a/data.csv".into(), 1500), ("/a/empty.txt".into(), 12)]);
+        assert_eq!(two, "Attached files (open them from these paths):\n- /a/data.csv (2 KB)\n- /a/empty.txt (12 bytes)");
+    }
+}
