@@ -514,6 +514,41 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
         board = board.child(column);
     }
     page = page.child(board);
+    // The same project's other copy has threads of its own; list them here so nothing feels lost.
+    if let Some(other) = m.linked_project(&root) {
+        let other_server = crate::runtime::servers(cx).for_root(&other).map(|s| s.config.name.clone());
+        let here_server = crate::runtime::servers(cx).for_root(&root).map(|s| s.config.name.clone());
+        let mut others: Vec<_> = m.workspaces.iter().filter(|w| w.project_root == other && w.archived_at.is_none() && !w.inline).cloned().collect();
+        others.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        let title = match &other_server { Some(name) => format!("Threads on {name}"), None => "Threads on this Mac".to_string() };
+        let mut list = panel(ui).child(div().flex().items_center().gap_2().child(section(&title, ui)).child(badge(others.len().to_string(), ui)));
+        list = list.child(div().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint).child(match (&other_server, &here_server) {
+            (Some(name), _) => format!("They work on the copy on {name} and keep running with this Mac closed. Their saved work reaches this copy when you sync."),
+            (None, Some(name)) => format!("They work on this Mac's copy, so their agents run here. Their saved work reaches {name} when you sync."),
+            (None, None) => "They work on the other copy. Their saved work reaches this copy when you sync.".to_string(),
+        }));
+        if others.is_empty() {
+            list = list.child(div().py_3().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child("No open threads there"));
+        }
+        for w in others {
+            let threads: Vec<_> = w.threads.iter().filter_map(|t| uuid::Uuid::parse_str(t).ok()).filter_map(|id| m.threads.get(&id)).collect();
+            let name = if let [only] = threads.as_slice() { only.read(cx).title() } else { w.name.clone() };
+            let working = threads.iter().any(|t| t.read(cx).thread.presence.turn_active());
+            let agent = threads.first().map(|t| { let meta = &t.read(cx).meta; if meta.model.is_empty() { meta.backend.clone() } else { meta.model.clone() } });
+            let open_app = model.clone();
+            let open_id = w.id.clone();
+            list = list.child(
+                div().flex().items_center().gap_2().py_1()
+                    .child(Icon::from(if other_server.is_some() { Lucide::Server } else { Lucide::Laptop }).size(px(13.)).text_color(ui.text_muted))
+                    .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().child(name))
+                    .when(working, |el| el.child(badge("Agent working".into(), ui)))
+                    .child(div().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint).child(format!("{}{}", agent.map(|a| format!("{a} · ")).unwrap_or_default(), w.branch)))
+                    .child(Button::new(SharedString::from(format!("other-open-{}", w.id))).outline().small().label("Open chat")
+                        .on_click(move |_, _, cx| open_app.update(cx, |m, cx| m.open_workspace(open_id.clone(), cx)))),
+            );
+        }
+        page = page.child(list);
+    }
     if overview.prs.is_empty() {
         return page.into_any_element();
     }

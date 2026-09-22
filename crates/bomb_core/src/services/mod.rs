@@ -1131,12 +1131,36 @@ async fn resume_saved_session(
     Ok(None)
 }
 
+/// The prompt without the note the app adds for attached files, so a name comes from the
+/// person's own words. A message that is only attachments is named after the first file.
+fn without_attachment_note(prompt: &str) -> String {
+    let mut own = Vec::new();
+    let mut in_note = false;
+    let mut first_file: Option<String> = None;
+    for line in prompt.lines() {
+        if line.starts_with("Attached file") && line.ends_with(':') { in_note = true; continue; }
+        if in_note && line.starts_with("- ") {
+            if first_file.is_none() {
+                let path = line[2..].rsplit_once(" (").map(|(p, _)| p).unwrap_or(&line[2..]);
+                let stem = std::path::Path::new(path).file_stem().map(|s| s.to_string_lossy().replace(['_', '-'], " "));
+                first_file = stem.filter(|s| !s.trim().is_empty());
+            }
+            continue;
+        }
+        in_note = false;
+        own.push(line);
+    }
+    let own = own.join("\n");
+    if own.trim().is_empty() { first_file.unwrap_or(own) } else { own }
+}
+
 /// Cheap instant label: first significant words of the prompt.
 fn prompt_slug(prompt: &str) -> String {
     const STOP: &[&str] = &[
         "a", "an", "the", "to", "of", "in", "on", "for", "and", "or", "is", "it", "that", "this",
         "please", "can", "you", "me", "my", "i", "we",
     ];
+    let prompt = without_attachment_note(prompt);
     let words: Vec<&str> = prompt
         .split_whitespace()
         .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
@@ -2702,3 +2726,13 @@ mod speed_selection_tests {
 pub mod model_catalog;
 
 pub mod model_suggestions;
+
+#[cfg(test)]
+mod slug_tests {
+    #[test]
+    fn a_thread_is_named_from_the_persons_words_not_the_attachment_note() {
+        let note = "Attached file (open it from this path):\n- /Users/max/Downloads/Metacanon_Conversation_Compilation.pdf (634 KB)";
+        assert_eq!(super::prompt_slug(&format!("Build the journey page\n\n{note}")), "Build journey page");
+        assert_eq!(super::prompt_slug(note), "Metacanon Conversation Compilation");
+    }
+}

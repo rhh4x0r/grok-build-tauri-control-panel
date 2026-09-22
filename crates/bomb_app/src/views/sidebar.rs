@@ -140,7 +140,8 @@ impl SidebarView {
         let hover = ui.hover;
         let rows: Vec<_> = {
             let m = self.model.read(cx);
-            let mut rows: Vec<_> = m.workspaces.iter().filter(|w| w.project_root == root).cloned().map(|w| {
+            // Threads on a project's Mac copy list under the same entry as the server's.
+            let mut rows: Vec<_> = m.workspaces.iter().filter(|w| m.sidebar_root(&w.project_root) == root).cloned().map(|w| {
                 let threads: Vec<_> = w.threads.iter().filter_map(|t| Uuid::parse_str(t).ok()).filter_map(|id| m.threads.get(&id)).collect();
                 let key = crate::models::app::SortKey {
                     name: if let [only] = threads.as_slice() { only.read(cx).title() } else { w.name.clone() },

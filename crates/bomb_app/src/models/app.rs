@@ -1374,7 +1374,11 @@ impl AppModel {
                 m.starting = false;
                 match res {
                     Ok(placed) => { let text = note(&placed, &text); m.send_prompt(text, images, cx); }
-                    Err(e) => m.fail(format!("Could not send the attached files to the server: {e}"), cx),
+                    Err(e) => {
+                        // Same as a failed start: the composer keeps the unsent prompt.
+                        m.start_failure_serial += 1;
+                        m.fail(format!("Could not send the attached files to the server: {e}"), cx);
+                    }
                 }
             });
         });
