@@ -109,6 +109,19 @@ pub async fn dispatch(state: &AppState, origin: &str, method: &str, p: Value) ->
             let bundle: String = arg(&p, "bundle_path")?;
             out(services::project_sync::import_bundle(&root, std::path::Path::new(&bundle)).await?)
         }
+        // A file attached from a Mac to a thread here. The server places it in the person's folder and
+        // returns the path the agent should be told about; the name is sanitised, the file is a stream.
+        "store_attachment" => {
+            let bundle: String = arg(&p, "bundle_path")?;
+            let name: String = arg(&p, "name")?;
+            let safe: String = std::path::Path::new(&name).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into())
+                .chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ' | '(' | ')') { c } else { '_' }).collect();
+            let dir = state.paths.home_dir.join("attachments");
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let target = dir.join(format!("{}-{}", &Uuid::new_v4().to_string()[..8], safe.trim()));
+            std::fs::rename(&bundle, &target).or_else(|_| std::fs::copy(&bundle, &target).map(|_| ())).map_err(|e| e.to_string())?;
+            Ok(json!(target.display().to_string()))
+        }
         "import_project" => {
             let (name, bundle): (String, String) = (arg(&p, "name")?, arg(&p, "bundle_path")?);
             let path = server_projects_dir(state).join(project_slug(&name)?);

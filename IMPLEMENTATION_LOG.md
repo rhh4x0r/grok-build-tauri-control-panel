@@ -787,3 +787,10 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 - Pushed `server-projects` to the fork. The `linux-core` workflow passed on its first run: the server crates build and their tests pass on Ubuntu, and release `bombd` binaries for x86_64 and aarch64 were produced (the ARM runner label was right). Both are in `~/.bombcode/server/` on Max's Mac for the in-app installer; they need glibc 2.35 or newer.
 - Work paused here at Max's request. `docs/SERVER_PROJECTS_NEXT.md` records what is built, what has and has not been checked, and the next steps in order (look at the screens, one-person VPS trial, real flow, provider sign-ins, shared-server trial, merge decision). The approved plan is now in the repo at `docs/plan/server_first_projects_plan.md`.
 - Still true: nothing has run on a real server and none of the new screens has been seen.
+
+
+## 2026-09-21 — server-projects rebased onto gpui-rewrite; attachments for server threads
+
+- `server-projects` now sits on top of today's `gpui-rewrite` work (UI pass, overlap fix, virtualised transcript). Conflicts were only in appended tests, the log, model fields and the Settings page list; both sides were kept, with Worktrees staying under Advanced and Servers added as its own page.
+- Attachments on a server thread: a Mac path means nothing to an agent on a VPS, so files attached to a message in a server project are uploaded first (`store_attachment`, streamed like a bundle) into `~/attachments` on the server with a sanitised name, and the message names the paths there. Local projects are unchanged. The loopback test covers the upload, the sanitised name and that a client cannot name a server file.
+- All suites pass serially on the rebased branch (bomb_app 27, bomb_core 77 +4 ignored, bomb_server 9, bomb_proto 2, bomb_link 2, grok_worktree 6). Next: install on Max's VPS.

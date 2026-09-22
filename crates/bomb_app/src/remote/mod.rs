@@ -370,6 +370,15 @@ mod tests {
         assert!(copy.join("about.html").exists());
         assert!(std::fs::read_dir(&scratch).unwrap().next().is_none(), "no bundles are left lying around");
 
+        // A file attached to a server thread is uploaded and lands in the person's own folder there.
+        let local_file = temp.path().join("notes (final).md");
+        std::fs::write(&local_file, "remember this").unwrap();
+        let stream = remote.client().unwrap().upload(&local_file).await.unwrap();
+        let stored: String = remote.call("store_attachment", json!({ "stream": stream, "name": "../../etc/notes (final).md" })).await.unwrap();
+        assert!(stored.contains("/attachments/") && stored.ends_with("-notes (final).md"), "{stored}");
+        assert_eq!(std::fs::read_to_string(&stored).unwrap(), "remember this");
+        assert!(remote.request("store_attachment", json!({ "name": "x", "bundle_path": "/etc/passwd" })).await.is_err(), "a client cannot name a server file");
+
         // A terminal in the server project: typed here, run there, screen rendered here.
         let terminal = live::open_terminal(remote.clone(), &site).await.unwrap();
         terminal.write(b"printf 'BOMB_%s\\n' ON_SERVER; ls\r").unwrap();

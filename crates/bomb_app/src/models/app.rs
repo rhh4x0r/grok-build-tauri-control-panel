@@ -1272,6 +1272,38 @@ impl AppModel {
 
     // ── prompts / sessions ──────────────────────────────────────────────
 
+    /// Files attached to a message. On this Mac the agent opens them where they are; for a project on a
+    /// server they are uploaded first and the message names their paths there.
+    pub fn send_prompt_with_files(&mut self, text: String, images: Vec<ImageInput>, files: Vec<(PathBuf, u64)>, cx: &mut Context<Self>) {
+        let note = |files: &[(PathBuf, u64)], text: &str| if files.is_empty() { text.to_string() } else if text.is_empty() { crate::views::composer::attached_files_note(files) } else { format!("{text}\n\n{}", crate::views::composer::attached_files_note(files)) };
+        let remote = self.active_project.as_deref().and_then(|root| crate::runtime::servers(cx).for_root(root));
+        let (Some(remote), false) = (remote, files.is_empty()) else {
+            let text = note(&files, &text);
+            return self.send_prompt(text, images, cx);
+        };
+        self.starting = true; cx.notify();
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move {
+            let client = remote.client()?;
+            let mut placed = Vec::new();
+            for (path, size) in &files {
+                let stream = client.upload(path).await?;
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
+                let there: String = client.request("store_attachment", serde_json::json!({ "stream": stream, "name": name })).await.and_then(|v| v.as_str().map(str::to_owned).ok_or_else(|| "bad reply".to_string()))?;
+                placed.push((PathBuf::from(there), *size));
+            }
+            Ok::<_, String>(placed)
+        }, move |res, cx| {
+            let _ = this.update(cx, |m, cx| {
+                m.starting = false;
+                match res {
+                    Ok(placed) => { let text = note(&placed, &text); m.send_prompt(text, images, cx); }
+                    Err(e) => m.fail(format!("Could not send the attached files to the server: {e}"), cx),
+                }
+            });
+        });
+    }
+
     /// Send to the selected thread, or start a new one in the active project.
     pub fn send_prompt(&mut self, text: String, images: Vec<ImageInput>, cx: &mut Context<Self>) {
         if std::env::var("BOMB_SMOKE").ok().as_deref() != Some("1") && !self.model_ready() {

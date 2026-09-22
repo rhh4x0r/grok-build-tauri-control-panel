@@ -708,7 +708,6 @@ impl ComposerView {
         self.destination_ready=None;self.destination_message=None;self.destination_init=None;
         if self.model.read(cx).selected.is_none() { self.sent_draft=Some((text.clone(),self.attachments.clone(),self.model.read(cx).start_failure_serial)); }
         let files: Vec<(std::path::PathBuf, u64)> = self.attachments.iter().filter_map(|a| a.path.clone().map(|p| (p, a.size))).collect();
-        let text = if files.is_empty() { text } else if text.is_empty() { attached_files_note(&files) } else { format!("{text}\n\n{}", attached_files_note(&files)) };
         let images: Vec<ImageInput> = self
             .attachments
             .drain(..)
@@ -721,7 +720,7 @@ impl ComposerView {
             .collect();
         self.input.update(cx, |s, cx| s.set_value("", window, cx));
         self.model
-            .update(cx, |m, cx| m.send_prompt(text, images, cx));
+            .update(cx, |m, cx| m.send_prompt_with_files(text, images, files, cx));
         self.focus(window, cx);
     }
 
