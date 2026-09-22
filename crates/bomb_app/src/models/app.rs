@@ -1189,6 +1189,11 @@ impl AppModel {
                                 // Saved rows drop an approval's id and choices; a server thread may be
                                 // waiting on one that was asked before this Mac connected.
                                 if remote { for approval in &snapshot.pending_approvals { t.apply(approval, cx); } }
+                                // The agent may still be working there: say so now, not at its next event.
+                                if remote && (t.meta.status == "running" || t.meta.status.contains("wait")) {
+                                    let ch = t.thread.resume_in_progress(std::time::Instant::now());
+                                    t.absorb(&ch, cx);
+                                }
                             }
                         }
                         Err(e) => tracing::warn!(%id, error = %e, "transcript load failed"),

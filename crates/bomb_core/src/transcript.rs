@@ -190,6 +190,15 @@ impl Thread {
             })
     }
 
+    /// A saved thread whose agent is still working elsewhere (on a server): show it as in progress
+    /// right away instead of waiting for its next event to arrive.
+    pub fn resume_in_progress(&mut self, now: Instant) -> Vec<Change> {
+        if self.presence.turn_active() { return Vec::new(); }
+        self.presence = Presence::default();
+        self.presence.signal(Phase::Think, Patch::default(), now);
+        vec![Change::Presence]
+    }
+
     /// Rebuild from persisted rows (roles written by `persist_control_event`
     /// and `send_prompt`). Approval cards come back inert.
     pub fn hydrate(&mut self, rows: &[TranscriptEntry]) {
@@ -1157,6 +1166,20 @@ pub fn approval_outcome_label(resolution: &str, kind: Option<&str>) -> Option<&'
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_saved_thread_still_running_elsewhere_shows_as_working() {
+        let now = Instant::now();
+        let mut t = Thread::new();
+        t.hydrate(&[]);
+        assert!(!t.presence.turn_active());
+        t.resume_in_progress(now);
+        assert!(t.presence.turn_active());
+        // Its next real event carries on from there rather than restarting the turn.
+        t.apply(&ControlEvent::AgentMessage { session_id: sid(), text: "still here".into(), at: Utc::now() }, now);
+        assert!(t.presence.turn_active());
+        assert_eq!(t.entries.len(), 1);
+    }
+
     #[test]
     fn a_saved_answer_joins_its_request_instead_of_adding_a_line() {
         use grok_persistence::TranscriptEntry;
