@@ -84,9 +84,9 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                                 div().flex().gap_2()
                                     .child(
                                         Button::new("project-sync").outline().small().icon(Lucide::RefreshCw)
-                                            .label(if busy { "Syncing…" } else if on_server { "Sync with this Mac’s copy" } else { "Sync with server" })
+                                            .label(if busy { "Syncing…" } else { "Sync both ways" })
                                             .disabled(busy)
-                                            .tooltip("Sends new work each way. Nothing is overwritten: if both sides changed the same branch, it is kept for a merge.")
+                                            .tooltip("Sends saved work in both directions: the server gets what this Mac has, this Mac gets what the server has. Nothing is overwritten; a branch changed on both sides is kept for a merge. Unsaved work in server threads is saved first.")
                                             .on_click(move |_, _, cx| app.update(cx, |m, cx| m.sync_project(cx))),
                                     )
                                     .child(
@@ -148,6 +148,9 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                         )),
                 ),
         );
+    if let Some(state) = m.sync_state.get(&root).filter(|_| m.linked_project(&root).is_some()) {
+        page = page.child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(format!("Copies: {state}")));
+    }
     let overview = match data {
         Some(Ok(data)) => data,
         Some(Err(error)) => {

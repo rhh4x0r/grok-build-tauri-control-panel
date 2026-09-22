@@ -165,6 +165,8 @@ pub struct AppModel {
     server_preview: Option<ServerPreview>,
     /// A provider sign-in to show in a server terminal: (folder on the server, command, title). The root view opens it.
     pub server_login_request: Option<(String, String, String)>,
+    /// For a linked project: which copy is ahead, as last checked.
+    pub sync_state: HashMap<String, String>,
     /// A send, download or sync is running.
     pub syncing: bool,
     /// A pairing attempt is in flight.
@@ -233,6 +235,7 @@ impl AppModel {
             project_links: Vec::new(),
             server_preview: None,
             server_login_request: None,
+            sync_state: HashMap::new(),
             syncing: false,
             pairing: false,
             sidebar_sort: SidebarSort::default(),
@@ -279,6 +282,7 @@ impl AppModel {
 
     pub fn refresh_project_overview(&mut self, cx: &mut Context<Self>) {
         let Some(root) = self.active_project.clone() else { return; };
+        self.refresh_sync_state(cx);
         if !self.overview_loading.insert(root.clone()) { return; }
         let key = root.clone();
         let this = cx.entity().downgrade();
@@ -589,6 +593,20 @@ impl AppModel {
         });
     }
 
+    /// Ask which copy is ahead, for the note beside the Sync button.
+    pub fn refresh_sync_state(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.active_project.clone() else { return; };
+        let Some(other) = self.linked_project(&root) else { return; };
+        let (local, server_root) = if crate::remote::is_server_root(&root) { (other, root.clone()) } else { (root.clone(), other) };
+        let Some(remote) = crate::runtime::servers(cx).for_root(&server_root) else { return; };
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move { crate::remote::sync::compare(&remote, &local, &server_root).await.map(|c| c.summary()) }, move |res, cx| {
+            let _ = this.update(cx, |m, cx| {
+                if let Ok(summary) = res { m.sync_state.insert(root.clone(), summary); cx.notify(); }
+            });
+        });
+    }
+
     /// Bring this Mac's copy and the server's copy of the project in view up to date with each other.
     pub fn sync_project(&mut self, cx: &mut Context<Self>) {
         let Some(root) = self.active_project.clone() else { return; };
@@ -624,7 +642,7 @@ impl AppModel {
                     }
                     Err(e) => m.fail(e, cx),
                 }
-                m.refresh_project_overview(cx); m.refresh_project_status(false, cx); m.refresh_servers(cx);
+                m.refresh_project_overview(cx); m.refresh_project_status(false, cx); m.refresh_servers(cx); m.refresh_sync_state(cx);
                 cx.notify();
             });
         });

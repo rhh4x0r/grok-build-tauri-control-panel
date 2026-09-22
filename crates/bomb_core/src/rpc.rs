@@ -117,6 +117,15 @@ pub async fn dispatch(state: &AppState, origin: &str, method: &str, p: Value) ->
 
         // Git history between this core's copy of a project and a Mac's. `bundle_path` is filled in by the
         // server from an uploaded stream; a client can never name a file on this machine.
+        "has_commits" => {
+            let root = own_project(state, &p).await?;
+            let shas: Vec<String> = arg(&p, "shas")?;
+            let mut have = Vec::new();
+            for sha in shas.iter().filter(|s| s.len() >= 7 && s.bytes().all(|b| b.is_ascii_hexdigit())) {
+                if grok_worktree::run_git(std::path::Path::new(&root), &["cat-file", "-e", &format!("{sha}^{{commit}}")]).await.is_ok() { have.push(sha.clone()); }
+            }
+            Ok(json!(have))
+        }
         "branch_tips" => { let root = own_project(state, &p).await?; out(services::project_sync::branch_tips(&root).await?) }
         "import_bundle" => {
             let root = own_project(state, &p).await?;

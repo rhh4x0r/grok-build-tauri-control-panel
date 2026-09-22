@@ -103,3 +103,65 @@ pub async fn check_out_if_clean(local_root: &str, branch: &str) -> Result<bool, 
     if !run_git(root, &["status", "--porcelain", "--untracked-files=no"]).await.map_err(|e| e.to_string())?.trim().is_empty() { return Ok(false); }
     Ok(run_git(root, &["checkout", "--quiet", branch]).await.is_ok())
 }
+
+/// How the two copies stand before a sync, in words a person can act on.
+#[derive(Debug, Default, PartialEq)]
+pub struct Comparison {
+    /// Branches where the server has commits the Mac lacks.
+    pub server_ahead: Vec<String>,
+    /// Branches where the Mac has commits the server lacks.
+    pub mac_ahead: Vec<String>,
+    /// Branches changed on both sides.
+    pub diverged: Vec<String>,
+}
+
+impl Comparison {
+    pub fn summary(&self) -> String {
+        let list = |v: &[String]| v.join(", ");
+        let mut parts = Vec::new();
+        if !self.server_ahead.is_empty() { parts.push(format!("Server is ahead on {}", list(&self.server_ahead))); }
+        if !self.mac_ahead.is_empty() { parts.push(format!("This Mac is ahead on {}", list(&self.mac_ahead))); }
+        if !self.diverged.is_empty() { parts.push(format!("Changed on both sides: {}", list(&self.diverged))); }
+        if parts.is_empty() { "Both copies have the same saved work.".into() } else { parts.join(" · ") }
+    }
+}
+
+/// Compare saved work on both sides without moving anything.
+pub async fn compare(remote: &RemoteCore, local_root: &str, server_root: &str) -> Result<Comparison, String> {
+    let server_path = remote.path_of(server_root).to_string();
+    let server: Vec<(String, String)> = remote.call("branch_tips", json!({ "root": server_path })).await?;
+    let local = project_sync::branch_tips(local_root).await?;
+    let local_shas: Vec<String> = local.iter().map(|(_, s)| s.clone()).collect();
+    let server_has_local: Vec<String> = remote.call("has_commits", json!({ "root": server_path, "shas": local_shas })).await?;
+    let root = Path::new(local_root);
+    let mut out = Comparison::default();
+    for (branch, server_tip) in &server {
+        let Some((_, local_tip)) = local.iter().find(|(b, _)| b == branch) else { out.server_ahead.push(branch.clone()); continue; };
+        if local_tip == server_tip { continue; }
+        let mac_has_server_tip = grok_worktree::run_git(root, &["cat-file", "-e", &format!("{server_tip}^{{commit}}")]).await.is_ok();
+        let server_has_mac_tip = server_has_local.contains(local_tip);
+        match (mac_has_server_tip, server_has_mac_tip) {
+            (true, false) => out.mac_ahead.push(branch.clone()),
+            (false, true) => out.server_ahead.push(branch.clone()),
+            (false, false) => out.diverged.push(branch.clone()),
+            // Both have both tips yet they differ: a rewind on one side; report it as changed on both.
+            (true, true) => out.diverged.push(branch.clone()),
+        }
+    }
+    for (branch, _) in &local {
+        if !server.iter().any(|(b, _)| b == branch) { out.mac_ahead.push(branch.clone()); }
+    }
+    for v in [&mut out.server_ahead, &mut out.mac_ahead, &mut out.diverged] { v.sort(); v.dedup(); }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod comparison_tests {
+    use super::Comparison;
+    #[test]
+    fn the_summary_names_who_is_ahead() {
+        assert_eq!(Comparison::default().summary(), "Both copies have the same saved work.");
+        let c = Comparison { server_ahead: vec!["bomb/tetris".into()], mac_ahead: vec![], diverged: vec!["main".into()] };
+        assert_eq!(c.summary(), "Server is ahead on bomb/tetris · Changed on both sides: main");
+    }
+}
