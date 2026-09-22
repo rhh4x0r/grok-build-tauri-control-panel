@@ -120,7 +120,8 @@ impl SidebarView {
     fn group(&self, g: &ProjectGroup, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
         // Only the project you are in is open by default; a click on the chevron overrides either way.
         let open_key = format!("project-open:{}", g.root);
-        let in_view = self.model.read(cx).active_project.as_deref() == Some(g.root.as_str());
+        // A project's Mac copy counts as the same project.
+        let in_view = { let m = self.model.read(cx); m.active_project.as_deref().is_some_and(|a| m.sidebar_root(a) == g.root) };
         let collapsed = if self.collapsed.contains(&g.root) { true } else if self.expanded.contains(&open_key) { false } else { !in_view };
         // A closed project still says when it needs you or is busy.
         let (running, waiting) = {
@@ -545,6 +546,10 @@ impl SidebarView {
             .as_deref()
             .and_then(|w| std::path::Path::new(w).file_name())
             .map(|s| s.to_string_lossy().to_string());
+        // Server and Mac threads of one project sit together; say where each one runs.
+        let thread_root = tm.meta.project_root.clone().unwrap_or_else(|| tm.meta.cwd.clone());
+        let runs_on_server = crate::remote::is_server_root(&thread_root);
+        let mixed = self.model.read(cx).project_links.iter().any(|l| l.local == thread_root || l.server == thread_root);
         let backend = tm.meta.backend.clone();
         let current = grok_persistence::ModelUsage { backend: backend.clone(), model: tm.meta.model.clone() };
         let history = tm.meta.models_used.clone();
@@ -639,6 +644,18 @@ impl SidebarView {
                             .whitespace_nowrap()
                             .child(title),
                     )
+                    .when(mixed, |el| {
+                        let (icon, hint) = if runs_on_server { (Lucide::Server, "Runs on the server") } else { (Lucide::Laptop, "Runs on this Mac") };
+                        el.child(
+                            div()
+                                .id(SharedString::from(format!("where-{id}")))
+                                .size(px(12.))
+                                .flex_shrink_0()
+                                .text_color(ui.text_faint)
+                                .tooltip(move |window, cx| Tooltip::new(hint).build(window, cx))
+                                .child(Icon::from(icon)),
+                        )
+                    })
                     .when(project.is_empty(), |el| el.child(status_corner(state, &updated, ui))),
             )
             .when_some(branch, |el, b| {

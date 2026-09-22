@@ -93,3 +93,13 @@ pub async fn sync(remote: &RemoteCore, local_root: &str, server_root: &str, temp
     };
     Ok(format!("{} · {}", project_sync::summarize("on the server", &up), project_sync::summarize("on this Mac", &down)))
 }
+
+/// Put the Mac copy on `branch` so its folder shows that work, but only when nothing unsaved is in the way.
+pub async fn check_out_if_clean(local_root: &str, branch: &str) -> Result<bool, String> {
+    use grok_worktree::run_git;
+    let root = Path::new(local_root);
+    if run_git(root, &["branch", "--show-current"]).await.map_err(|e| e.to_string())?.trim() == branch { return Ok(false); }
+    if run_git(root, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")]).await.is_err() { return Ok(false); }
+    if !run_git(root, &["status", "--porcelain", "--untracked-files=no"]).await.map_err(|e| e.to_string())?.trim().is_empty() { return Ok(false); }
+    Ok(run_git(root, &["checkout", "--quiet", branch]).await.is_ok())
+}

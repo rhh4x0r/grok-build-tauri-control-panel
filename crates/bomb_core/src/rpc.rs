@@ -83,6 +83,20 @@ pub async fn dispatch(state: &AppState, origin: &str, method: &str, p: Value) ->
         "merge_request" => out(workspaces::merge_request(state, arg(&p, "id")?).await?),
         "is_merged" => { let id: String = arg(&p, "id")?; out(workspaces::is_merged(state, &id).await?) }
         "close_feature" => out(workspaces::close_feature(state, arg(&p, "id")?).await?),
+        // Save unsaved edits in every idle thread of a project, so a sync carries the real work. Busy threads are skipped.
+        "checkpoint_project" => {
+            let root: String = arg(&p, "root")?;
+            let message: String = arg::<Option<String>>(&p, "message")?.unwrap_or_else(|| "Checkpoint".into());
+            let mut saved = 0usize;
+            for w in state.persistence.list_workspaces().map_err(|e| e.to_string())? {
+                if w.project_root != root || w.inline || w.shared_checkout || w.archived_at.is_some() { continue; }
+                if workspaces::ensure_idle(state, &w).is_err() { continue; }
+                let path = std::path::Path::new(&w.path);
+                if !path.exists() { continue; }
+                if state.worktrees.commit_all(path, &message).await.unwrap_or(false) { saved += 1; }
+            }
+            Ok(json!(saved))
+        }
         "checkpoint" => out(workspaces::workspace_action(state, arg(&p, "id")?, "checkpoint".into(), arg::<Option<String>>(&p, "message")?.unwrap_or_else(|| "Checkpoint".into())).await?),
         "update_from_base" => out(workspaces::workspace_action(state, arg(&p, "id")?, "update".into(), String::new()).await?),
 

@@ -46,12 +46,23 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(project_name(&root)),
                         )
-                        .child(
+                        .child({
+                            // Where this copy lives, in words, and whether the other copy exists.
+                            let server = crate::runtime::servers(cx).for_root(&root);
+                            let other = m.linked_project(&root);
+                            let where_ = match (&server, &other) {
+                                (Some(s), Some(_)) => format!("On {} · you also have a copy on this Mac", s.config.name),
+                                (Some(s), None) => format!("On {} · threads keep running with this Mac closed", s.config.name),
+                                (None, Some(_)) => "Your copy on this Mac of a project that lives on a server".to_string(),
+                                (None, None) => "On this Mac".to_string(),
+                            };
                             div()
-                                .text_size(px(crate::theme::Type::CAPTION))
-                                .text_color(ui.text_faint)
-                                .child(root.clone()),
-                        ),
+                                .flex()
+                                .flex_col()
+                                .gap_0p5()
+                                .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(where_))
+                                .child(div().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint).child(server.as_ref().map(|s| s.path_of(&root).to_string()).unwrap_or_else(|| root.clone())))
+                        }),
                 )
                 .child(
                     div()

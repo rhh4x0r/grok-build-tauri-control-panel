@@ -597,11 +597,33 @@ impl AppModel {
         let Some(remote) = crate::runtime::servers(cx).for_root(&server_root) else { self.fail("That server is not paired with this Mac any more.".into(), cx); return; };
         if self.syncing { return; }
         self.syncing = true; cx.notify();
+        // The branch the person is looking at, so the Mac copy lands on it afterwards.
+        let branch = self.selected.and_then(|id| self.workspaces.iter().find(|w| w.threads.contains(&id.to_string()))).map(|w| w.branch.clone());
         let this = cx.entity().downgrade();
-        spawn_service(cx, async move { crate::remote::sync::sync(&remote, &local, &server_root, &Self::transfer_dir()).await }, move |res, cx| {
+        spawn_service(cx, async move {
+            // Unsaved work travels too: save a checkpoint in every idle server thread first.
+            let saved: usize = remote.call("checkpoint_project", serde_json::json!({ "root": remote.path_of(&server_root), "message": "Checkpoint before sync" })).await.unwrap_or(0);
+            let summary = crate::remote::sync::sync(&remote, &local, &server_root, &Self::transfer_dir()).await?;
+            let landed = match &branch {
+                Some(b) => crate::remote::sync::check_out_if_clean(&local, b).await,
+                None => Ok(false),
+            }?;
+            Ok::<_, String>((saved, summary, landed, branch))
+        }, move |res, cx| {
             let _ = this.update(cx, |m, cx| {
                 m.syncing = false;
-                match res { Ok(summary) => m.toast(ToastKind::Success, summary), Err(e) => m.fail(e, cx) }
+                match res {
+                    Ok((saved, summary, landed, branch)) => {
+                        let mut note = summary;
+                        if saved > 0 { note = format!("Saved unsaved work in {saved} server thread{} · {note}", if saved == 1 { "" } else { "s" }); }
+                        if note.starts_with("Nothing new on the server · Nothing new on this Mac") {
+                            note = "Nothing to sync yet: the threads have no saved work beyond what both copies already have.".into();
+                        }
+                        if landed { if let Some(b) = branch { note = format!("{note} · Mac copy is now on {b}"); } }
+                        m.toast(ToastKind::Success, note);
+                    }
+                    Err(e) => m.fail(e, cx),
+                }
                 m.refresh_project_overview(cx); m.refresh_project_status(false, cx); m.refresh_servers(cx);
                 cx.notify();
             });
@@ -968,15 +990,20 @@ impl AppModel {
     // ── queries ─────────────────────────────────────────────────────────
 
     /// Threads grouped by project root, in list order.
+    /// The sidebar entry a folder belongs to: a Mac copy of a server project lists under that project.
+    pub fn sidebar_root(&self, root: &str) -> String {
+        self.project_links.iter().find(|l| l.local == root).map(|l| l.server.clone()).unwrap_or_else(|| root.to_string())
+    }
+
     pub fn groups(&self, cx: &App) -> Vec<ProjectGroup> {
         let mut groups: Vec<ProjectGroup> = Vec::new();
         for id in &self.thread_order {
             let Some(t) = self.threads.get(id) else { continue };
             let meta = &t.read(cx).meta;
-            let root = meta
+            let root = self.sidebar_root(&meta
                 .project_root
                 .clone()
-                .unwrap_or_else(|| meta.cwd.clone());
+                .unwrap_or_else(|| meta.cwd.clone()));
             match groups.iter_mut().find(|g| g.root == root) {
                 Some(g) => g.threads.push(*id),
                 None => groups.push(ProjectGroup {
@@ -986,7 +1013,7 @@ impl AppModel {
                 }),
             }
         }
-        for p in &self.projects {
+        for p in self.projects.iter().filter(|p| self.sidebar_root(p) == **p) {
             if !groups.iter().any(|g| &g.root == p) {
                 groups.push(ProjectGroup {
                     name: project_name(p),
