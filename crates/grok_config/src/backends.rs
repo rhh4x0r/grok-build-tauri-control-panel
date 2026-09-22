@@ -221,10 +221,13 @@ pub fn resolve_backend(b: Backend, cfg: &GrokConfig) -> Result<ResolvedBackend> 
     if !desc.npx_packages.is_empty() {
         if let Ok(npx) = which("npx") {
             let pkg = desc.npx_packages[0];
+            // A bare package name makes npx reuse whatever it cached first, forever, so new
+            // models the adapters learn about never appear. Ask for the current release each
+            // launch; npx still falls back to its cache when offline.
             return Ok(ResolvedBackend {
                 backend: b,
                 program: npx,
-                args: vec!["--yes".into(), pkg.into()],
+                args: vec!["--yes".into(), "--prefer-online".into(), format!("{pkg}@latest")],
                 via: LaunchVia::Npx,
             });
         }
