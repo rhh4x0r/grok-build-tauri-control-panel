@@ -200,6 +200,10 @@ impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::theme::follow_system(window, cx);
         self.drain_toasts(window, cx);
+        // Whatever covers or replaces the preview pane (Changes, Settings, Foundry, a closed pane), the
+        // native browser view must not stay painted over it.
+        let preview_showing = self.preview_open && !self.model.read(cx).review_open && !self.settings_open && !self.foundry_open;
+        if !preview_showing { self.preview.update(cx, |p, cx| p.hidden(cx)); }
         // Below this width the thread needs the room more than the list does.
         let narrow = window.viewport_size().width < px(NARROW_WINDOW);
         if narrow && self.sidebar_open && !self.sidebar_tucked && !self.sidebar_kept {
@@ -257,6 +261,7 @@ impl Render for RootView {
                 this.settings_open = false;
                 this.foundry_open = false;
                 this.preview_open = false;
+                this.preview.update(cx, |p, cx| p.hidden(cx));
                 this.model.update(cx, |m, cx| m.open_home(cx));
                 this.thread.update(cx, |t, cx| t.focus_composer(window, cx));
                 cx.notify();
@@ -308,6 +313,7 @@ impl Render for RootView {
                 this.model.update(cx, |m, cx| { m.review_open = false; cx.notify(); });
                 if from_review { this.preview_open = false; }
                 this.preview_open = !this.preview_open;
+                if !this.preview_open { this.preview.update(cx, |p, cx| p.hidden(cx)); }
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleExplainer, _, cx| {

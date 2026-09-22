@@ -106,6 +106,16 @@ impl PreviewPanel {
     }
 }
 
+impl PreviewPanel {
+    /// The pane is going away: the native browser view must go with it, since layout alone never hides it.
+    pub fn hidden(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = self.webview.take() else { return };
+        view.update(cx, |w, _| w.hide());
+        self.loaded_url = None;
+        cx.notify();
+    }
+}
+
 impl Render for PreviewPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_root(cx);
