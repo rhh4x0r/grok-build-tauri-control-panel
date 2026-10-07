@@ -196,6 +196,12 @@ fn general_page(cx: &App) -> SettingPage {
         )
         .group(
             SettingGroup::new()
+                .title("Import")
+                .description("Bring conversations from other tools in as threads you can keep going.")
+                .item(SettingItem::render(|_, _, cx| render_import(cx))),
+        )
+        .group(
+            SettingGroup::new()
                 .title("Explainer")
                 .description("A cheap side model narrates what the agent is doing, in plain English, under the status line.")
                 .item(SettingItem::new(
@@ -228,6 +234,29 @@ fn general_page(cx: &App) -> SettingPage {
                     ),
                 )),
         )
+}
+
+fn render_import(cx: &mut App) -> AnyElement {
+    let ui = Ui::of(cx);
+    let app = cx.global::<AppModelHandle>().0.clone();
+    list_row(&ui)
+        .child(
+            row_line()
+                .child(
+                    // min_w_0 lets the description wrap instead of pushing the button off-screen.
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(row_title("Claude Code"))
+                        .child(row_meta("Every CLI conversation, filed under its project with its full history. Opening one continues the same Claude session. Run it again any time; nothing is imported twice.", &ui).whitespace_normal()),
+                )
+                .child(div().flex_shrink_0().child(Button::new("import-claude").small().label("Import").on_click(move |_, _, cx| {
+                    app.update(cx, |m, cx| m.import_claude_sessions(cx));
+                }))),
+        )
+        .into_any_element()
 }
 
 // ── MCP ─────────────────────────────────────────────────────────────────

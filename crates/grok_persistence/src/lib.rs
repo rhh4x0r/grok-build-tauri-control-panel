@@ -237,6 +237,53 @@ impl Persistence {
         Ok(())
     }
 
+    /// Write a thread and its whole transcript in one transaction, keeping the
+    /// record's own timestamps (an imported history must not jump to the top).
+    /// Rows are `(kind, payload, at)` in order.
+    pub fn import_session(
+        &self,
+        rec: &SessionRecord,
+        rows: &[(String, String, DateTime<Utc>)],
+    ) -> Result<()> {
+        let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            r#"
+            INSERT INTO sessions (id, cwd, mode, model, status, worktree, acp_session_id, metadata_json, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "#,
+            params![
+                rec.id.to_string(),
+                rec.cwd,
+                rec.mode,
+                rec.model,
+                rec.status,
+                rec.worktree,
+                rec.acp_session_id,
+                rec.metadata_json,
+                rec.created_at.to_rfc3339(),
+                rec.updated_at.to_rfc3339(),
+            ],
+        )?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO transcripts (session_id, seq, kind, payload, at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for (i, (kind, payload, at)) in rows.iter().enumerate() {
+                stmt.execute(params![
+                    rec.id.to_string(),
+                    i as i64 + 1,
+                    kind,
+                    payload,
+                    at.to_rfc3339(),
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Update status + touch updated_at without rewriting full metadata.
     pub fn update_session_status(&self, id: Uuid, status: &str) -> Result<()> {
         let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());

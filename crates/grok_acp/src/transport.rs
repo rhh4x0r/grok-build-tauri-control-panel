@@ -132,6 +132,17 @@ impl NdjsonTransport {
         }
     }
 
+    /// Queue a client-made notification behind everything the agent has sent
+    /// so far. The event loop sees it only after those, which marks a point in
+    /// the agent's stream (e.g. "history replay finished").
+    pub fn push_local_notification(&self, method: &str) {
+        let _ = self.notification_tx.send(JsonRpcNotification {
+            jsonrpc: "2.0".into(),
+            method: method.into(),
+            params: None,
+        });
+    }
+
     pub async fn request(&self, method: &str, params: Option<Value>) -> Result<Value> {
         let rx = self.send_request(method, params).await?;
         let resp = rx.await.map_err(|_| AcpError::ChannelClosed)?;

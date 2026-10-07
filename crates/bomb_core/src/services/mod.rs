@@ -1,5 +1,6 @@
 //! Service layer: every former Tauri command as a plain async fn over `&AppState`.
 
+pub mod claude_import;
 pub mod project_overview;
 pub mod project_sync;
 pub mod thread_setup;

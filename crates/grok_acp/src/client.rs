@@ -200,6 +200,29 @@ struct PendingPermission {
     options: Vec<PermissionOptionInfo>,
 }
 
+/// Client-made marker queued after `session/load` answers (see `session_load`).
+const REPLAY_DONE: &str = "bomb/historyReplayDone";
+
+/// Conversation content a `session/load` replays: messages, thoughts, tool
+/// calls and plans. Mode, model and command updates still apply.
+fn is_history_update(params: &Value) -> bool {
+    let update = params.get("update").unwrap_or(params);
+    let kind = update
+        .get("sessionUpdate")
+        .or_else(|| update.get("type"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    matches!(
+        kind,
+        "user_message_chunk"
+            | "agent_message_chunk"
+            | "agent_thought_chunk"
+            | "tool_call"
+            | "tool_call_update"
+            | "plan"
+    )
+}
+
 pub struct AcpClient {
     turn_generation: Arc<std::sync::atomic::AtomicU64>,
     config: AcpClientConfig,
@@ -221,6 +244,10 @@ pub struct AcpClient {
     pending_permissions: Mutex<HashMap<String, PendingPermission>>,
     /// Set during deliberate shutdown so process death isn't reported as failure.
     shutting_down: std::sync::atomic::AtomicBool,
+    /// True while `session/load` replays a saved conversation. The thread
+    /// already has that history, so replayed messages and tool calls are not
+    /// shown or saved again.
+    replaying_history: std::sync::atomic::AtomicBool,
     /// Plan requested but the agent has no native plan mode: we set its most
     /// restrictive mode and inject planning instructions into each prompt.
     plan_emulation: std::sync::atomic::AtomicBool,
@@ -447,6 +474,7 @@ impl AcpClient {
             approval_mode: RwLock::new(opts.approval_mode),
             pending_permissions: Mutex::new(HashMap::new()),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
+            replaying_history: std::sync::atomic::AtomicBool::new(false),
             plan_emulation: std::sync::atomic::AtomicBool::new(false),
             deny_patterns: opts.deny_patterns.clone(),
             allow_patterns: opts.allow_patterns.clone(),
@@ -525,6 +553,7 @@ impl AcpClient {
             approval_mode: RwLock::new(ApprovalMode::Ask),
             pending_permissions: Mutex::new(HashMap::new()),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
+            replaying_history: std::sync::atomic::AtomicBool::new(false),
             plan_emulation: std::sync::atomic::AtomicBool::new(false),
             deny_patterns: Vec::new(),
             allow_patterns: Vec::new(),
@@ -817,7 +846,25 @@ impl AcpClient {
         Ok(())
     }
 
+    /// `session/load` replays the whole conversation before it answers. The
+    /// marker queued after the answer ends the replay window in the event loop.
     async fn session_load(
+        &self,
+        session_id: &str,
+        opts: &SpawnOptions,
+        model: Option<&str>,
+    ) -> Result<String> {
+        use std::sync::atomic::Ordering;
+        self.replaying_history.store(true, Ordering::SeqCst);
+        let result = self.session_load_replay(session_id, opts, model).await;
+        match self.transport().await {
+            Ok(t) => t.push_local_notification(REPLAY_DONE),
+            Err(_) => self.replaying_history.store(false, Ordering::SeqCst),
+        }
+        result
+    }
+
+    async fn session_load_replay(
         &self,
         session_id: &str,
         opts: &SpawnOptions,
@@ -2456,7 +2503,18 @@ impl AcpClient {
         let params = notif.params.unwrap_or(Value::Null);
 
         match notif.method.as_str() {
+            REPLAY_DONE => {
+                self.replaying_history
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+            }
             "session/update" | "session/updateNotification" => {
+                if self
+                    .replaying_history
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    && is_history_update(&params)
+                {
+                    return;
+                }
                 self.map_session_update(bus, sid, &params).await;
             }
             m if m.contains("tool") => {
