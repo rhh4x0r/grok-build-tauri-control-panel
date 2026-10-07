@@ -1161,6 +1161,11 @@ impl AppModel {
         if let Some(w) = self.active_workspace.as_deref().and_then(|id| self.workspaces.iter().find(|w| w.id == id)) {
             self.prefs.temporary = w.inline;
             self.prefs.worktree = !w.inline;
+        } else if id.is_some() {
+            // A thread with no workspace (imported, or from before workspaces) works in its
+            // own folder; don't carry over the question-only state of the last conversation.
+            self.prefs.temporary = false;
+            self.prefs.worktree = false;
         }
         self.refresh_review(cx);
         if let Some(id) = id {
