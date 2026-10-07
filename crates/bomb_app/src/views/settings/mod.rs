@@ -239,8 +239,9 @@ fn general_page(cx: &App) -> SettingPage {
 fn render_import(cx: &mut App) -> AnyElement {
     let ui = Ui::of(cx);
     let app = cx.global::<AppModelHandle>().0.clone();
-    list_row(&ui)
-        .child(
+    let row = |id: &'static str, title: &'static str, meta: &'static str, run: fn(&mut crate::models::app::AppModel, &mut Context<crate::models::app::AppModel>)| {
+        let app = app.clone();
+        list_row(&ui).child(
             row_line()
                 .child(
                     // min_w_0 lets the description wrap instead of pushing the button off-screen.
@@ -249,13 +250,20 @@ fn render_import(cx: &mut App) -> AnyElement {
                         .min_w_0()
                         .flex()
                         .flex_col()
-                        .child(row_title("Claude Code"))
-                        .child(row_meta("Every CLI conversation, filed under its project with its full history. Opening one continues the same Claude session. Run it again any time; nothing is imported twice.", &ui).whitespace_normal()),
+                        .child(row_title(title))
+                        .child(row_meta(meta, &ui).whitespace_normal()),
                 )
-                .child(div().flex_shrink_0().child(Button::new("import-claude").small().label("Import").on_click(move |_, _, cx| {
-                    app.update(cx, |m, cx| m.import_claude_sessions(cx));
+                .child(div().flex_shrink_0().child(Button::new(id).small().label("Import").on_click(move |_, _, cx| {
+                    app.update(cx, run);
                 }))),
         )
+    };
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .child(row("import-claude", "Claude Code", "Every CLI conversation, filed under its project with its full history. Opening one continues the same Claude session. Run it again any time; nothing is imported twice.", |m, cx| m.import_claude_sessions(cx)))
+        .child(row("import-codex", "Codex", "Conversations from the Codex app and CLI, filed with the matching project (by folder or Git repository) next to its other threads. Opening one continues the same Codex session. Archived threads and Codex's background workers are left out.", |m, cx| m.import_codex_sessions(cx)))
         .into_any_element()
 }
 

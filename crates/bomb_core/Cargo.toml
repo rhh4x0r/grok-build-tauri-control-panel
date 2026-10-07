@@ -21,6 +21,7 @@ grok_mcp = { path = "../grok_mcp" }
 grok_memory = { path = "../grok_memory" }
 grok_permissions = { path = "../grok_permissions" }
 grok_persistence = { path = "../grok_persistence" }
+rusqlite.workspace = true
 grok_scheduler = { path = "../grok_scheduler" }
 grok_worktree = { path = "../grok_worktree" }
 regex.workspace = true

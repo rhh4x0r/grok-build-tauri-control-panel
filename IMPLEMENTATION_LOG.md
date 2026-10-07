@@ -861,3 +861,20 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 ## 2026-10-07 — Preview no longer starts dev servers
 
 - Removed "Start dev server". `DevServer::detect` guessed from project files (package.json scripts → next/vite/dev/start; Cargo.toml → static server or `cargo run`; else a static file server), which was wrong for desktop Rust apps, monorepos and other stacks, and the command wasn't visible beforehand. Preview is now filled by links from the agent (they open in the panel) or the "Running in this project" ports. Stop server stays for a server already running without an address. Palette and menu say "Toggle preview panel". The core detection is kept for the server-project preview path.
+
+## 2026-10-07 — Codex import
+
+- Settings → Import → Codex (`services/codex_import.rs`). It reads Codex's own index (`~/.codex/state_<n>.sqlite` → `threads`, `project_roots`) and each rollout JSONL. Left out: archived threads, guardian checks and spawned sub-agents (`source` is JSON), threads Bomb Code started (`originator = BombCode`), the home folder, Bomb Code's own `~/.grok` folders. On Max's Mac: 169 imported of 178, 8.7 GB read in ~10 s, the database grew ~200 MB.
+- The ACP session id is the Codex thread id, and `session/load` through codex-acp 2.1 reopens it with full context (tested; it appends one `thread_settings_applied` line).
+- Transcript: user/assistant `response_item/message`, `function_call` / `custom_tool_call` (+ outputs, 4 KB cap), web search, image generation (prompt only), compaction notes. User text drops Codex's own context (environment, AGENTS.md, plugins, skills, interruptions, goal-mode nudges), keeps only what follows "## My request (for Codex):", and renders question replies as "question → answer".
+- Project matching, so Codex threads sit with the Claude threads of the same project: exact project folder → a worktree's main repo → the folder's Git repository when that's a project (sidebar, added by hand, or a Codex project) → the folder itself. Never by parent folder: `~/src` is a project, and the first version swept 51 repos under it.
+- Last activity is the last message or tool call, not Codex's `updated_at` or trailing bookkeeping lines; reopening a thread bumps both. Fixed the 169 already imported.
+- Shared with the Claude importer: `to_thread` (backend + project root are parameters), `attach_folder_workspace`, the text helpers, and `AppModel::run_import`.
+
+## 2026-10-07 — Videos in replies
+
+- `views/media.rs`: videos linked in a reply (`![title](/path/clip.mp4)`, %-encoded paths, bare paths) get a card shaped like the video, with a Quick Look thumbnail (`qlmanage`, cached in `~/.grok/control-panel/thumbnails`).
+- ▶ plays inline in a small native web view (`InlinePlayerSlot`). GPUI can't clip a native view to the scrolling list, so `VideoSlot` shows it only while the whole card is inside the content mask. `player_watch`, after the chat list, hides and pauses it when the card wasn't drawn (other thread, scrolled away). Home/Settings/Foundry stop it.
+- Expand reads `currentTime` and continues in Preview; ⤢ plays in Preview from the start; Open uses the default player.
+- Files go through a private `bomb-media://` scheme with Range support (8 MB per response), only for videos clicked in the chat. `/__player` is a small page that fits the video on black.
+- Preview's web view now gets `notify`d with the panel, so its native frame follows layout; it was stale (clipped) until a window resize.

@@ -21,8 +21,8 @@ use uuid::Uuid;
 use crate::state::AppState;
 
 /// Tool output kept per call; the full output stays in the Claude session.
-const MAX_TOOL_RESULT: usize = 4000;
-const MAX_TOOL_ARGS: usize = 4000;
+pub(super) const MAX_TOOL_RESULT: usize = 4000;
+pub(super) const MAX_TOOL_ARGS: usize = 4000;
 
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,10 +80,11 @@ pub fn import_from(root: &Path, persistence: &Persistence) -> Result<ImportRepor
             report.skipped += 1;
             continue;
         }
-        let (rec, rows) = to_thread(&sid, parsed);
+        let root = project_root_for(&parsed.cwd);
+        let (rec, rows) = to_thread(&sid, parsed, grok_config::Backend::Claude, &root);
         let saved = persistence
             .import_session(&rec, &rows)
-            .and_then(|()| attach_folder_workspace(persistence, &mut workspaces, &rec));
+            .and_then(|()| attach_folder_workspace(persistence, &mut workspaces, &rec, &root));
         match saved {
             Ok(()) => report.imported += 1,
             Err(e) => {
@@ -97,10 +98,11 @@ pub fn import_from(root: &Path, persistence: &Persistence) -> Result<ImportRepor
 
 /// Imported threads work in their project folder, as they did in the CLI. Without a
 /// workspace, the startup migration would file them as read-only questions.
-fn attach_folder_workspace(
+pub(super) fn attach_folder_workspace(
     persistence: &Persistence,
     workspaces: &mut Vec<WorkspaceRecord>,
     rec: &SessionRecord,
+    project_root: &str,
 ) -> grok_persistence::Result<()> {
     let existing = workspaces
         .iter()
@@ -114,7 +116,7 @@ fn attach_folder_workspace(
             let branch = current_branch(Path::new(&rec.cwd)).unwrap_or_default();
             let w = WorkspaceRecord {
                 id: Uuid::new_v4().to_string(),
-                project_root: project_root_for(&rec.cwd),
+                project_root: project_root.to_string(),
                 name: Path::new(&rec.cwd)
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
@@ -139,7 +141,7 @@ fn attach_folder_workspace(
 }
 
 /// The checked-out branch, or `None` outside a Git repository.
-fn current_branch(dir: &Path) -> Option<String> {
+pub(super) fn current_branch(dir: &Path) -> Option<String> {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -181,7 +183,7 @@ fn session_files(root: &Path) -> Vec<PathBuf> {
 
 /// A folder the thread can run in again. Bomb Code's own working folders
 /// (`~/.grok/…`) hold its internal sessions, and the home folder can't be a project.
-fn importable_folder(cwd: &str) -> bool {
+pub(super) fn importable_folder(cwd: &str) -> bool {
     let path = Path::new(cwd);
     if !path.is_absolute() || !path.is_dir() {
         return false;
@@ -192,13 +194,13 @@ fn importable_folder(cwd: &str) -> bool {
     }
 }
 
-struct ParsedSession {
-    cwd: String,
-    title: Option<String>,
-    first_prompt: Option<String>,
-    started: DateTime<Utc>,
-    last: DateTime<Utc>,
-    rows: Vec<(String, String, DateTime<Utc>)>,
+pub(super) struct ParsedSession {
+    pub(super) cwd: String,
+    pub(super) title: Option<String>,
+    pub(super) first_prompt: Option<String>,
+    pub(super) started: DateTime<Utc>,
+    pub(super) last: DateTime<Utc>,
+    pub(super) rows: Vec<(String, String, DateTime<Utc>)>,
 }
 
 /// Tool call waiting for its result (results arrive in a later user line).
@@ -384,7 +386,7 @@ fn parse_session(file: &Path) -> std::io::Result<Option<ParsedSession>> {
 }
 
 /// Message content as a list of blocks; a plain string is one text block.
-fn blocks(content: &Value) -> Vec<Value> {
+pub(super) fn blocks(content: &Value) -> Vec<Value> {
     match content {
         Value::String(s) => vec![json!({ "type": "text", "text": s })],
         Value::Array(a) => a.clone(),
@@ -393,7 +395,7 @@ fn blocks(content: &Value) -> Vec<Value> {
 }
 
 /// Consecutive text from one turn reads as one message.
-fn push_agent_text(rows: &mut Vec<(String, String, DateTime<Utc>)>, text: &str, at: DateTime<Utc>) {
+pub(super) fn push_agent_text(rows: &mut Vec<(String, String, DateTime<Utc>)>, text: &str, at: DateTime<Utc>) {
     let text = text.trim();
     if text.is_empty() {
         return;
@@ -408,7 +410,7 @@ fn push_agent_text(rows: &mut Vec<(String, String, DateTime<Utc>)>, text: &str, 
     rows.push(("agent".into(), text.to_string(), at));
 }
 
-fn tool_payload(id: &str, name: &str, status: &str, args: &str, result: Option<&str>) -> String {
+pub(super) fn tool_payload(id: &str, name: &str, status: &str, args: &str, result: Option<&str>) -> String {
     json!({ "id": id, "tool": name, "status": status, "args": args, "result": result }).to_string()
 }
 
@@ -491,7 +493,7 @@ fn strip_tag(text: &str, tag: &str) -> String {
     out
 }
 
-fn truncate(s: &str, max: usize) -> String {
+pub(super) fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }
@@ -510,7 +512,14 @@ fn project_root_for(cwd: &str) -> String {
     }
 }
 
-fn to_thread(sid: &str, p: ParsedSession) -> (SessionRecord, Vec<(String, String, DateTime<Utc>)>) {
+/// A saved thread for an imported conversation: `sid` is the agent's own session id,
+/// which the first send reopens with `session/load`.
+pub(super) fn to_thread(
+    sid: &str,
+    p: ParsedSession,
+    backend: grok_config::Backend,
+    project_root: &str,
+) -> (SessionRecord, Vec<(String, String, DateTime<Utc>)>) {
     let id = Uuid::new_v4();
     let label = p
         .title
@@ -525,10 +534,10 @@ fn to_thread(sid: &str, p: ParsedSession) -> (SessionRecord, Vec<(String, String
         cwd: p.cwd.clone(),
         worktree: None,
         read_only: false,
-        project_root: Some(project_root_for(&p.cwd)),
-        // Empty: the Claude default for now; the model menu changes it.
+        project_root: Some(project_root.to_string()),
+        // Empty: reopening the session restores the agent's own model.
         model: String::new(),
-        backend: grok_config::Backend::Claude,
+        backend,
         mode: AgentMode::Acp,
         status: SessionStatus::Idle,
         approval_mode: Default::default(),

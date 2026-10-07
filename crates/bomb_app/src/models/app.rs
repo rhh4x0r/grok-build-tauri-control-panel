@@ -958,34 +958,45 @@ impl AppModel {
 
     /// Copy Claude Code CLI conversations in as saved threads (safe to repeat).
     pub fn import_claude_sessions(&mut self, cx: &mut Context<Self>) {
-        self.toast(ToastKind::Info, "Importing Claude Code conversations…");
-        cx.notify();
         let state = svc(cx);
+        self.run_import("Claude Code", async move { services::claude_import::import_claude_code_sessions(&state).await }, cx);
+    }
+
+    /// Copy Codex app and CLI conversations in as saved threads (safe to repeat).
+    pub fn import_codex_sessions(&mut self, cx: &mut Context<Self>) {
+        let state = svc(cx);
+        self.run_import("Codex", async move { services::codex_import::import_codex_sessions(&state).await }, cx);
+    }
+
+    fn run_import(
+        &mut self,
+        source: &'static str,
+        work: impl std::future::Future<Output = Result<services::claude_import::ImportReport, String>> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.toast(ToastKind::Info, format!("Importing {source} conversations…"));
+        cx.notify();
         let this = cx.entity().downgrade();
-        spawn_service(
-            cx,
-            async move { services::claude_import::import_claude_code_sessions(&state).await },
-            move |res, cx| {
-                let _ = this.update(cx, |m, cx| match res {
-                    Ok(r) => {
-                        let mut msg = match r.imported {
-                            0 => "No new Claude Code conversations to import".to_string(),
-                            1 => "Imported 1 Claude Code conversation".to_string(),
-                            n => format!("Imported {n} Claude Code conversations"),
-                        };
-                        if r.already_here > 0 {
-                            msg.push_str(&format!(" · {} already here", r.already_here));
-                        }
-                        if r.skipped + r.failed > 0 {
-                            msg.push_str(&format!(" · {} skipped (folder gone or empty)", r.skipped + r.failed));
-                        }
-                        m.toast(ToastKind::Success, msg);
-                        m.refresh_threads(cx);
+        spawn_service(cx, work, move |res, cx| {
+            let _ = this.update(cx, |m, cx| match res {
+                Ok(r) => {
+                    let mut msg = match r.imported {
+                        0 => format!("No new {source} conversations to import"),
+                        1 => format!("Imported 1 {source} conversation"),
+                        n => format!("Imported {n} {source} conversations"),
+                    };
+                    if r.already_here > 0 {
+                        msg.push_str(&format!(" · {} already here", r.already_here));
                     }
-                    Err(e) => m.fail(format!("Import failed: {e}"), cx),
-                });
-            },
-        );
+                    if r.skipped + r.failed > 0 {
+                        msg.push_str(&format!(" · {} skipped (folder gone or empty)", r.skipped + r.failed));
+                    }
+                    m.toast(ToastKind::Success, msg);
+                    m.refresh_threads(cx);
+                }
+                Err(e) => m.fail(format!("Import failed: {e}"), cx),
+            });
+        });
     }
 
     pub fn refresh_services(&mut self, cx: &mut Context<Self>) {
