@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use grok_control_core::{AgentMode, BrainMode, SessionMetadata};
 use grok_events::SessionStatus;
-use grok_persistence::{Persistence, SessionRecord};
+use grok_persistence::{Persistence, SessionRecord, WorkspaceRecord};
 use serde::Serialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -54,6 +54,7 @@ pub fn import_from(root: &Path, persistence: &Persistence) -> Result<ImportRepor
         .into_iter()
         .filter_map(|r| r.acp_session_id)
         .collect();
+    let mut workspaces = persistence.list_workspaces().map_err(|e| e.to_string())?;
     let mut report = ImportReport::default();
     for file in session_files(root) {
         let Some(sid) = file.file_stem().and_then(|s| s.to_str()).map(String::from) else {
@@ -80,7 +81,10 @@ pub fn import_from(root: &Path, persistence: &Persistence) -> Result<ImportRepor
             continue;
         }
         let (rec, rows) = to_thread(&sid, parsed);
-        match persistence.import_session(&rec, &rows) {
+        let saved = persistence
+            .import_session(&rec, &rows)
+            .and_then(|()| attach_folder_workspace(persistence, &mut workspaces, &rec));
+        match saved {
             Ok(()) => report.imported += 1,
             Err(e) => {
                 tracing::warn!(%sid, error = %e, "claude import: save failed");
@@ -89,6 +93,63 @@ pub fn import_from(root: &Path, persistence: &Persistence) -> Result<ImportRepor
         }
     }
     Ok(report)
+}
+
+/// Imported threads work in their project folder, as they did in the CLI. Without a
+/// workspace, the startup migration would file them as read-only questions.
+fn attach_folder_workspace(
+    persistence: &Persistence,
+    workspaces: &mut Vec<WorkspaceRecord>,
+    rec: &SessionRecord,
+) -> grok_persistence::Result<()> {
+    let existing = workspaces
+        .iter()
+        .find(|w| {
+            w.path == rec.cwd && w.shared_checkout && !w.inline && !w.read_only && w.archived_at.is_none()
+        })
+        .map(|w| w.id.clone());
+    let id = match existing {
+        Some(id) => id,
+        None => {
+            let branch = current_branch(Path::new(&rec.cwd)).unwrap_or_default();
+            let w = WorkspaceRecord {
+                id: Uuid::new_v4().to_string(),
+                project_root: project_root_for(&rec.cwd),
+                name: Path::new(&rec.cwd)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| rec.cwd.clone()),
+                base_ref: if branch.is_empty() { "HEAD".into() } else { branch.clone() },
+                branch,
+                path: rec.cwd.clone(),
+                created_at: rec.created_at.to_rfc3339(),
+                archived_at: None,
+                inline: false,
+                shared_checkout: true,
+                read_only: false,
+                threads: Vec::new(),
+            };
+            persistence.save_workspace(&w)?;
+            let id = w.id.clone();
+            workspaces.push(w);
+            id
+        }
+    };
+    persistence.attach_workspace(rec.id, &id)
+}
+
+/// The checked-out branch, or `None` outside a Git repository.
+fn current_branch(dir: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .filter(|b| !b.is_empty() && b != "HEAD")
 }
 
 fn claude_projects_dir() -> Option<PathBuf> {
@@ -538,6 +599,39 @@ mod tests {
         assert_eq!(tool["result"], "error[E0425]");
         assert_eq!(p.rows[4].1, "/model opus");
         assert_eq!(p.last.to_rfc3339(), "2026-09-01T10:01:00+00:00");
+    }
+
+    #[test]
+    fn imported_threads_can_make_changes_and_import_once() {
+        let project = tempfile::tempdir().unwrap();
+        let claude = tempfile::tempdir().unwrap();
+        let folder = claude.path().join("-some-project");
+        std::fs::create_dir(&folder).unwrap();
+        let cwd = project.path().display().to_string();
+        for sid in ["11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"] {
+            let lines = [
+                json!({"type":"user","cwd":cwd,"timestamp":"2026-09-01T10:00:00Z","message":{"role":"user","content":"hi"}}),
+                json!({"type":"assistant","cwd":cwd,"timestamp":"2026-09-01T10:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}),
+            ];
+            let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
+            std::fs::write(folder.join(format!("{sid}.jsonl")), body).unwrap();
+        }
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Persistence::open(db_dir.path().join("t.db")).unwrap();
+
+        let first = import_from(claude.path(), &db).unwrap();
+        assert_eq!(first.imported, 2);
+        let again = import_from(claude.path(), &db).unwrap();
+        assert_eq!((again.imported, again.already_here), (0, 2));
+
+        let workspaces = db.list_workspaces().unwrap();
+        assert_eq!(workspaces.len(), 1, "threads in one folder share its workspace");
+        let w = &workspaces[0];
+        assert!(w.shared_checkout && !w.inline && !w.read_only);
+        assert_eq!(w.path, cwd);
+        assert_eq!(w.threads.len(), 2);
+        let sessions = db.list_sessions().unwrap();
+        assert!(sessions.iter().all(|s| s.updated_at.to_rfc3339() == "2026-09-01T10:00:01+00:00"));
     }
 
     #[test]
