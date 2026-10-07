@@ -26,6 +26,8 @@ pub struct SidebarView {
     active_ix: usize,
     collapsed: std::collections::HashSet<String>,
     expanded: std::collections::HashSet<String>,
+    /// Project header under the pointer; it shows its pin and new-thread controls.
+    hovered_header: Option<String>,
     /// The project last seen as the one in view, to notice when the user moves to another.
     last_active: Option<String>,
 }
@@ -50,6 +52,8 @@ fn recency_group(iso: &str) -> &'static str {
 
 /// Open threads shown per project before "View more".
 const VISIBLE_OPEN_THREADS: usize = 3;
+/// Recent threads a closed project lists before "N more from the last …".
+const RECENT_IN_CLOSED: usize = VISIBLE_OPEN_THREADS;
 
 impl SidebarView {
     pub fn new(model: Entity<AppModel>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -68,7 +72,7 @@ impl SidebarView {
             }
         })
         .detach();
-        Self { model, search, active_ix: 0, collapsed: Default::default(), expanded: Default::default(), last_active: None }
+        Self { model, search, active_ix: 0, collapsed: Default::default(), expanded: Default::default(), hovered_header: None, last_active: None }
     }
 
     fn query(&self, cx: &App) -> String {
@@ -154,8 +158,21 @@ impl SidebarView {
             rows.into_iter().map(|(_, w)| w).collect()
         };
         let mut group = div().flex().flex_col().gap(px(Layout::SIDEBAR_LIST_GAP));
+        // Pin and new-thread controls appear on hover, so a narrow sidebar keeps room for the name.
+        // Tracked in the view and re-rendered: a hover style can't add elements after layout.
+        let header_hovered = self.hovered_header.as_deref() == Some(g.root.as_str());
+        let hover_root = g.root.clone();
         group = group.child(
             div()
+                .id(SharedString::from(format!("project-header-row:{}", g.root)))
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    if *hovered {
+                        this.hovered_header = Some(hover_root.clone());
+                    } else if this.hovered_header.as_deref() == Some(hover_root.as_str()) {
+                        this.hovered_header = None;
+                    }
+                    cx.notify();
+                }))
                 .flex()
                 .items_center()
                 .gap(px(Layout::SPACE_SM))
@@ -208,7 +225,7 @@ impl SidebarView {
                             .tooltip(move |window, cx| Tooltip::new(hint).build(window, cx)),
                     )
                 })
-                .child({
+                .when(header_hovered, |el| el.child({
                     let pinned = self.model.read(cx).pinned_projects.contains(&g.root);
                     let pin_app = self.model.clone();
                     let pin_root = g.root.clone();
@@ -225,8 +242,8 @@ impl SidebarView {
                         .tooltip(move |window, cx| Tooltip::new(if pinned { "Unpin project" } else { "Pin project to the top" }).build(window, cx))
                         .on_click(move |_, _, cx| pin_app.update(cx, |m, cx| m.toggle_pinned_project(pin_root.clone(), cx)))
                         .child(div().size(px(12.)).child(Icon::from(if pinned { Lucide::PinOff } else { Lucide::Pin })))
-                })
-                .child(
+                }))
+                .when(header_hovered, |el| el.child(
                     div()
                         .id(SharedString::from(format!("new-{}", g.root)))
                         .size(px(20.))
@@ -239,7 +256,7 @@ impl SidebarView {
                         .hover(move |s| s.bg(hover))
                         .on_click(move |_, _, cx| add.update(cx, |m, cx| { m.set_active_project(add_root.clone(), cx); m.new_thread(cx); }))
                         .child(div().size(px(12.)).child(Icon::from(Lucide::Plus))),
-                )
+                ))
                 .child(
                     div()
                         .id(SharedString::from(format!("collapse-{}", g.root)))
@@ -259,7 +276,51 @@ impl SidebarView {
                         .child(div().size(px(12.)).child(Icon::from(if collapsed { Lucide::ChevronRight } else { Lucide::ChevronDown }))),
                 ),
         );
-        if collapsed { return group; }
+        if collapsed {
+            // A project closed by hand stays closed; otherwise its recent threads stay in sight.
+            if self.collapsed.contains(&g.root) { return group; }
+            let window = self.model.read(cx).recent_window;
+            let recent: Vec<Uuid> = {
+                let m = self.model.read(cx);
+                let rows: Vec<(String, Uuid)> = g.threads.iter()
+                    .filter(|id| !m.archived.contains(id))
+                    .filter_map(|id| m.threads.get(id).map(|t| (t.read(cx).meta.updated_at.clone(), *id)))
+                    .collect();
+                crate::models::app::recent_ids(&rows, window, Utc::now())
+            };
+            for id in recent.iter().take(RECENT_IN_CLOSED) {
+                if let Some(t) = self.model.read(cx).threads.get(id).cloned() {
+                    group = group.child(self.thread_row(*id, &t, "", self.model.read(cx).selected == Some(*id), ui, cx));
+                }
+            }
+            if recent.len() > RECENT_IN_CLOSED {
+                let more = recent.len() - RECENT_IN_CLOSED;
+                let hover = ui.hover;
+                let open_key = format!("project-open:{}", g.root);
+                group = group.child(
+                    div()
+                        .id(SharedString::from(format!("recent-more:{}", g.root)))
+                        .flex()
+                        .items_center()
+                        .gap(px(Layout::SPACE_XS))
+                        .h(px(28.))
+                        .ml(px(GROUP_INDENT - 6.))
+                        .px(px(6.))
+                        .rounded(px(6.))
+                        .text_size(px(crate::theme::Type::SMALL))
+                        .text_color(ui.text_muted)
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(hover))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.expanded.insert(open_key.clone());
+                            cx.notify();
+                        }))
+                        .child(div().size(px(13.)).child(Icon::from(Lucide::ChevronDown)))
+                        .child(format!("{more} more from the last {}", window.label())),
+                );
+            }
+            return group;
+        }
         // Only the few most recently active open threads show until "View more" is opened.
         let more_key = format!("more:{}", g.root);
         let show_all = self.expanded.contains(&more_key);
@@ -893,11 +954,15 @@ impl Render for SidebarView {
                             }),
                     ),
             )
-            .child(div().flex().gap_1().px(px(Layout::SPACE_SM)).pb(px(Layout::SPACE_SM))
+            // New chat leads; Add project is an icon so both fit the narrowest sidebar.
+            .child(div().flex().items_center().gap_1().px(px(Layout::SPACE_SM)).pb(px(Layout::SPACE_SM))
+                .child(Button::new("sidebar-new-chat").ghost().small().icon(Lucide::Plus).label("New chat")
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(NewThread), cx)))
+                .child(div().flex_1())
                 .child({
                     // With a server paired, a project's home is a choice: that server (default) or this Mac.
                     let servers = crate::runtime::servers(cx).all();
-                    let button = Button::new("sidebar-add-project").ghost().small().icon(Lucide::FolderPlus).label("Add project");
+                    let button = Button::new("sidebar-add-project").ghost().small().icon(Lucide::FolderPlus).tooltip("Add project");
                     if servers.is_empty() {
                         button.on_click(|_, window, cx| window.dispatch_action(Box::new(crate::actions::OpenProject), cx)).into_any_element()
                     } else {
@@ -920,11 +985,25 @@ impl Render for SidebarView {
                                 .item(PopupMenuItem::new("Open a folder on this Mac…").on_click(|_, window, cx| window.dispatch_action(Box::new(crate::actions::OpenProject), cx)))
                         }).into_any_element()
                     }
-                })
-                .child(Button::new("sidebar-new-chat").ghost().small().icon(Lucide::Plus).label("New chat")
-                    .on_click(|_, window, cx| window.dispatch_action(Box::new(NewThread), cx))))
+                }))
             .child(div().flex().items_center().gap_1().px(px(Layout::SPACE_SM)).pb(px(Layout::SPACE_XS))
                 .child(div().flex_1().min_w_0().child(Input::new(&self.search).cleanable(true).appearance(true)))
+                .child({
+                    let app = self.model.clone();
+                    let current = self.model.read(cx).recent_window;
+                    Button::new("sidebar-recent").ghost().small().icon(Lucide::Clock)
+                        .label(current.short_label())
+                        .tooltip(format!("Recent threads shown in closed projects · {}", current.label()))
+                        .dropdown_menu(move |mut menu, _, _| {
+                            menu = menu.item(PopupMenuItem::new("Show recent threads from").disabled(true));
+                            for window in crate::models::app::RecentWindow::ALL {
+                                let app = app.clone();
+                                menu = menu.item(PopupMenuItem::new(if window == crate::models::app::RecentWindow::Off { "Off · only the open project" } else { window.label() }).checked(window == current)
+                                    .on_click(move |_, _, cx| app.update(cx, |m, cx| m.set_recent_window(window, cx))));
+                            }
+                            menu
+                        })
+                })
                 .child({
                     let app = self.model.clone();
                     let current = self.model.read(cx).sidebar_sort;

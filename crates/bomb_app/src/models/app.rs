@@ -25,6 +25,7 @@ impl Global for AppModelHandle {}
 
 const ARCHIVED_KEY: &str = "archived_threads";
 const SIDEBAR_SORT_KEY: &str = "sidebar_sort";
+const RECENT_WINDOW_KEY: &str = "sidebar_recent_window";
 const PINNED_PROJECTS_KEY: &str = "pinned_projects";
 const PROJECT_INTRO_KEY: &str = "project_intro_seen";
 
@@ -64,6 +65,55 @@ impl SidebarSort {
     pub fn label(self) -> &'static str {
         match self { Self::Recent => "Most recent", Self::Created => "Time created", Self::Alphabetical => "Alphabetical" }
     }
+}
+
+/// How far back a closed project still lists its threads in the sidebar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RecentWindow {
+    Off,
+    Day,
+    #[default]
+    ThreeDays,
+    Week,
+    Month,
+}
+
+impl RecentWindow {
+    pub const ALL: [RecentWindow; 5] = [Self::Off, Self::Day, Self::ThreeDays, Self::Week, Self::Month];
+    pub fn key(self) -> &'static str {
+        match self { Self::Off => "off", Self::Day => "1d", Self::ThreeDays => "3d", Self::Week => "1w", Self::Month => "1m" }
+    }
+    pub fn from_key(key: &str) -> Self {
+        Self::ALL.into_iter().find(|w| w.key() == key).unwrap_or_default()
+    }
+    pub fn label(self) -> &'static str {
+        match self { Self::Off => "Off", Self::Day => "1 day", Self::ThreeDays => "3 days", Self::Week => "1 week", Self::Month => "1 month" }
+    }
+    /// For the sidebar button, where width is tight.
+    pub fn short_label(self) -> &'static str {
+        match self { Self::Off => "Off", Self::Day => "1d", Self::ThreeDays => "3d", Self::Week => "1w", Self::Month => "1m" }
+    }
+    pub fn duration(self) -> Option<chrono::Duration> {
+        match self {
+            Self::Off => None,
+            Self::Day => Some(chrono::Duration::days(1)),
+            Self::ThreeDays => Some(chrono::Duration::days(3)),
+            Self::Week => Some(chrono::Duration::weeks(1)),
+            Self::Month => Some(chrono::Duration::days(30)),
+        }
+    }
+}
+
+/// Threads active since `now - window`, most recent first. Rows are (last change as RFC 3339, id).
+pub fn recent_ids<T: Clone>(rows: &[(String, T)], window: RecentWindow, now: chrono::DateTime<chrono::Utc>) -> Vec<T> {
+    let Some(span) = window.duration() else { return Vec::new() };
+    let since = now - span;
+    let mut recent: Vec<(chrono::DateTime<chrono::Utc>, T)> = rows
+        .iter()
+        .filter_map(|(at, id)| at.parse::<chrono::DateTime<chrono::Utc>>().ok().filter(|t| *t >= since).map(|t| (t, id.clone())))
+        .collect();
+    recent.sort_by_key(|r| std::cmp::Reverse(r.0));
+    recent.into_iter().map(|(_, id)| id).collect()
 }
 
 /// Ids of the open rows to tuck behind "View more": everything past the `keep` most recently changed,
@@ -174,6 +224,8 @@ pub struct AppModel {
     /// A pairing attempt is in flight.
     pub pairing: bool,
     pub sidebar_sort: SidebarSort,
+    /// Closed projects list their threads active within this window.
+    pub recent_window: RecentWindow,
     /// Project roots shown in the sidebar's Pinned section, in the order they were pinned.
     pub pinned_projects: Vec<String>,
     /// Workspaces to close once their agent finishes merging.
@@ -242,6 +294,7 @@ impl AppModel {
             syncing: false,
             pairing: false,
             sidebar_sort: SidebarSort::default(),
+            recent_window: RecentWindow::default(),
             pinned_projects: Vec::new(),
             close_after_merge: HashSet::new(),
             active_workspace: None,
@@ -1804,10 +1857,12 @@ impl AppModel {
             let sort = services::kv_get(&state, SIDEBAR_SORT_KEY).await.ok().flatten();
             let pinned = services::kv_get(&state, PINNED_PROJECTS_KEY).await.ok().flatten();
             let intro = services::kv_get(&state, PROJECT_INTRO_KEY).await.ok().flatten();
-            (sort, pinned, intro)
-        }, move |(sort, pinned, intro), cx| {
+            let recent = services::kv_get(&state, RECENT_WINDOW_KEY).await.ok().flatten();
+            (sort, pinned, intro, recent)
+        }, move |(sort, pinned, intro, recent), cx| {
             let _ = this.update(cx, |m, cx| {
                 if let Some(sort) = sort { m.sidebar_sort = SidebarSort::from_key(&sort); }
+                if let Some(recent) = recent { m.recent_window = RecentWindow::from_key(&recent); }
                 m.project_intro_seen = intro.as_deref() == Some("1");
                 if let Some(pinned) = pinned.and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok()) { m.pinned_projects = pinned; }
                 cx.notify();
@@ -1842,6 +1897,13 @@ impl AppModel {
         self.sidebar_sort = sort;
         let state = svc(cx);
         spawn_service(cx, async move { services::kv_set(&state, SIDEBAR_SORT_KEY, sort.key()).await }, |_, _| {});
+        cx.notify();
+    }
+
+    pub fn set_recent_window(&mut self, window: RecentWindow, cx: &mut Context<Self>) {
+        self.recent_window = window;
+        let state = svc(cx);
+        spawn_service(cx, async move { services::kv_set(&state, RECENT_WINDOW_KEY, window.key()).await }, |_, _| {});
         cx.notify();
     }
 
@@ -2456,6 +2518,28 @@ pub fn project_name(root: &str) -> String {
 
 fn next_shortcut_mode(current: &str) -> &'static str {
     match current { "plan" => "ask", "ask" => "auto", _ => "plan" }
+}
+
+#[cfg(test)]
+mod recent_window_tests {
+    use super::{recent_ids, RecentWindow};
+
+    #[test]
+    fn keeps_threads_inside_the_window_newest_first() {
+        let now: chrono::DateTime<chrono::Utc> = "2026-10-07T12:00:00Z".parse().unwrap();
+        let rows = vec![
+            ("2026-10-07T10:00:00Z".to_string(), "today"),
+            ("2026-10-05T12:00:01Z".to_string(), "two-days"),
+            ("2026-09-30T12:00:00Z".to_string(), "week"),
+            ("2026-08-01T00:00:00Z".to_string(), "old"),
+            ("not a time".to_string(), "broken"),
+        ];
+        assert_eq!(recent_ids(&rows, RecentWindow::Day, now), ["today"]);
+        assert_eq!(recent_ids(&rows, RecentWindow::ThreeDays, now), ["today", "two-days"]);
+        assert_eq!(recent_ids(&rows, RecentWindow::Week, now), ["today", "two-days", "week"]);
+        assert!(recent_ids(&rows, RecentWindow::Off, now).is_empty());
+        assert_eq!(RecentWindow::from_key("nonsense"), RecentWindow::ThreeDays);
+    }
 }
 
 #[cfg(test)]
