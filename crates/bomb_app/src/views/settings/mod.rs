@@ -59,6 +59,7 @@ impl Render for SettingsView {
                         routing_page(),
                         mcp_page(),
                         memory_page(),
+                        perspective_page(),
                         servers_page(),
                         permissions_page(cx),
                         advanced_page(),
@@ -265,6 +266,131 @@ fn render_import(cx: &mut App) -> AnyElement {
         .child(row("import-claude", "Claude Code", "Every CLI conversation, filed under its project with its full history. Opening one continues the same Claude session. Run it again any time; nothing is imported twice.", |m, cx| m.import_claude_sessions(cx)))
         .child(row("import-codex", "Codex", "Conversations from the Codex app and CLI, filed with the matching project (by folder or Git repository) next to its other threads. Opening one continues the same Codex session. Archived threads and Codex's background workers are left out.", |m, cx| m.import_codex_sessions(cx)))
         .into_any_element()
+}
+
+// ── Perspective ─────────────────────────────────────────────────────────
+
+fn perspective_page() -> SettingPage {
+    SettingPage::new("Perspective")
+        .description("A profile of how you work with AI — what you value, how you decide, ask and react, and how you work with others — distilled from your threads, for any agent you hand it to.")
+        .group(SettingGroup::new().title("Build").description("Your own signed-in agent reads your threads. Secrets and contact details are removed first, and other people only ever appear as roles.").item(SettingItem::render(|_, _, cx| render_perspective_build(cx))))
+        .group(SettingGroup::new().title("Profile").item(SettingItem::render(|_, _, cx| render_perspective_profile(cx))))
+}
+
+fn render_perspective_build(cx: &mut App) -> AnyElement {
+    let ui = Ui::of(cx);
+    let model = settings(cx);
+    let (name, backend, writer, grok_model, status, built, pending) = {
+        let m = model.read(cx);
+        (m.persp_name.clone(), m.persp_backend.clone(), m.persp_writer.clone(), m.persp_grok_model.clone(), m.persp_status.clone(), m.persp_built.is_some(), m.persp_pending)
+    };
+    let write_with = |label: String, key: &'static str| {
+        let m = model.clone();
+        Button::new(SharedString::from(format!("persp-writer-{key}")))
+            .small()
+            .compact()
+            .label(label)
+            .map(|b| if writer == key { b.primary() } else { b.outline() })
+            .on_click(move |_, _, cx| m.update(cx, |s, cx| { s.persp_writer = key.into(); cx.notify(); }))
+    };
+    let pick = |label: &'static str, key: &'static str| {
+        let m = model.clone();
+        Button::new(SharedString::from(format!("persp-{key}")))
+            .small()
+            .compact()
+            .label(label)
+            .map(|b| if backend == key { b.primary() } else { b.outline() })
+            .on_click(move |_, _, cx| m.update(cx, |s, cx| { s.persp_backend = key.into(); cx.notify(); }))
+    };
+    let run = model.clone();
+    let progress = if status.running {
+        let count = if status.total > 0 { format!(" · {} / {}", status.done, status.total) } else { String::new() };
+        format!("{}{count}…", status.stage)
+    } else if let Some(e) = &status.error {
+        format!("Last run stopped: {e}")
+    } else if built && pending > 0 {
+        format!("{pending} threads have new messages since the last build.")
+    } else {
+        "Reads every thread the first time (about 10–20 minutes on your subscription); later updates only read what changed.".into()
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .w_full()
+        .child(
+            list_row(&ui).child(
+                row_line()
+                    .child(div().flex_1().min_w_0().flex().flex_col().child(row_title("Your name")).child(row_meta("How the profile refers to you.", &ui)))
+                    .child(div().w(px(200.)).flex_shrink_0().child(Input::new(&name))),
+            ),
+        )
+        .child(
+            list_row(&ui).child(
+                row_line()
+                    .child(div().flex_1().min_w_0().flex().flex_col().child(row_title("Read with")).child(row_meta("Claude uses Sonnet for notes and Opus to write the profile; Codex uses your default model.", &ui).whitespace_normal()))
+                    .child(div().flex().gap_1().flex_shrink_0().child(pick("Claude", "claude")).child(pick("Codex", "codex"))),
+            ),
+        )
+        .child(
+            list_row(&ui).child(
+                row_line()
+                    .child(div().flex_1().min_w_0().flex().flex_col().child(row_title("Write the profile with")).child(row_meta("Merges the notes into the profile and checks it for names. Grok uses its newest model.", &ui).whitespace_normal()))
+                    .child(div().flex().gap_1().flex_shrink_0()
+                        .child(write_with("Same".into(), "same"))
+                        .child(write_with(grok_model.map(|m| format!("Grok · {m}")).unwrap_or_else(|| "Grok".into()), "grok"))
+                        .child(write_with("Claude Opus".into(), "claude"))
+                        .child(write_with("Codex".into(), "codex"))),
+            ),
+        )
+        .child(
+            row_line()
+                .child(div().flex_1().min_w_0().text_size(px(crate::theme::Type::SMALL)).text_color(if status.error.is_some() && !status.running { ui.danger } else { ui.text_muted }).whitespace_normal().child(progress))
+                .child(div().flex_shrink_0().child(
+                    Button::new("persp-build").small().primary()
+                        .label(if status.running { "Building…" } else if built { "Update" } else { "Build my perspective" })
+                        .disabled(status.running)
+                        .on_click(move |_, _, cx| run.update(cx, |s, cx| s.build_perspective(cx))),
+                )),
+        )
+        .into_any_element()
+}
+
+fn render_perspective_profile(cx: &mut App) -> AnyElement {
+    let ui = Ui::of(cx);
+    let model = settings(cx);
+    let Some(built) = model.read(cx).persp_built.clone() else {
+        return empty_list("Nothing built yet.", &ui).into_any_element();
+    };
+    let when = built.at.with_timezone(&chrono::Local).format("%b %-d, %-I:%M %p");
+    let (export, reveal, copy) = (model.clone(), model.clone(), model.clone());
+    div()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .w_full()
+        .child(
+            row_line()
+                .child(div().flex_1().min_w_0().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted)
+                    .child(format!("Built {when} from {} conversations · {} observations. Quotes behind each point are in evidence.md.", built.threads, built.observations)))
+                .child(div().flex().gap_1().flex_shrink_0()
+                    .child(Button::new("persp-export").small().label("Save as Claude skill").tooltip("Copies SKILL.md and evidence.md to ~/.claude/skills/perspective")
+                        .on_click(move |_, _, cx| export.update(cx, |s, cx| s.export_perspective(cx))))
+                    .child(Button::new("persp-reveal").small().ghost().label("Edit…").tooltip("Show the files in Finder to edit them")
+                        .on_click(move |_, _, cx| reveal.update(cx, |s, cx| s.reveal_perspective(cx))))
+                    .child(Button::new("persp-copy").small().ghost().label("Copy")
+                        .on_click(move |_, _, cx| copy.update(cx, |s, cx| s.copy_perspective(cx))))),
+        )
+        .child(
+            div().w_full().p_3().rounded(px(8.)).border_1().border_color(ui.hairline(0.08))
+                .child(gpui_kit::component::text::TextView::markdown("perspective-skill", without_frontmatter(&built.skill_md)).selectable(true)),
+        )
+        .into_any_element()
+}
+
+/// SKILL.md minus its `---` header, which is for agents, not for reading.
+fn without_frontmatter(md: &str) -> String {
+    md.strip_prefix("---\n").and_then(|rest| rest.split_once("\n---\n")).map(|(_, body)| body.trim_start().to_string()).unwrap_or_else(|| md.to_string())
 }
 
 // ── MCP ─────────────────────────────────────────────────────────────────

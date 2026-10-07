@@ -878,3 +878,15 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 - Expand reads `currentTime` and continues in Preview; ⤢ plays in Preview from the start; Open uses the default player.
 - Files go through a private `bomb-media://` scheme with Range support (8 MB per response), only for videos clicked in the chat. `/__player` is a small page that fits the video on black.
 - Preview's web view now gets `notify`d with the panel, so its native frame follows layout; it was stale (clipped) until a window resize.
+
+## 2026-10-07 — Perspective
+
+- Settings → Perspective builds a skill folder (`SKILL.md` + `evidence.md`) describing how the user works with AI, from all their threads (`services/perspective.rs`; spec in `docs/plan/perspective_skill_plan.md`).
+- Gather (local): the user's messages, each with the end of the reply it answers. Automated prompts (recovery packs, Foundry stages, "Implement the plan above") and mock threads are dropped. Threads are labelled `T<n> · date`, never by project. `scrub` removes keys/tokens, emails (also `\@`), phone formats and key-like strings, while leaving dates, versions, prices and paths alone.
+- Notes: batches of ~60 KB go to the user's own CLI with tools off and nothing saved. Claude: `claude -p --tools "" --no-session-persistence`, Sonnet. Codex: `codex exec --ephemeral -s read-only`. Calls run 4 at a time and return JSON observations per section with quotes; people become roles. Cached per thread in kv `perspective_notes/<id>`, keyed by the last message time, so later builds only read changed threads.
+- Writing ("Write the profile with": same / Grok / Claude Opus / Codex):
+  - Each section's notes go in interleaved chunks of 60 (single-thread points kept), all in parallel. A combine call per section then keeps points backed by ≥2 conversations. Then a name check.
+  - Grok uses its CLI default (newest) model, with the prompt as an argument since it has no stdin; `--reasoning-effort low` for chunks and the check. Measured: 60 notes took 383 s at default effort and 91 s at low, with equally good points.
+  - A one-shot 8-section merge timed out with grok-4.7, which is what led to the chunking.
+  - Failed calls retry once, then are skipped (logged). 20-minute call limit.
+- First full run on Max's threads: 253 threads, 1,501 observations, a 219-point profile with no names and no assumed pronouns. Reading with Codex took ~45 min. The profile is long (48 KB); a condensed SKILL.md with the rest as reference is a likely next step.

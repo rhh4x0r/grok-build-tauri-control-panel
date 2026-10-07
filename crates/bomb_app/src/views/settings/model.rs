@@ -48,6 +48,17 @@ pub struct SettingsModel {
     pub server_name: Entity<InputState>,
     pub server_project: Entity<InputState>,
     pub server_invitee: Entity<InputState>,
+    /// Perspective: how the profile names the person, whose CLI reads the threads, the
+    /// last profile built, threads with new messages since, and the build's progress.
+    pub persp_name: Entity<InputState>,
+    pub persp_backend: String,
+    /// Who writes the profile: "same" (the reader), "grok", "claude" or "codex".
+    pub persp_writer: String,
+    /// Grok's newest model, for the label.
+    pub persp_grok_model: Option<String>,
+    pub persp_built: Option<services::perspective::Built>,
+    pub persp_pending: usize,
+    pub persp_status: services::perspective::Status,
     /// Devices per server id, as last listed.
     pub server_devices: std::collections::HashMap<String, Vec<serde_json::Value>>,
     /// People per server id (admin only), as last listed.
@@ -105,6 +116,13 @@ impl SettingsModel {
             routing_key: cx.new(|cx| InputState::new(window,cx).masked(true).placeholder("Paste API key")),
             routing_guidelines: cx.new(|cx| TextareaState::new(window,cx).placeholder("Which models should handle which tasks?").auto_grow(3,8)),
             routing_status: String::new(),
+            persp_name: cx.new(|cx| InputState::new(window, cx).default_value(services::perspective::default_name())),
+            persp_backend: "claude".into(),
+            persp_writer: "same".into(),
+            persp_grok_model: None,
+            persp_built: None,
+            persp_pending: 0,
+            persp_status: services::perspective::status(),
         };
         // Any edit in an input repaints the window.
         for e in [&this.mem_search, &this.mem_add, &this.mem_tags, &this.cred_key, &this.cred_value, &this.wt_name] {
@@ -133,6 +151,92 @@ impl SettingsModel {
         self.load_worktrees(cx);
         self.load_runtime(cx);
         self.load_presets(cx);
+        self.load_perspective(cx);
+    }
+
+    // ── perspective ─────────────────────────────────────────────────────
+
+    pub fn load_perspective(&mut self, cx: &mut Context<Self>) {
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(
+            cx,
+            async move {
+                let built = services::perspective::last_built(&state);
+                let pending = if built.is_some() { services::perspective::pending_threads(&state) } else { 0 };
+                (built, pending, services::perspective::grok_default_model())
+            },
+            move |(built, pending, grok), cx| {
+                let _ = this.update(cx, |m, cx| {
+                    m.persp_grok_model = grok;
+                    m.persp_built = built;
+                    m.persp_pending = pending;
+                    m.persp_status = services::perspective::status();
+                    cx.notify();
+                });
+            },
+        );
+    }
+
+    /// Build (first time) or update the profile, showing progress until it finishes.
+    pub fn build_perspective(&mut self, cx: &mut Context<Self>) {
+        let mut opts = services::perspective::Options::defaults(&self.persp_backend);
+        if self.persp_writer != "same" {
+            opts = opts.written_by(&self.persp_writer);
+        }
+        let name = self.persp_name.read(cx).value().trim().to_string();
+        if !name.is_empty() {
+            opts.name = name;
+        }
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move { services::perspective::build(&state, opts).await }, move |res, cx| {
+            let _ = this.update(cx, |m, cx| {
+                match res {
+                    Ok(b) => m.toast(ToastKind::Success, format!("Perspective ready · {} conversations read", b.threads), cx),
+                    Err(e) => m.toast(ToastKind::Error, e, cx),
+                }
+                m.load_perspective(cx);
+            });
+        });
+        // Show progress while it runs.
+        let this = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| loop {
+            cx.background_executor().timer(std::time::Duration::from_millis(400)).await;
+            let status = services::perspective::status();
+            let running = status.running;
+            if this.update(cx, |m, cx| { m.persp_status = status; cx.notify(); }).is_err() || !running {
+                break;
+            }
+        })
+        .detach();
+        self.persp_status.running = true;
+        cx.notify();
+    }
+
+    /// Install the profile where Claude Code looks for skills.
+    pub fn export_perspective(&mut self, cx: &mut Context<Self>) {
+        let state = svc(cx);
+        let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else { return };
+        let dest = home.join(".claude/skills/perspective");
+        let shown = dest.display().to_string().replace(&home.display().to_string(), "~");
+        match services::perspective::export(&state, &dest) {
+            Ok(()) => self.toast(ToastKind::Success, format!("Saved to {shown}"), cx),
+            Err(e) => self.toast(ToastKind::Error, format!("Couldn't export: {e}"), cx),
+        }
+    }
+
+    /// Show the profile's folder, where SKILL.md can be edited.
+    pub fn reveal_perspective(&mut self, cx: &mut Context<Self>) {
+        let dir = services::perspective::output_dir(&svc(cx));
+        let _ = std::process::Command::new("open").arg(dir).spawn();
+    }
+
+    pub fn copy_perspective(&mut self, cx: &mut Context<Self>) {
+        if let Some(b) = &self.persp_built {
+            cx.write_to_clipboard(ClipboardItem::new_string(b.skill_md.clone()));
+            self.toast(ToastKind::Success, "Copied SKILL.md", cx);
+        }
     }
 
     // ── config ──────────────────────────────────────────────────────────

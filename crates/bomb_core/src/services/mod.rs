@@ -2,6 +2,7 @@
 
 pub mod claude_import;
 pub mod codex_import;
+pub mod perspective;
 pub mod processes;
 pub mod project_overview;
 pub mod project_sync;
