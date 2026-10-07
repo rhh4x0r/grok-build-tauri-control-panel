@@ -26,6 +26,10 @@ impl Global for AppModelHandle {}
 const ARCHIVED_KEY: &str = "archived_threads";
 const SIDEBAR_SORT_KEY: &str = "sidebar_sort";
 const RECENT_WINDOW_KEY: &str = "sidebar_recent_window";
+/// When each thread was last looked at (JSON map of id → RFC 3339).
+const THREAD_SEEN_KEY: &str = "thread_seen";
+/// Activity before this counts as seen: threads don't all light up the first time.
+const THREAD_SEEN_SINCE_KEY: &str = "thread_seen_since";
 const PINNED_PROJECTS_KEY: &str = "pinned_projects";
 const PROJECT_INTRO_KEY: &str = "project_intro_seen";
 
@@ -259,6 +263,10 @@ pub struct AppModel {
     pub sidebar_sort: SidebarSort,
     /// Closed projects list their threads active within this window.
     pub recent_window: RecentWindow,
+    /// When each thread was last on screen; finished work after that is unseen.
+    seen: HashMap<Uuid, chrono::DateTime<chrono::Utc>>,
+    /// Unset until loaded, and nothing is unseen until then.
+    seen_since: Option<chrono::DateTime<chrono::Utc>>,
     /// Project roots shown in the sidebar's Pinned section, in the order they were pinned.
     pub pinned_projects: Vec<String>,
     /// Workspaces to close once their agent finishes merging.
@@ -338,6 +346,8 @@ impl AppModel {
             pairing: false,
             sidebar_sort: SidebarSort::default(),
             recent_window: RecentWindow::default(),
+            seen: HashMap::new(),
+            seen_since: None,
             pinned_projects: Vec::new(),
             close_after_merge: HashSet::new(),
             active_workspace: None,
@@ -1139,6 +1149,7 @@ impl AppModel {
         }
         self.threads.retain(|id, _| order.contains(id));
         self.thread_order = order;
+        if let Some(open) = self.selected { self.seen.insert(open, chrono::Utc::now()); }
         if let Some(sel) = self.selected {
             if !self.threads.contains_key(&sel) {
                 self.selected = None;
@@ -1254,6 +1265,8 @@ impl AppModel {
         if self.selected == id {
             return;
         }
+        // Leaving a thread counts as having seen what it did while it was open.
+        for seen in self.selected.into_iter().chain(id) { self.mark_seen(seen, cx); }
         self.selected = id;
         self.prefs.fast_mode = Some(false);
         self.new_thread_open = false;
@@ -1907,9 +1920,22 @@ impl AppModel {
             let pinned = services::kv_get(&state, PINNED_PROJECTS_KEY).await.ok().flatten();
             let intro = services::kv_get(&state, PROJECT_INTRO_KEY).await.ok().flatten();
             let recent = services::kv_get(&state, RECENT_WINDOW_KEY).await.ok().flatten();
-            (sort, pinned, intro, recent)
-        }, move |(sort, pinned, intro, recent), cx| {
+            let seen = services::kv_get(&state, THREAD_SEEN_KEY).await.ok().flatten();
+            let since = match services::kv_get(&state, THREAD_SEEN_SINCE_KEY).await.ok().flatten() {
+                Some(since) => since,
+                None => {
+                    let now = chrono::Utc::now().to_rfc3339();
+                    let _ = services::kv_set(&state, THREAD_SEEN_SINCE_KEY, &now).await;
+                    now
+                }
+            };
+            (sort, pinned, intro, recent, seen, since)
+        }, move |(sort, pinned, intro, recent, seen, since), cx| {
             let _ = this.update(cx, |m, cx| {
+                if let Some(seen) = seen.and_then(|raw| serde_json::from_str::<HashMap<Uuid, chrono::DateTime<chrono::Utc>>>(&raw).ok()) {
+                    for (id, at) in seen { m.seen.entry(id).and_modify(|t| *t = (*t).max(at)).or_insert(at); }
+                }
+                m.seen_since = since.parse().ok();
                 if let Some(sort) = sort { m.sidebar_sort = SidebarSort::from_key(&sort); }
                 if let Some(recent) = recent { m.recent_window = RecentWindow::from_key(&recent); }
                 m.project_intro_seen = intro.as_deref() == Some("1");
@@ -2005,6 +2031,26 @@ impl AppModel {
                 });
             },
         );
+    }
+
+    /// The thread finished work since it was last on screen. Working or waiting threads
+    /// have their own marks, and the open thread is being looked at.
+    pub fn is_unseen(&self, id: Uuid, cx: &App) -> bool {
+        let Some(since) = self.seen_since else { return false };
+        if self.selected == Some(id) { return false; }
+        let Some(t) = self.threads.get(&id) else { return false };
+        let t = t.read(cx);
+        if t.thread.presence.turn_active() || t.meta.status == "running" { return false; }
+        let Ok(updated) = t.meta.updated_at.parse::<chrono::DateTime<chrono::Utc>>() else { return false };
+        updated > self.seen.get(&id).copied().unwrap_or(since).max(since)
+    }
+
+    /// Record that a thread was looked at, and save it so a restart agrees.
+    fn mark_seen(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.seen.insert(id, chrono::Utc::now());
+        let raw = serde_json::to_string(&self.seen).unwrap_or_default();
+        let state = svc(cx);
+        spawn_service(cx, async move { services::kv_set(&state, THREAD_SEEN_KEY, &raw).await }, |_, _| {});
     }
 
     pub fn set_recent_window(&mut self, window: RecentWindow, cx: &mut Context<Self>) {

@@ -128,12 +128,13 @@ impl SidebarView {
         let in_view = { let m = self.model.read(cx); m.active_project.as_deref().is_some_and(|a| m.sidebar_root(a) == g.root) };
         let collapsed = if self.collapsed.contains(&g.root) { true } else if self.expanded.contains(&open_key) { false } else { !in_view };
         // A closed project still says when it needs you or is busy.
-        let (running, waiting) = {
+        let (running, waiting, unseen) = {
             let m = self.model.read(cx);
-            g.threads.iter().filter(|id| !m.archived.contains(id)).filter_map(|id| m.threads.get(id)).fold((false, false), |(run, wait), t| {
+            g.threads.iter().filter(|id| !m.archived.contains(id)).filter_map(|id| m.threads.get(id).map(|t| (*id, t))).fold((false, false, false), |(run, wait, new), (id, t)| {
+                let fresh = m.is_unseen(id, cx);
                 let t = t.read(cx);
                 let asks = t.thread.open_approvals().count() > 0 || t.meta.status.contains("wait") || t.meta.status.contains("approv");
-                (run || t.thread.presence.turn_active() || t.meta.status == "running", wait || asks)
+                (run || t.thread.presence.turn_active() || t.meta.status == "running", wait || asks, new || fresh)
             })
         };
         let root = g.root.clone();
@@ -213,8 +214,10 @@ impl SidebarView {
                         .child(g.name.clone())
                         .on_click(move |_, _, cx| app.update(cx, |m, cx| m.set_active_project(root.clone(), cx))),
                 )
-                .when(collapsed && (running || waiting), |el| {
-                    let (color, hint) = if waiting { (ui.warning, "A thread here is waiting for your permission") } else { (ui.accent, "A thread here is working") };
+                .when(collapsed && (running || waiting || unseen), |el| {
+                    let (color, hint) = if waiting { (ui.warning, "A thread here is waiting for your permission") }
+                        else if running { (ui.accent, "A thread here is working") }
+                        else { (ui.success, "A thread here finished since you last looked") };
                     el.child(
                         div()
                             .id(SharedString::from(format!("busy-{}", g.root)))
@@ -405,6 +408,9 @@ impl SidebarView {
                         else if status == "idle" && (s.contains("wait") || s.contains("approv")) { status = "waiting".into(); }
                         else if status == "idle" && s == "failed" { status = "failed".into(); }
                     }
+                }
+                if status == "idle" && w.threads.iter().filter_map(|t| Uuid::parse_str(t).ok()).any(|id| self.model.read(cx).is_unseen(id, cx)) {
+                    status = "unseen".into();
                 }
                 let model_label = models.join(" · ");
                 let corner = status_corner(&status, &latest, ui);
@@ -599,6 +605,8 @@ impl SidebarView {
             "running"
         } else if status == "failed" {
             "failed"
+        } else if self.model.read(cx).is_unseen(id, cx) {
+            "unseen"
         } else {
             "idle"
         };
@@ -1196,6 +1204,18 @@ fn after_layers_settle(window: &mut Window, cx: &mut App, f: impl FnOnce(&mut Wi
 /// Row corner: time-ago for idle rows (10px medium, subline), otherwise a
 /// glyph + status word in the status color.
 fn status_corner(state: &str, updated_at: &str, ui: &Ui) -> AnyElement {
+    // Finished since you last looked: a green dot and a brighter time.
+    if state == "unseen" {
+        return div()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(Layout::SPACE_XS))
+            .h(px(14.))
+            .child(div().size(px(6.)).rounded_full().bg(ui.success))
+            .child(div().text_size(px(crate::theme::Type::CAPTION)).line_height(px(16.)).font_weight(FontWeight::MEDIUM).text_color(ui.text).child(time_ago(updated_at)))
+            .into_any_element();
+    }
     let (word, color): (&str, Hsla) = match state {
         "waiting" => ("Input", ui.warning),
         "running" => ("Working", ui.accent),

@@ -847,3 +847,7 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 
 - Web links in replies (and plan documents) open in the Preview tab; ⌘-click still uses the default browser (`transcript::open_link_with`, `AppModel::browse_request`, handled by `RootView`). File paths still reveal in Finder.
 - Preview keeps one page per project (`PreviewPanel::pages`) and follows navigation through `wry::WebView::url()`, so switching projects and back restores the page (reloaded at that address; not kept across restarts). Toolbar gains Back. A dev server only previews in the project whose folder it runs in.
+
+## 2026-10-07 — Unseen marker
+
+- A thread whose latest activity is newer than when it was last on screen (and isn't working or waiting) shows a green dot and brighter time in the sidebar; a closed project's header rolls it up after waiting and working. `AppModel::is_unseen` / `mark_seen`; seen times persist in kv `thread_seen`, and kv `thread_seen_since` (set on first run) keeps older activity from lighting up. Selecting a thread marks both the one left and the one opened. Doesn't yet know whether the window is frontmost; notifications will cover that.
