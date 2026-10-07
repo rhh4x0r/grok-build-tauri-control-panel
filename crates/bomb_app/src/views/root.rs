@@ -52,6 +52,11 @@ impl RootView {
             }
             let close = this.model.update(cx, |m,_| std::mem::take(&mut m.foundry_close));
             if close { this.foundry_open = false; }
+            if let Some(url) = this.model.update(cx, |m, _| m.browse_request.take()) {
+                this.preview_open = true;
+                this.model.update(cx, |m, _| m.review_open = false);
+                this.preview.update(cx, |p, cx| p.browse(url, cx));
+            }
             match this.model.update(cx, |m, _| m.right_panel_request.take()) {
                 Some(crate::models::app::RightPanelRequest::Show(crate::models::app::RightTab::Changes)) => {
                     this.preview_open = true;

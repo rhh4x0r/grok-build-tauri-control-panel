@@ -466,8 +466,8 @@ impl TranscriptView {
             TextView::new(state)
                 .selectable(true)
                 .code_block_actions(|block, _, _| copy_code_button(block.code()))
-                .on_link_click(move |href, _, _, cx| {
-                    open_link(href, &link_cwd, cx);
+                .on_link_click(move |href, click, _, cx| {
+                    open_link_with(href, &link_cwd, click.modifiers().platform, cx);
                 })
                 .into_any_element()
         };
@@ -792,7 +792,7 @@ impl TranscriptView {
                         .pr_2()
                         .pb_2()
                         .text_sm()
-                        .child(TextView::new(state).selectable(true)),
+                        .child(TextView::new(state).selectable(true).on_link_click(|href, click, _, cx| open_link_with(href, std::path::Path::new(""), click.modifiers().platform, cx))),
                 )
             })
             .into_any_element()
@@ -980,7 +980,7 @@ impl TranscriptView {
                     .child(div().flex_1())
                     .child(code_it),
             )
-            .child(div().text_sm().child(TextView::new(state).selectable(true)));
+            .child(div().text_sm().child(TextView::new(state).selectable(true).on_link_click(|href, click, _, cx| open_link_with(href, std::path::Path::new(""), click.modifiers().platform, cx))));
         self.enter("plan", id, card)
     }
 
@@ -1757,7 +1757,7 @@ fn diff_block(id: impl Into<ElementId>, text: &str) -> AnyElement {
         .text_size(px(crate::theme::Type::SMALL)).min_w_0()
         .max_h(px(400.))
         .overflow_y_scroll().overflow_x_hidden()
-        .child(TextView::markdown(id, md).selectable(true).code_block_actions(|block, _, _| copy_code_button(block.code())))
+        .child(TextView::markdown(id, md).selectable(true).on_link_click(|href, click, _, cx| open_link_with(href, std::path::Path::new(""), click.modifiers().platform, cx)).code_block_actions(|block, _, _| copy_code_button(block.code())))
         .into_any_element()
 }
 
@@ -1887,10 +1887,23 @@ pub(super) fn split_attached_files(text: &str) -> (String, Vec<(std::path::PathB
     (text[..start].trim_end().to_string(), files)
 }
 
-/// Links in replies: web links open in the browser; file paths are shown in Finder
+/// Links in replies: web links open in the right panel; file paths are shown in Finder
 /// (Finder's -50 came from treating `images/1.jpg` as a URL).
 pub(super) fn open_link(href: &str, cwd: &std::path::Path, cx: &mut App) {
-    if href.starts_with("http://") || href.starts_with("https://") || href.starts_with("mailto:") {
+    open_link_with(href, cwd, false, cx)
+}
+
+/// `in_browser` (⌘-click) sends a web link to the default browser instead of the panel.
+pub(super) fn open_link_with(href: &str, cwd: &std::path::Path, in_browser: bool, cx: &mut App) {
+    if href.starts_with("http://") || href.starts_with("https://") {
+        match cx.try_global::<crate::models::app::AppModelHandle>().map(|h| h.0.clone()) {
+            Some(model) if !in_browser => model.update(cx, |m, cx| {
+                m.browse_request = Some(href.to_string());
+                cx.notify();
+            }),
+            _ => cx.open_url(href),
+        }
+    } else if href.starts_with("mailto:") {
         cx.open_url(href);
     } else if let Some(p) = resolve_local(href, cwd, None) {
         // A file an agent mentions: show where it is, rather than launching whatever app owns the type.

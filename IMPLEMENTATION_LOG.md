@@ -842,3 +842,8 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 - Processes (`bomb_core::services::processes`): processes whose working folder or program is inside the thread's folder, from `ps` + `lsof` (about 0.3 s). Shells, agents, MCP servers, editor tooling and app-bundle helpers are filtered out. Stop sends TERM, then offers Force quit (KILL); `stop` refuses any pid not currently listed for that folder. Agents' own shell commands (e.g. Claude launching a desktop app) never pass through Bomb Code, so the folder is the only reliable link. First run found a 20-day-old `http.server` here and six orphaned Convex executors in another project.
 - GPUI crash fixed on the way: `Button` already sets a hover style, and a second `.hover()` aborts ("hover style already set").
 - Startup no longer opens the alphabetically first project (the home folder, which offered to `git init` it): `startup_project` picks the project of the most recent non-mock thread once this Mac's threads load, never the home folder.
+
+## 2026-10-07 — Chat links open in the right panel
+
+- Web links in replies (and plan documents) open in the Preview tab; ⌘-click still uses the default browser (`transcript::open_link_with`, `AppModel::browse_request`, handled by `RootView`). File paths still reveal in Finder.
+- Preview keeps one page per project (`PreviewPanel::pages`) and follows navigation through `wry::WebView::url()`, so switching projects and back restores the page (reloaded at that address; not kept across restarts). Toolbar gains Back. A dev server only previews in the project whose folder it runs in.

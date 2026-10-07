@@ -2,7 +2,7 @@
 //! preview pane), Processes running from the thread's folder, and the file tree.
 //! Changes is its own panel and shares this panel's tab bar (`panel_tabs`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::views::button::Button;
 use gpui_kit::assets::IconName as Lucide;
@@ -20,8 +20,11 @@ pub struct PreviewPanel {
     tab: RightTab,
     webview: Option<Entity<gpui_wry::WebView>>,
     loaded_url: Option<String>,
-    /// A page the user chose to preview that Bomb Code didn't start (a port from Processes).
-    manual_url: Option<String>,
+    /// Per project: the page open in Preview when it isn't Bomb Code's dev server (a link
+    /// from the chat, a port from Processes). Follows navigation, so switching back restores it.
+    pages: HashMap<String, String>,
+    /// The project whose page the web view is showing.
+    page_project: Option<String>,
     error: Option<String>,
     files: Entity<super::file_tree::FileTree>,
     project_root_override: Option<std::path::PathBuf>,
@@ -42,7 +45,8 @@ impl PreviewPanel {
             model,
             webview: None,
             loaded_url: None,
-            manual_url: None,
+            pages: HashMap::new(),
+            page_project: None,
             error: None,
             stopping: HashSet::new(),
         }
@@ -53,6 +57,43 @@ impl PreviewPanel {
             self.tab = tab;
         }
         cx.notify();
+    }
+
+    /// Show `url` in the Preview tab and remember it as this project's page.
+    pub fn browse(&mut self, url: String, cx: &mut Context<Self>) {
+        if let Some(project) = self.project_key(cx) {
+            self.pages.insert(project, url);
+        }
+        self.tab = RightTab::Preview;
+        cx.notify();
+    }
+
+    fn project_key(&self, cx: &App) -> Option<String> {
+        self.model.read(cx).active_project.clone()
+    }
+
+    fn page(&self, cx: &App) -> Option<String> {
+        self.project_key(cx).and_then(|p| self.pages.get(&p).cloned())
+    }
+
+    fn set_page(&mut self, url: Option<String>, cx: &App) {
+        let Some(project) = self.project_key(cx) else { return };
+        match url {
+            Some(url) => { self.pages.insert(project, url); }
+            None => { self.pages.remove(&project); }
+        }
+    }
+
+    /// Keep the remembered page in step with where the user has browsed to.
+    fn follow_navigation(&mut self, cx: &App) {
+        let (Some(project), Some(view)) = (self.page_project.clone(), self.webview.as_ref()) else { return };
+        if !self.pages.contains_key(&project) { return; }
+        if let Ok(current) = view.read(cx).raw().url() {
+            if !current.is_empty() && current != "about:blank" && self.loaded_url.as_deref() != Some(current.as_str()) {
+                self.loaded_url = Some(current.clone());
+                self.pages.insert(project, current);
+            }
+        }
     }
 
     pub fn reveal_file(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
@@ -68,8 +109,7 @@ impl PreviewPanel {
         if root != self.context_root {
             self.context_root = root;
             self.files = cx.new(|_| super::file_tree::FileTree::new());
-            // Another thread's folder: its pages and stop requests don't carry over.
-            self.manual_url = None;
+            // Another thread's folder: its stop requests don't carry over.
             self.stopping.clear();
         }
     }
@@ -185,16 +225,26 @@ impl PreviewPanel {
 
     fn render_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let ui = Ui::of(cx);
-        let status = self.model.read(cx).dev_server.clone().filter(|s| self.project_root_override.as_ref().is_none_or(|r| s.cwd.as_deref()==r.to_str()));
+        // Leaving a project: save where its page had got to, and let the next project load its own.
+        let project = self.project_key(cx);
+        if self.page_project != project {
+            self.follow_navigation(cx);
+            self.drop_webview();
+            self.page_project = project.clone();
+        }
+        // The dev server belongs to one folder; another project's server isn't this one's preview.
+        let here = self.current_root(cx).map(|r| r.to_string_lossy().into_owned());
+        let status = self.model.read(cx).dev_server.clone().filter(|s| {
+            let cwd = s.cwd.as_deref().unwrap_or("");
+            here.as_deref() == Some(cwd) || project.as_deref().is_some_and(|p| cwd == p || cwd.starts_with(&format!("{p}/")))
+        });
         let running = status.as_ref().map(|s| s.running).unwrap_or(false);
         let server_url = status.as_ref().and_then(|s| s.url.clone()).filter(|_| running);
         // Bomb Code's own server wins; otherwise a page picked from Processes, while it still listens.
         let ports: Vec<(String, u16)> = self.model.read(cx).processes.iter()
             .flat_map(|p| p.ports.iter().map(move |port| (p.name.clone(), *port))).collect();
-        if self.manual_url.as_ref().is_some_and(|u| !ports.iter().any(|(_, port)| u.ends_with(&format!(":{port}")))) {
-            self.manual_url = None;
-        }
-        let url = server_url.clone().or_else(|| self.manual_url.clone());
+        self.follow_navigation(cx);
+        let url = server_url.clone().or_else(|| self.page(cx));
         match &url {
             Some(u) => self.ensure(u, window, cx),
             None if self.webview.is_some() => self.drop_webview(),
@@ -229,7 +279,7 @@ impl PreviewPanel {
                             let target = format!("http://localhost:{port}");
                             Button::new(SharedString::from(format!("preview-port-{i}"))).ghost().small()
                                 .icon(Lucide::Globe).label(format!("{name} · localhost:{port}"))
-                                .on_click(cx.listener(move |v, _, _, cx| { v.manual_url = Some(target.clone()); cx.notify(); }))
+                                .on_click(cx.listener(move |v, _, _, cx| v.browse(target.clone(), cx)))
                         }))
                 })
                 .into_any_element();
@@ -264,6 +314,9 @@ impl PreviewPanel {
                             .whitespace_nowrap()
                             .child(url.clone()),
                     )
+                    .child(icon_button("preview-back", Lucide::ArrowLeft, "Back").on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(view) = &this.webview { view.update(cx, |w, _| { let _ = w.back(); }); }
+                    })))
                     .child(icon_button("preview-reload", Lucide::RefreshCw, "Reload").on_click(cx.listener(|this, _, _, cx| this.reload(cx))))
                     .child(icon_button("preview-open", Lucide::ExternalLink, "Open in browser").on_click({
                         // Bomb Code's own server opens through the model, which also knows server projects.
@@ -272,7 +325,7 @@ impl PreviewPanel {
                     }))
                     .child(if manual {
                         Button::new("preview-stop-viewing").ghost().small().label("Close preview")
-                            .on_click(cx.listener(|v, _, _, cx| { v.manual_url = None; cx.notify(); }))
+                            .on_click(cx.listener(|v, _, _, cx| { v.set_page(None, cx); v.drop_webview(); cx.notify(); }))
                     } else {
                         Button::new("preview-server-toggle").ghost().small().label("Stop server")
                             .on_click(cx.listener(|v, _, _, cx| v.toggle_server(cx)))
@@ -349,11 +402,7 @@ impl PreviewPanel {
                         div().flex().items_center().gap_1().flex_shrink_0()
                             .when_some(preview_url, |el, url| {
                                 el.child(Button::new(SharedString::from(format!("process-preview-{pid}"))).ghost().small().label("Preview")
-                                    .on_click(cx.listener(move |v, _, _, cx| {
-                                        v.manual_url = Some(url.clone());
-                                        v.tab = RightTab::Preview;
-                                        cx.notify();
-                                    })))
+                                    .on_click(cx.listener(move |v, _, _, cx| v.browse(url.clone(), cx))))
                             })
                             .child(Button::new(SharedString::from(format!("process-stop-{pid}"))).outline().small()
                                 .label(if asked { "Force quit" } else { "Stop" })

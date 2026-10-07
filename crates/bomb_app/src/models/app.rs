@@ -281,6 +281,8 @@ pub struct AppModel {
     pub file_reveal_request: Option<std::path::PathBuf>,
     /// Asks the window to switch the right panel's tab or close it.
     pub right_panel_request: Option<RightPanelRequest>,
+    /// A web link to open in the right panel's Preview tab.
+    pub browse_request: Option<String>,
     /// Processes running from the selected thread's folder (see `refresh_processes`).
     pub processes: Vec<bomb_core::services::processes::ProcessInfo>,
     /// The folder `processes` was read for.
@@ -355,6 +357,7 @@ impl AppModel {
             foundry_show_runs: false,
             file_reveal_request: None,
             right_panel_request: None,
+            browse_request: None,
             processes: Vec::new(),
             processes_folder: None,
             processes_loading: false,
