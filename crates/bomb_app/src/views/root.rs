@@ -244,6 +244,12 @@ impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::theme::follow_system(window, cx);
         self.drain_toasts(window, cx);
+        // With nothing focused (no project or thread picked yet), window actions like
+        // Settings (⌘,) have no handler in the focus path and the menu greys them out.
+        // The root handles them, so it takes focus whenever nothing else has it.
+        if window.focused(cx).is_none() {
+            self.focus.focus(window, cx);
+        }
         // Whatever covers or replaces the preview pane (Changes, Settings, Foundry, a closed pane), the
         // native browser view must not stay painted over it.
         let preview_showing = self.preview_open && !self.model.read(cx).review_open && !self.settings_open && !self.foundry_open;
