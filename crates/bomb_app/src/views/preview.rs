@@ -253,8 +253,8 @@ impl PreviewPanel {
         }
 
         let Some(url) = url else {
-            // Nothing to show: no toolbar, one clear next step.
-            let message = status.as_ref().map(|s| s.message.clone()).filter(|m| !m.is_empty());
+            // Nothing to show: no toolbar. Pages arrive as links from the agent, or from a
+            // project process that is already listening.
             return div()
                 .flex_1()
                 .min_h_0()
@@ -264,18 +264,16 @@ impl PreviewPanel {
                 .justify_center()
                 .gap_3()
                 .p_4()
-                .child(div().text_base().font_weight(FontWeight::MEDIUM).text_color(ui.text).child(if running { "Starting the dev server…" } else { "Nothing to preview yet" }))
-                .child(Self::empty(match (&self.error, running, message) {
-                    (Some(e), _, _) => format!("Could not create the preview: {e}"),
-                    (None, true, _) => "Waiting for the server to report its address.".into(),
-                    (None, false, Some(m)) => m,
-                    (None, false, None) => "Start this project's dev server to see the app here.".into(),
+                .child(div().text_base().font_weight(FontWeight::MEDIUM).text_color(ui.text).child("Nothing to preview yet"))
+                .child(Self::empty(match &self.error {
+                    Some(e) => format!("Could not create the preview: {e}"),
+                    None => "Links in the chat open here. Ask your agent to run the app and share its link.".into(),
                 }, &ui))
-                .child(Button::new("preview-server-toggle").small().map(|b| if running { b.outline() } else { b.primary() })
-                    .label(if running { "Stop server" } else { "Start dev server" })
-                    .on_click(cx.listener(|v, _, _, cx| v.toggle_server(cx))))
-                .when(!running && !ports.is_empty(), |el| {
-                    el.child(div().pt_2().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child("Or preview something already running:"))
+                // A server started before this change may still be running without an address.
+                .when(running, |el| el.child(Button::new("preview-server-toggle").small().outline().label("Stop server")
+                    .on_click(cx.listener(|v, _, _, cx| v.toggle_server(cx)))))
+                .when(!ports.is_empty(), |el| {
+                    el.child(div().pt_2().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_faint).child("Running in this project:"))
                         .children(ports.iter().enumerate().map(|(i, (name, port))| {
                             let target = format!("http://localhost:{port}");
                             Button::new(SharedString::from(format!("preview-port-{i}"))).ghost().small()

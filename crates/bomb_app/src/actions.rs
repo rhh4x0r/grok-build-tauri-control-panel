@@ -90,7 +90,7 @@ pub fn init(cx: &mut App) {
                 MenuItem::action("Find in Conversation", FindInThread),
                 MenuItem::separator(),
                 MenuItem::action("Toggle Explainer", ToggleExplainer),
-                MenuItem::action("Toggle Dev Preview", ToggleDevPreview),
+                MenuItem::action("Toggle Preview Panel", ToggleDevPreview),
             ],
             disabled: false,
         },

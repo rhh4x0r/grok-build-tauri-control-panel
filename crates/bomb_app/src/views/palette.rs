@@ -27,7 +27,7 @@ fn entries() -> Vec<Entry> {
         Entry { label: "Find in conversation", keywords: &["search"], icon: Lucide::Search, action: Box::new(FindInThread) },
         Entry { label: "Stop current turn", keywords: &["cancel", "interrupt"], icon: Lucide::Square, action: Box::new(StopTurn) },
         Entry { label: "Cycle approval mode", keywords: &["plan", "ask", "auto", "yolo"], icon: Lucide::ShieldCheck, action: Box::new(CycleApprovalMode) },
-        Entry { label: "Toggle dev-server preview", keywords: &["browser", "webview"], icon: Lucide::AppWindow, action: Box::new(ToggleDevPreview) },
+        Entry { label: "Toggle preview panel", keywords: &["browser", "webview", "processes", "files"], icon: Lucide::AppWindow, action: Box::new(ToggleDevPreview) },
         Entry { label: "Toggle explainer", keywords: &["narrator"], icon: Lucide::MessageSquare, action: Box::new(ToggleExplainer) },
         Entry { label: "Update thread from main", keywords: &["git", "update", "merge"], icon: Lucide::GitMerge, action: Box::new(SyncThread) },
         Entry { label: "Review / Ship thread", keywords: &["git", "ship"], icon: Lucide::GitPullRequestArrow, action: Box::new(LandThread) },
