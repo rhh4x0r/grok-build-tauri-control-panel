@@ -38,6 +38,8 @@ pub struct RootView {
     settings_open: bool,
     foundry: Option<Entity<crate::views::foundry::FoundryView>>,
     foundry_open: bool,
+    /// Folder whose processes were last asked for; a change triggers an immediate scan.
+    process_folder: Option<String>,
     _mode_shortcut: Subscription,
 }
 
@@ -56,6 +58,12 @@ impl RootView {
                 this.preview_open = true;
                 this.model.update(cx, |m, _| m.review_open = false);
                 this.preview.update(cx, |p, cx| p.browse(url, cx));
+            }
+            // A different thread or project: list its processes now, not at the next tick.
+            let folder = this.model.read(cx).process_folder(cx);
+            if folder != this.process_folder {
+                this.process_folder = folder;
+                this.model.update(cx, |m, cx| { m.show_cached_processes(cx); m.refresh_processes(cx); });
             }
             match this.model.update(cx, |m, _| m.right_panel_request.take()) {
                 Some(crate::models::app::RightPanelRequest::Show(crate::models::app::RightTab::Changes)) => {
@@ -129,6 +137,7 @@ impl RootView {
             settings_open: false,
             foundry: None,
             foundry_open: false,
+            process_folder: None,
         }
     }
 

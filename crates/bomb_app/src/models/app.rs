@@ -277,6 +277,7 @@ pub struct AppModel {
     pub review_open: bool,
     pub git_busy: bool,
     pub review_loading: bool,
+    review_loading_for: Option<String>,
     pub active_project: Option<String>,
     pub thread_order: Vec<Uuid>,
     pub threads: HashMap<Uuid, Entity<ThreadModel>>,
@@ -295,7 +296,11 @@ pub struct AppModel {
     pub processes: Vec<bomb_core::services::processes::ProcessInfo>,
     /// The folder `processes` was read for.
     pub processes_folder: Option<String>,
-    processes_loading: bool,
+    /// Last scan for every local thread and project folder, so switching shows a list at once.
+    processes_by_folder: HashMap<String, Vec<bomb_core::services::processes::ProcessInfo>>,
+    processes_scanning: bool,
+    /// Another scan was asked for while one ran.
+    processes_again: bool,
     pub auth: Vec<BackendAuth>,
     /// Account usage limits (5h / weekly) per backend, refreshed slowly.
     pub usage: Vec<bomb_core::usage::AccountUsage>,
@@ -356,6 +361,7 @@ impl AppModel {
             review_open: false,
             git_busy: false,
             review_loading: false,
+            review_loading_for: None,
             active_project: None,
             thread_order: Vec::new(),
             threads: HashMap::new(),
@@ -370,7 +376,9 @@ impl AppModel {
             browse_request: None,
             processes: Vec::new(),
             processes_folder: None,
-            processes_loading: false,
+            processes_by_folder: HashMap::new(),
+            processes_scanning: false,
+            processes_again: false,
             auth: Vec::new(),
             usage: Vec::new(),
             backends: Vec::new(),
@@ -522,17 +530,20 @@ impl AppModel {
     pub fn refresh_review(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.active_workspace.clone() else { self.review = None; return; };
         if self.workspaces.iter().any(|w| w.id == id && w.archived_at.is_some()) { self.review = None; return; }
-        if self.review_loading {return;}
+        // One load per workspace at a time; switching starts the new one at once.
+        if self.review_loading && self.review_loading_for.as_deref() == Some(id.as_str()) {return;}
         self.review_loading = true;
-        let state = svc(cx);
+        self.review_loading_for = Some(id.clone());
         let this = cx.entity().downgrade();
         let selected = id.clone();
         let core = self.core_of_workspace(&id, cx);
-        let _ = &state;
         spawn_service(cx, async move { core.review_workspace(id).await }, move |res, cx| {
             let _ = this.update(cx, |m, cx| {
-                if m.active_workspace.as_deref() != Some(&selected) { return; }
+                // A load for a workspace the user has left: drop it, and leave the flag to the newer load.
+                if m.review_loading_for.as_deref() != Some(selected.as_str()) { return; }
                 m.review_loading = false;
+                m.review_loading_for = None;
+                if m.active_workspace.as_deref() != Some(&selected) { return; }
                 match res { Ok(r) => m.review = Some(r), Err(e) => { m.review = None; m.last_error = Some(e); } }
                 cx.notify();
             });
@@ -1986,32 +1997,49 @@ impl AppModel {
         (!folder.is_empty() && !crate::remote::is_server_root(&folder)).then_some(folder)
     }
 
-    pub fn refresh_processes(&mut self, cx: &mut Context<Self>) {
-        let Some(folder) = self.process_folder(cx) else {
-            if !self.processes.is_empty() || self.processes_folder.is_some() {
-                self.processes.clear();
-                self.processes_folder = None;
-                cx.notify();
-            }
-            return;
+    /// Show the folder in view from the last scan, without waiting for a new one.
+    pub fn show_cached_processes(&mut self, cx: &mut Context<Self>) {
+        let folder = self.process_folder(cx);
+        let cached = folder.as_ref().and_then(|f| self.processes_by_folder.get(f.trim_end_matches('/'))).cloned();
+        let (list, scanned) = match cached {
+            Some(list) => (list, folder),
+            None => (Vec::new(), None),
         };
-        if self.processes_loading { return; }
-        self.processes_loading = true;
+        if self.processes != list || self.processes_folder != scanned {
+            self.processes = list;
+            self.processes_folder = scanned;
+            cx.notify();
+        }
+    }
+
+    /// Rescan every local thread and project folder in one pass (one `ps` + `lsof`).
+    pub fn refresh_processes(&mut self, cx: &mut Context<Self>) {
+        if self.processes_scanning {
+            self.processes_again = true;
+            return;
+        }
+        let mut folders: Vec<String> = self.local_projects.clone();
+        folders.extend(self.local_threads.iter().filter(|t| !self.archived.contains(&Uuid::parse_str(&t.id).unwrap_or_default())).map(|t| t.cwd.clone()));
+        folders.extend(self.process_folder(cx));
+        folders.retain(|f| !f.is_empty() && !crate::remote::is_server_root(f));
+        folders.sort();
+        folders.dedup();
+        if folders.is_empty() {
+            self.show_cached_processes(cx);
+            return;
+        }
+        self.processes_scanning = true;
+        self.processes_again = false;
         let this = cx.entity().downgrade();
         spawn_service(
             cx,
-            async move { (bomb_core::services::processes::list_for_folder(&folder).await, folder) },
-            move |(res, folder), cx| {
+            async move { bomb_core::services::processes::list_for_folders(&folders).await },
+            move |res, cx| {
                 let _ = this.update(cx, |m, cx| {
-                    m.processes_loading = false;
-                    // Ignore a scan for a thread the user has since left.
-                    if m.process_folder(cx).as_deref() != Some(folder.as_str()) { return; }
-                    let list = res.unwrap_or_default();
-                    if m.processes != list || m.processes_folder.as_deref() != Some(folder.as_str()) {
-                        m.processes = list;
-                        m.processes_folder = Some(folder);
-                        cx.notify();
-                    }
+                    m.processes_scanning = false;
+                    if let Ok(map) = res { m.processes_by_folder = map; }
+                    m.show_cached_processes(cx);
+                    if std::mem::take(&mut m.processes_again) { m.refresh_processes(cx); }
                 });
             },
         );
@@ -2026,9 +2054,26 @@ impl AppModel {
             async move { bomb_core::services::processes::stop(&folder, pid, force).await },
             move |res, cx| {
                 let _ = this.update(cx, |m, cx| {
-                    if let Err(e) = res { m.fail(e, cx); }
+                    match res {
+                        Err(e) => m.fail(e, cx),
+                        // A killed process is gone; one asked to quit usually goes within a second.
+                        Ok(()) if force => {
+                            m.processes.retain(|p| p.pid != pid);
+                            for list in m.processes_by_folder.values_mut() { list.retain(|p| p.pid != pid); }
+                            cx.notify();
+                        }
+                        Ok(()) => {}
+                    }
                     m.refresh_processes(cx);
                 });
+                // Catch the exit as soon as it happens instead of at the next 3 s tick.
+                let this = this.clone();
+                cx.spawn(async move |cx| {
+                    for wait in [300u64, 800, 1500] {
+                        cx.background_executor().timer(std::time::Duration::from_millis(wait)).await;
+                        if this.update(cx, |m, cx| m.refresh_processes(cx)).is_err() { return; }
+                    }
+                }).detach();
             },
         );
     }

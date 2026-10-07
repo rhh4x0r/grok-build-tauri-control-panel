@@ -851,3 +851,9 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 ## 2026-10-07 — Unseen marker
 
 - A thread whose latest activity is newer than when it was last on screen (and isn't working or waiting) shows a green dot and brighter time in the sidebar; a closed project's header rolls it up after waiting and working. `AppModel::is_unseen` / `mark_seen`; seen times persist in kv `thread_seen`, and kv `thread_seen_since` (set on first run) keeps older activity from lighting up. Selecting a thread marks both the one left and the one opened. Doesn't yet know whether the window is frontmost; notifications will cover that.
+
+## 2026-10-07 — Right panel updates without lag
+
+- One scan for all folders: `processes::list_for_folders` splits a single `ps` + `lsof` pass (~0.2 s) across every local project and thread folder. `AppModel` keeps the result per folder, so switching shows the cached list at once (`show_cached_processes`) while a fresh scan runs. Scans no longer drop requests: one asked for mid-scan runs once more afterwards.
+- Processes younger than 2 s are skipped, so agents' and Git's short commands don't flicker into the list. After Stop the list re-checks at 0.3/1.1/2.6 s; Force quit removes the row at once. The tab count and list never show another folder's scan ("Checking…" until the first one lands).
+- Changes panel: a load remembers its workspace (`review_loading_for`). Switching starts the new load at once, and a stale result can no longer leave `review_loading` stuck, which had frozen the panel on old data.

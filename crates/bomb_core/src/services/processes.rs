@@ -27,10 +27,25 @@ pub struct ProcessInfo {
     pub ports: Vec<u16>,
 }
 
+/// Processes younger than this are left out: agents and Git checks run short commands in
+/// project folders constantly, and listing them makes the panel flicker.
+const MIN_AGE_SECS: u64 = 2;
+
 /// Processes working in `folder`, longest running first.
 pub async fn list_for_folder(folder: &str) -> Result<Vec<ProcessInfo>, String> {
-    let folder = folder.trim_end_matches('/');
-    if folder.is_empty() || !Path::new(folder).is_absolute() {
+    let mut all = list_for_folders(&[folder.to_string()]).await?;
+    Ok(all.remove(folder.trim_end_matches('/')).unwrap_or_default())
+}
+
+/// One scan, split by folder: every folder's list for the price of one `ps` + `lsof`.
+/// Keys are the folders without a trailing slash.
+pub async fn list_for_folders(folders: &[String]) -> Result<HashMap<String, Vec<ProcessInfo>>, String> {
+    let folders: Vec<&str> = folders
+        .iter()
+        .map(|f| f.trim_end_matches('/'))
+        .filter(|f| !f.is_empty() && Path::new(f).is_absolute())
+        .collect();
+    if folders.is_empty() {
         return Err("no project folder".into());
     }
     let (table, args, cwds, ports) = tokio::join!(
@@ -43,29 +58,37 @@ pub async fn list_for_folder(folder: &str) -> Result<Vec<ProcessInfo>, String> {
     let cwds = parse_lsof_names(&cwds.unwrap_or_default());
     let ports = parse_ports(&ports.unwrap_or_default());
     let own = std::process::id();
-    let mut out: Vec<ProcessInfo> = parse_table(&table?)
-        .into_iter()
-        .filter(|row| row.pid != own)
-        .filter_map(|row| {
-            let command = args.get(&row.pid).cloned().unwrap_or_else(|| row.comm.clone());
-            let cwd = cwds.get(&row.pid).cloned().unwrap_or_default();
-            let program = command.split_whitespace().next().unwrap_or("");
-            let here = inside(&cwd, folder) || (program.starts_with('/') && inside(program, folder));
-            // Login shells report as "-zsh".
-            let name = row.comm.rsplit('/').next().unwrap_or(&row.comm).trim_start_matches('-').to_string();
-            (here && !is_tooling(&name, &command)).then(|| ProcessInfo {
-                pid: row.pid,
-                name,
-                command,
-                cwd,
-                running_secs: row.running_secs,
-                cpu_percent: row.cpu,
-                memory_kb: row.rss_kb,
-                ports: ports.get(&row.pid).cloned().unwrap_or_default(),
-            })
-        })
-        .collect();
-    out.sort_by_key(|p| std::cmp::Reverse(p.running_secs));
+    let mut out: HashMap<String, Vec<ProcessInfo>> = folders.iter().map(|f| (f.to_string(), Vec::new())).collect();
+    for row in parse_table(&table?) {
+        if row.pid == own || row.running_secs < MIN_AGE_SECS {
+            continue;
+        }
+        let command = args.get(&row.pid).cloned().unwrap_or_else(|| row.comm.clone());
+        // Login shells report as "-zsh".
+        let name = row.comm.rsplit('/').next().unwrap_or(&row.comm).trim_start_matches('-').to_string();
+        if is_tooling(&name, &command) {
+            continue;
+        }
+        let cwd = cwds.get(&row.pid).cloned().unwrap_or_default();
+        let program = command.split_whitespace().next().unwrap_or("").to_string();
+        for folder in &folders {
+            if inside(&cwd, folder) || (program.starts_with('/') && inside(&program, folder)) {
+                out.get_mut(*folder).expect("seeded").push(ProcessInfo {
+                    pid: row.pid,
+                    name: name.clone(),
+                    command: command.clone(),
+                    cwd: cwd.clone(),
+                    running_secs: row.running_secs,
+                    cpu_percent: row.cpu,
+                    memory_kb: row.rss_kb,
+                    ports: ports.get(&row.pid).cloned().unwrap_or_default(),
+                });
+            }
+        }
+    }
+    for list in out.values_mut() {
+        list.sort_by_key(|p| std::cmp::Reverse(p.running_secs));
+    }
     Ok(out)
 }
 
@@ -242,6 +265,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let folder = dir.path().canonicalize().unwrap();
         let mut child = std::process::Command::new("sleep").arg("30").current_dir(&folder).spawn().unwrap();
+        // Brand-new processes are skipped until they've lasted MIN_AGE_SECS.
+        assert!(list_for_folder(folder.to_str().unwrap()).await.unwrap().iter().all(|p| p.pid != child.id()));
+        tokio::time::sleep(std::time::Duration::from_millis(MIN_AGE_SECS * 1000 + 1100)).await;
         let listed = list_for_folder(folder.to_str().unwrap()).await.unwrap();
         let found = listed.iter().find(|p| p.pid == child.id());
         assert!(found.is_some_and(|p| p.name == "sleep"), "{listed:?}");

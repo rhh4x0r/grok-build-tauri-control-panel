@@ -179,7 +179,8 @@ impl PreviewPanel {
 /// The right panel's tab bar, shared by this panel and Changes. Tabs and close go
 /// through the model so the window decides which panel shows.
 pub fn panel_tabs(active: RightTab, model: &Entity<AppModel>, ui: &Ui, cx: &App) -> Div {
-    let running = model.read(cx).processes.len();
+    // Only count processes scanned for the folder in view, never the last one's.
+    let running = { let m = model.read(cx); if m.processes_folder == m.process_folder(cx) { m.processes.len() } else { 0 } };
     let ask = |request: RightPanelRequest| {
         let model = model.clone();
         move |_: &ClickEvent, _: &mut Window, cx: &mut App| model.update(cx, |m, cx| { m.right_panel_request = Some(request); cx.notify(); })
@@ -337,9 +338,9 @@ impl PreviewPanel {
 
     fn render_processes(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let ui = Ui::of(cx);
-        let (folder, list) = {
+        let (folder, scanned, list) = {
             let m = self.model.read(cx);
-            (m.process_folder(cx), m.processes.clone())
+            (m.process_folder(cx), m.processes_folder.clone(), m.processes.clone())
         };
         self.stopping.retain(|pid| list.iter().any(|p| p.pid == *pid));
         let centered = |title: &'static str, body: &'static str| {
@@ -350,6 +351,9 @@ impl PreviewPanel {
         };
         if folder.is_none() {
             return centered("No folder here", "Processes are listed for threads and projects on this Mac.");
+        }
+        if scanned != folder {
+            return centered("Checking…", "Looking for processes running from this thread's folder.");
         }
         if list.is_empty() {
             return centered("Nothing running", "Apps, dev servers and watchers started from this thread's folder show up here, so you can stop them.");
