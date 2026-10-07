@@ -306,6 +306,7 @@ impl Render for RootView {
                 this.foundry_open = false;
                 this.preview_open = false;
                 this.preview.update(cx, |p, cx| p.hidden(cx));
+                crate::views::media::stop_inline(cx);
                 this.model.update(cx, |m, cx| m.open_home(cx));
                 this.thread.update(cx, |t, cx| t.focus_composer(window, cx));
                 cx.notify();
@@ -336,13 +337,15 @@ impl Render for RootView {
                 if this.model.update(cx, |m,_| std::mem::take(&mut m.foundry_show_runs)) {
                     if let Some(v)=&this.foundry {v.update(cx,|v,cx|v.show_runs(cx));}
                 }
-                this.foundry_open = true; this.settings_open = false; cx.notify();
+                this.foundry_open = true; this.settings_open = false; crate::views::media::stop_inline(cx); cx.notify();
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 if this.settings.is_none() {
                     this.settings = Some(cx.new(|cx| crate::views::settings::SettingsView::new(window, cx)));
                 }
                 this.settings_open = true;
+                // The chat isn't on screen; a native inline player would float over Settings.
+                crate::views::media::stop_inline(cx);
                 this.focus.focus(window, cx);
                 cx.notify();
             }))

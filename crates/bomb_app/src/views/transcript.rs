@@ -460,6 +460,7 @@ impl TranscriptView {
     ) -> AnyElement {
         let cwd = std::path::PathBuf::from(&self.thread.read(cx).meta.cwd);
         let link_cwd = cwd.clone();
+        let videos = if streaming { Vec::new() } else { super::media::linked_videos(raw, &cwd) };
         let body_text: AnyElement = if streaming {
             streaming_text(id, bomb_foundry::presentation::stage_prose(raw), ui)
         } else {
@@ -531,6 +532,11 @@ impl TranscriptView {
                                     .object_fit(ObjectFit::Contain),
                             ))
                     }),
+                ))
+            })
+            .when(!videos.is_empty(), |el| {
+                el.child(div().flex().flex_wrap().gap_3().py_2().children(
+                    videos.iter().enumerate().map(|(ix, v)| video_card(id * 64 + ix as u64, v, ui, cx)),
                 ))
             })
             .when(streaming, |el| {
@@ -1386,7 +1392,8 @@ impl Render for TranscriptView {
                 })
                 .when(empty, |el| {
                     el.child(div().px_6().py_4().text_sm().text_color(ui.text_faint).child("Nothing here yet."))
-                }),
+                })
+                .children(super::media::player_watch(cx)),
         )
     }
 }
@@ -1855,6 +1862,73 @@ fn local_images(
         push(token);
     }
     out
+}
+
+/// A linked video, sized like the video. Idle: its Quick Look frame under a play button
+/// that plays it right here. Playing: the player, with Expand (to Preview, same moment)
+/// and Stop. "Open" hands the file to the default player.
+fn video_card(key: u64, v: &super::media::LinkedVideo, ui: &Ui, cx: &App) -> impl IntoElement {
+    let thumb = super::media::thumbnail(&v.path);
+    let ratio = thumb.as_deref().and_then(super::media::aspect).unwrap_or(16.0 / 9.0);
+    let (w, h) = if ratio >= 1.0 { (320.0, 320.0 / ratio) } else { ((420.0 * ratio).max(180.0), 420.0) };
+    let playing = super::media::video_slot(&v.path, cx);
+    let is_playing = playing.is_some();
+    let hover = ui.hover;
+    let action = |id: (&'static str, u64), label: &'static str, tip: &'static str| {
+        div().id(id).px_1().rounded(px(4.)).cursor_pointer().hover(move |s| s.bg(hover))
+            .text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_muted).child(label)
+            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx))
+    };
+    let play_path = v.path.clone();
+    let preview_path = v.path.clone();
+    let open = v.path.clone();
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .w(px(w))
+        .child(
+            div()
+                .id(("video", key))
+                .relative()
+                .w(px(w))
+                .h(px(h))
+                .rounded(px(10.))
+                .overflow_hidden()
+                .border_1()
+                .border_color(ui.border)
+                .bg(gpui_kit::black())
+                .map(|el| match playing {
+                    Some(slot) => el.child(slot),
+                    None => el
+                        .cursor_pointer()
+                        .on_click(move |_, window, cx| super::media::play_inline(&play_path, window, cx))
+                        .when_some(thumb, |el, png| el.child(img(png).size_full().object_fit(ObjectFit::Cover)))
+                        .child(
+                            div().absolute().inset_0().flex().items_center().justify_center().child(
+                                div().size(px(44.)).rounded_full().bg(gpui_kit::black().opacity(0.55)).flex().items_center().justify_center()
+                                    .text_color(gpui_kit::white()).child(div().size(px(18.)).child(gpui_kit::component::Icon::from(gpui_kit::assets::IconName::Play))),
+                            ),
+                        ),
+                }),
+        )
+        .child(
+            div().flex().items_center().gap_1()
+                .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap()
+                    .text_size(px(crate::theme::Type::SMALL)).font_weight(FontWeight::MEDIUM).child(v.title.clone()))
+                .map(|el| if is_playing {
+                    el.child(action(("video-expand", key), "⤢ Expand", "Keep watching in the Preview panel").on_click(|_, _, cx| super::media::expand_inline(cx)))
+                        .child(action(("video-stop", key), "✕", "Stop").on_click(|_, _, cx| super::media::stop_inline(cx)))
+                } else {
+                    el.child(action(("video-preview", key), "⤢", "Play in the Preview panel").on_click(move |_, _, cx| {
+                        let url = super::media::player_url(&preview_path, 0.0, true);
+                        if let Some(model) = cx.try_global::<crate::models::app::AppModelHandle>().map(|h| h.0.clone()) {
+                            model.update(cx, |m, cx| { m.browse_request = Some(url); cx.notify(); });
+                        }
+                    }))
+                    .child(action(("video-open", key), "Open", "Open in your video player").on_click(move |_, _, _| open_path(&open)))
+                }),
+        )
 }
 
 fn open_path(path: &std::path::Path) {

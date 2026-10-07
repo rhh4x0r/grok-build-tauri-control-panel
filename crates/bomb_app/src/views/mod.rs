@@ -21,6 +21,7 @@ pub mod welcome;
 
 pub mod file_tree;
 pub mod image_actions;
+pub mod media;
 pub mod speed;
 
 mod terminal;

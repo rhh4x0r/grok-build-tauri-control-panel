@@ -130,7 +130,12 @@ impl PreviewPanel {
             Some(wv) => {
                 wv.update(cx, |w, _| w.load_url(url));
             }
-            None => match wry::WebViewBuilder::new().with_url(url).build_as_child(window) {
+            // `bomb-media://` plays videos linked in the chat (see `media`).
+            None => match wry::WebViewBuilder::new()
+                .with_custom_protocol(super::media::SCHEME.into(), |_, request| super::media::serve(request))
+                .with_url(url)
+                .build_as_child(window)
+            {
                 Ok(raw) => {
                     let entity = cx.new(|cx| gpui_wry::WebView::new(raw, window, cx));
                     self.webview = Some(entity);
@@ -250,6 +255,11 @@ impl PreviewPanel {
             Some(u) => self.ensure(u, window, cx),
             None if self.webview.is_some() => self.drop_webview(),
             None => {}
+        }
+        // The native view takes its frame when the web view element is laid out; a cached
+        // element keeps the old frame (clipped until a resize), so lay it out with the panel.
+        if let Some(view) = &self.webview {
+            view.update(cx, |_, cx| cx.notify());
         }
 
         let Some(url) = url else {
