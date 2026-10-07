@@ -52,7 +52,37 @@ impl RootView {
             }
             let close = this.model.update(cx, |m,_| std::mem::take(&mut m.foundry_close));
             if close { this.foundry_open = false; }
+            match this.model.update(cx, |m, _| m.right_panel_request.take()) {
+                Some(crate::models::app::RightPanelRequest::Show(crate::models::app::RightTab::Changes)) => {
+                    this.preview_open = true;
+                    this.model.update(cx, |m, cx| { m.review_open = true; m.refresh_review(cx); });
+                }
+                Some(crate::models::app::RightPanelRequest::Show(tab)) => {
+                    this.preview_open = true;
+                    this.model.update(cx, |m, _| m.review_open = false);
+                    this.preview.update(cx, |p, cx| p.set_tab(tab, cx));
+                    if tab == crate::models::app::RightTab::Processes {
+                        this.model.update(cx, |m, cx| m.refresh_processes(cx));
+                    }
+                }
+                Some(crate::models::app::RightPanelRequest::Close) => {
+                    this.preview_open = false;
+                    this.model.update(cx, |m, _| m.review_open = false);
+                    this.preview.update(cx, |p, cx| p.hidden(cx));
+                }
+                None => {}
+            }
             cx.notify();
+        }).detach();
+        // While the right panel is open, keep its process list (and the tab's count) current.
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+            let alive = this.update(cx, |this, cx| {
+                if this.preview_open || this.model.read(cx).review_open {
+                    this.model.update(cx, |m, cx| m.refresh_processes(cx));
+                }
+            });
+            if alive.is_err() { break; }
         }).detach();
         let sidebar = cx.new(|cx| SidebarView::new(model.clone(), window, cx));
         let thread = cx.new(|cx| ThreadView::new(model.clone(), window, cx));

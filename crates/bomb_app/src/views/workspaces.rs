@@ -225,7 +225,23 @@ impl ReviewPanel {
     }
 }
 impl Render for ReviewPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let ui = Ui::of(cx);
+        let tabs = crate::views::preview::panel_tabs(crate::models::app::RightTab::Changes, &self.model, &ui, cx);
+        let body = self.render_body(window, cx);
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .border_l_1()
+            .border_color(ui.border)
+            .child(tabs)
+            .child(div().flex_1().min_h_0().child(body))
+    }
+}
+
+impl ReviewPanel {
+    fn render_body(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let ui = Ui::of(cx);
         let m = self.model.read(cx);
         let id = m.active_workspace.clone().unwrap_or_default();
@@ -239,7 +255,6 @@ impl Render for ReviewPanel {
             self.diff = None;
             self.history = false;
         }
-        let app = self.model.clone();
         let mut body = div()
             .id("changes-panel")
             .size_full()
@@ -253,13 +268,7 @@ impl Render for ReviewPanel {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_lg()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("Changes"),
-                    )
+                    .child(div().flex_1())
                     .child(
                         Button::new("refresh-changes")
                             .ghost()
@@ -271,19 +280,7 @@ impl Render for ReviewPanel {
                                 v.model.update(cx, |m, cx| m.refresh_review(cx))
                             })),
                     )
-                    .child(
-                        Button::new("close-changes")
-                            .ghost()
-                            .small()
-                            .icon(Lucide::X)
-                            .tooltip("Close Changes")
-                            .on_click(move |_, _, cx| {
-                                app.update(cx, |m, cx| {
-                                    m.review_open = false;
-                                    cx.notify();
-                                })
-                            }),
-                    ),
+                    ,
             );
         let (Some(w), Some(r)) = (w, review) else {
             return body

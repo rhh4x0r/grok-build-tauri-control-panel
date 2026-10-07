@@ -67,6 +67,37 @@ impl SidebarSort {
     }
 }
 
+/// The project to open when none is chosen yet: where the most recent real thread ran,
+/// else the first listed project. Never the home folder, which only opens when picked.
+pub fn startup_project(threads: &[ThreadDto], projects: &[String]) -> Option<String> {
+    let home = std::env::var("HOME").ok();
+    let usable = |root: &str| !root.is_empty() && Some(root.trim_end_matches('/')) != home.as_deref();
+    threads
+        .iter()
+        .filter(|t| !t.model.eq_ignore_ascii_case("mock"))
+        .map(|t| (t.updated_at.as_str(), t.project_root.clone().unwrap_or_else(|| t.cwd.clone())))
+        .filter(|(_, root)| usable(root))
+        .max_by(|a, b| a.0.cmp(b.0))
+        .map(|(_, root)| root)
+        .or_else(|| projects.iter().find(|p| usable(p)).cloned())
+}
+
+/// Tabs of the right panel. Changes is its own panel; the others share the preview panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RightTab {
+    #[default]
+    Preview,
+    Processes,
+    Files,
+    Changes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RightPanelRequest {
+    Show(RightTab),
+    Close,
+}
+
 /// How far back a closed project still lists its threads in the sidebar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RecentWindow {
@@ -206,6 +237,8 @@ pub struct AppModel {
     /// Lists as each core last reported them; the combined lists below are rebuilt from these,
     /// so a server that is briefly offline keeps its projects and threads on screen.
     local_threads: Vec<ThreadDto>,
+    /// This Mac's thread list has arrived at least once.
+    threads_loaded: bool,
     local_workspaces: Vec<grok_persistence::WorkspaceRecord>,
     local_projects: Vec<String>,
     server_lists: HashMap<String, (Vec<ThreadDto>, Vec<grok_persistence::WorkspaceRecord>, Vec<String>)>,
@@ -246,6 +279,13 @@ pub struct AppModel {
     pub foundry_close: bool,
     pub foundry_show_runs: bool,
     pub file_reveal_request: Option<std::path::PathBuf>,
+    /// Asks the window to switch the right panel's tab or close it.
+    pub right_panel_request: Option<RightPanelRequest>,
+    /// Processes running from the selected thread's folder (see `refresh_processes`).
+    pub processes: Vec<bomb_core::services::processes::ProcessInfo>,
+    /// The folder `processes` was read for.
+    pub processes_folder: Option<String>,
+    processes_loading: bool,
     pub auth: Vec<BackendAuth>,
     /// Account usage limits (5h / weekly) per backend, refreshed slowly.
     pub usage: Vec<bomb_core::usage::AccountUsage>,
@@ -283,6 +323,7 @@ impl AppModel {
             project_intro_seen: false,
             show_all_merged: HashSet::new(),
             local_threads: Vec::new(),
+            threads_loaded: false,
             local_workspaces: Vec::new(),
             local_projects: Vec::new(),
             server_lists: HashMap::new(),
@@ -313,6 +354,10 @@ impl AppModel {
             foundry_close: false,
             foundry_show_runs: false,
             file_reveal_request: None,
+            right_panel_request: None,
+            processes: Vec::new(),
+            processes_folder: None,
+            processes_loading: false,
             auth: Vec::new(),
             usage: Vec::new(),
             backends: Vec::new(),
@@ -538,7 +583,7 @@ impl AppModel {
             async move { services::list_threads(&state).await },
             move |res, cx| {
                 let _ = this.update(cx, |m, cx| match res {
-                    Ok(list) => { m.local_threads = list; m.combine_lists(cx); }
+                    Ok(list) => { m.local_threads = list; m.threads_loaded = true; m.combine_lists(cx); }
                     Err(e) => m.fail(e, cx),
                 });
             },
@@ -848,7 +893,8 @@ impl AppModel {
         }
         self.workspaces = workspaces;
         self.projects = projects;
-        if self.active_project.is_none() { self.active_project = self.projects.first().cloned(); }
+        // Wait for this Mac's thread list: "most recent" needs it.
+        if self.active_project.is_none() && self.threads_loaded { self.active_project = startup_project(&threads, &self.projects); }
         self.set_threads(threads, cx);
     }
 
@@ -1900,6 +1946,64 @@ impl AppModel {
         cx.notify();
     }
 
+    /// The folder whose processes the right panel lists: the selected thread's, else the
+    /// open project's. Server projects run elsewhere, so they have none here.
+    pub fn process_folder(&self, cx: &App) -> Option<String> {
+        let folder = self
+            .selected
+            .and_then(|id| self.threads.get(&id))
+            .map(|t| t.read(cx).meta.cwd.clone())
+            .or_else(|| self.active_project.clone())?;
+        (!folder.is_empty() && !crate::remote::is_server_root(&folder)).then_some(folder)
+    }
+
+    pub fn refresh_processes(&mut self, cx: &mut Context<Self>) {
+        let Some(folder) = self.process_folder(cx) else {
+            if !self.processes.is_empty() || self.processes_folder.is_some() {
+                self.processes.clear();
+                self.processes_folder = None;
+                cx.notify();
+            }
+            return;
+        };
+        if self.processes_loading { return; }
+        self.processes_loading = true;
+        let this = cx.entity().downgrade();
+        spawn_service(
+            cx,
+            async move { (bomb_core::services::processes::list_for_folder(&folder).await, folder) },
+            move |(res, folder), cx| {
+                let _ = this.update(cx, |m, cx| {
+                    m.processes_loading = false;
+                    // Ignore a scan for a thread the user has since left.
+                    if m.process_folder(cx).as_deref() != Some(folder.as_str()) { return; }
+                    let list = res.unwrap_or_default();
+                    if m.processes != list || m.processes_folder.as_deref() != Some(folder.as_str()) {
+                        m.processes = list;
+                        m.processes_folder = Some(folder);
+                        cx.notify();
+                    }
+                });
+            },
+        );
+    }
+
+    /// Ask a listed process to quit; `force` kills it.
+    pub fn stop_process(&mut self, pid: u32, force: bool, cx: &mut Context<Self>) {
+        let Some(folder) = self.processes_folder.clone() else { return };
+        let this = cx.entity().downgrade();
+        spawn_service(
+            cx,
+            async move { bomb_core::services::processes::stop(&folder, pid, force).await },
+            move |res, cx| {
+                let _ = this.update(cx, |m, cx| {
+                    if let Err(e) = res { m.fail(e, cx); }
+                    m.refresh_processes(cx);
+                });
+            },
+        );
+    }
+
     pub fn set_recent_window(&mut self, window: RecentWindow, cx: &mut Context<Self>) {
         self.recent_window = window;
         let state = svc(cx);
@@ -2518,6 +2622,35 @@ pub fn project_name(root: &str) -> String {
 
 fn next_shortcut_mode(current: &str) -> &'static str {
     match current { "plan" => "ask", "ask" => "auto", _ => "plan" }
+}
+
+#[cfg(test)]
+mod startup_project_tests {
+    use super::startup_project;
+    use grok_persistence::ThreadDto;
+
+    fn thread(root: &str, updated: &str, model: &str) -> ThreadDto {
+        serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000000", "cwd": root, "mode": "acp", "model": model,
+            "backend": "claude", "status": "idle", "live": false, "messageCount": 0,
+            "createdAt": updated, "updatedAt": updated, "projectRoot": root, "mcpServers": [],
+        })).unwrap()
+    }
+
+    #[test]
+    fn opens_the_most_recent_project_and_never_home() {
+        let home = std::env::var("HOME").unwrap();
+        let threads = vec![
+            thread("/src/old", "2026-09-01T00:00:00Z", "opus"),
+            thread("/src/new", "2026-10-01T00:00:00Z", "opus"),
+            thread(&home, "2026-10-05T00:00:00Z", "opus"),
+            thread("/src/mock", "2026-10-06T00:00:00Z", "mock"),
+        ];
+        assert_eq!(startup_project(&threads, &[]).as_deref(), Some("/src/new"));
+        let projects = vec![home.clone(), "/src/a".to_string()];
+        assert_eq!(startup_project(&[], &projects).as_deref(), Some("/src/a"));
+        assert_eq!(startup_project(&[], &[home]), None);
+    }
 }
 
 #[cfg(test)]

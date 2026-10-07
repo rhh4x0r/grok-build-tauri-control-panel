@@ -834,3 +834,11 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 
 - A clock button next to the sort menu (1d / 3d / 1w / 1m / Off, default 3 days, kv `sidebar_recent_window`) keeps a closed project's recently active threads in sight: up to three, newest first, then "N more from the last …", which opens the project. A project closed by hand stays fully closed; Off restores the old behavior. `RecentWindow` and `recent_ids` in `models/app.rs`, with a test.
 - Header fits the 224px minimum sidebar: New chat leads, Add project is a folder-plus icon (tooltip and server menu kept), the window button shows "3d". Project headers show pin and new-thread only while hovered, so names get the room. The hover is tracked in `SidebarView` and re-rendered: an earlier `hidden()` + `group_hover(flex)` crashed GPUI ("must call prepaint before paint"), since a hover style can't add an element after layout.
+
+## 2026-10-07 — Right panel: Preview · Processes · Files · Changes; startup project
+
+- One tab bar (`preview::panel_tabs`) on both right panels; Changes stays its own panel. Tab switches and close go through `AppModel::right_panel_request`, handled by `RootView`, which also refreshes the process list every 3 s while the panel is open.
+- Preview shows its URL bar only while something is previewed; otherwise one Start dev server button, plus "name · localhost:PORT" for any listening project process.
+- Processes (`bomb_core::services::processes`): processes whose working folder or program is inside the thread's folder, from `ps` + `lsof` (about 0.3 s). Shells, agents, MCP servers, editor tooling and app-bundle helpers are filtered out. Stop sends TERM, then offers Force quit (KILL); `stop` refuses any pid not currently listed for that folder. Agents' own shell commands (e.g. Claude launching a desktop app) never pass through Bomb Code, so the folder is the only reliable link. First run found a 20-day-old `http.server` here and six orphaned Convex executors in another project.
+- GPUI crash fixed on the way: `Button` already sets a hover style, and a second `.hover()` aborts ("hover style already set").
+- Startup no longer opens the alphabetically first project (the home folder, which offered to `git init` it): `startup_project` picks the project of the most recent non-mock thread once this Mac's threads load, never the home folder.
