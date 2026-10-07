@@ -57,7 +57,7 @@ impl AppState {
             info!(path=%home.display(),"isolated smoke storage");
             GrokPaths {
                 home_dir: home.clone(),
-                grok_dir: grok.clone(),
+                grok_dir: grok.clone(), bomb_dir: panel.clone(),
                 config_file: panel.join("config.toml"),
                 grok_cli_config_file: grok.join("config.toml"),
                 worktrees_dir: home.join("worktrees"),
@@ -68,8 +68,21 @@ impl AppState {
                 project_root: None,
             }
         } else {
-            GrokPaths::discover(std::env::current_dir().ok().as_deref())
-                .context("path discovery")?
+            let paths = GrokPaths::discover(std::env::current_dir().ok().as_deref())
+                .context("path discovery")?;
+            // Early builds kept everything under ~/.grok; move it to ~/.bombcode once.
+            match grok_config::migrate::migrate_legacy_data(&paths) {
+                Ok(Some(report)) => info!(
+                    moved = ?report.moved,
+                    worktrees = report.worktrees,
+                    conflicts = ?report.conflicts,
+                    to = %paths.bomb_dir.display(),
+                    "moved Bomb Code data out of ~/.grok"
+                ),
+                Ok(None) => {}
+                Err(e) => warn!(error = %e, "could not move Bomb Code data out of ~/.grok"),
+            }
+            paths
         };
         Self::initialize_with_paths(paths).await
     }
@@ -92,6 +105,10 @@ impl AppState {
         };
         {
             let mut base = GrokConfig::load_base(&paths).unwrap_or_default();
+            // Settings saved before the move still name the old worktrees folder under ~/.grok.
+            if base.worktrees_root.as_deref() == Some(paths.grok_dir.join("worktrees").as_path()) {
+                base.worktrees_root = Some(paths.worktrees_dir.clone());
+            }
             if resolved_binary.is_some() {
                 base.grok_binary = resolved_binary.clone();
             }
@@ -145,6 +162,24 @@ impl AppState {
         let persistence_path = paths.sessions_dir.join("control_panel.db");
         let persistence =
             Arc::new(Persistence::open(persistence_path).context("persistence open")?);
+
+        // Saved paths from when the data lived under ~/.grok point at ~/.bombcode now. Once.
+        const HOME_MOVED: &str = "bombcode_home_paths_v1";
+        if persistence.get_kv(HOME_MOVED).ok().flatten().is_none() {
+            let pairs = grok_config::migrate::path_rewrites(&paths);
+            let changed = persistence.rewrite_path_prefixes(&pairs).unwrap_or_else(|e| {
+                warn!(error = %e, "could not update saved paths");
+                0
+            });
+            let foundry = paths.sessions_dir.join("foundry.db");
+            if foundry.is_file() {
+                if let Ok(mut conn) = rusqlite::Connection::open(&foundry) {
+                    let _ = grok_persistence::rewrite_prefixes_in(&mut conn, &pairs);
+                }
+            }
+            info!(changed, "saved paths now point at the Bomb Code home");
+            let _ = persistence.set_kv(HOME_MOVED, &chrono::Utc::now().to_rfc3339());
+        }
 
         // One-time compatibility migration; ordinary evaluations read SQLite only.
         let routing = config.read().await.model_suggestions.clone();

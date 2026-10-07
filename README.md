@@ -78,10 +78,10 @@ Only discovered models from signed-in, runnable providers are candidates. Uncert
 
 | Path | Purpose |
 |------|---------|
-| `~/.grok/control-panel/config.toml` | Panel settings only |
+| `~/.bombcode/config.toml` | Panel settings only |
 | `~/.grok/config.toml` | Grok CLI config (**never overwritten** by panel) |
 | `~/.grok/mcp_credentials.json` | MCP secrets (mode `0600`) |
-| `~/.grok/control-panel/sessions/` | Panel SQLite recovery DB |
+| `~/.bombcode/sessions/` | Panel SQLite recovery DB |
 
 ## Workspace layout
 

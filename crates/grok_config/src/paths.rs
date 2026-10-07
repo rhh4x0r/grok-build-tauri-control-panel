@@ -1,4 +1,10 @@
-//! Path discovery for Grok home, config, worktrees, and binary.
+//! Path discovery: Bomb Code's own home (`~/.bombcode`), the Grok CLI's (`~/.grok`), and
+//! the `grok` binary.
+//!
+//! Everything Bomb Code writes lives under `~/.bombcode` (or `$BOMBCODE_HOME`), like
+//! `~/.claude` and `~/.codex`: settings, the thread database, memory, worktrees, caches.
+//! `~/.grok` is only read, for the Grok CLI's own login, config and binary. Early builds
+//! kept their data in `~/.grok/control-panel` and `~/.grok/worktrees`; `migrate` moves it.
 
 use std::path::{Path, PathBuf};
 
@@ -9,7 +15,10 @@ use crate::{ConfigError, Result};
 #[derive(Debug, Clone)]
 pub struct GrokPaths {
     pub home_dir: PathBuf,
+    /// The Grok CLI's home (`~/.grok`): its login, config and binary. Bomb Code doesn't write here.
     pub grok_dir: PathBuf,
+    /// Bomb Code's home (`~/.bombcode`).
+    pub bomb_dir: PathBuf,
     /// Panel-owned config — never overwrites Grok CLI `~/.grok/config.toml`.
     pub config_file: PathBuf,
     /// Read-only path to the official Grok CLI config (for display/doctor).
@@ -30,13 +39,15 @@ impl GrokPaths {
             .ok_or_else(|| ConfigError::Invalid("cannot resolve home directory".into()))?;
 
         let grok_dir = home_dir.join(".grok");
-        let panel_dir = grok_dir.join("control-panel");
-        // Isolate panel settings from the CLI's config.toml ([cli]/[ui]/marketplace).
-        let config_file = panel_dir.join("config.toml");
+        let bomb_dir = std::env::var_os("BOMBCODE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home_dir.join(".bombcode"));
+        let panel_dir = bomb_dir.clone();
+        let config_file = bomb_dir.join("config.toml");
         let grok_cli_config_file = grok_dir.join("config.toml");
-        let worktrees_dir = grok_dir.join("worktrees");
-        let memory_dir = panel_dir.join("memory");
-        let sessions_dir = panel_dir.join("sessions");
+        let worktrees_dir = bomb_dir.join("worktrees");
+        let memory_dir = bomb_dir.join("memory");
+        let sessions_dir = bomb_dir.join("sessions");
 
         let (project_root, project_config_file) = if let Some(root) = project_root {
             let cfg = root.join(".grok").join("control-panel.toml");
@@ -48,6 +59,7 @@ impl GrokPaths {
         Ok(Self {
             home_dir,
             grok_dir,
+            bomb_dir,
             config_file,
             grok_cli_config_file,
             worktrees_dir,
@@ -60,13 +72,20 @@ impl GrokPaths {
     }
 
     pub fn ensure_dirs(&self) -> Result<()> {
-        std::fs::create_dir_all(&self.grok_dir)?;
-        std::fs::create_dir_all(&self.panel_dir)?;
+        std::fs::create_dir_all(&self.bomb_dir)?;
         std::fs::create_dir_all(&self.worktrees_dir)?;
         std::fs::create_dir_all(&self.memory_dir)?;
         std::fs::create_dir_all(&self.sessions_dir)?;
         Ok(())
     }
+}
+
+/// Bomb Code's home folder (`$BOMBCODE_HOME`, else `~/.bombcode`), for code without the
+/// app's `GrokPaths` at hand.
+pub fn bomb_home() -> Option<PathBuf> {
+    std::env::var_os("BOMBCODE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".bombcode")))
 }
 
 /// Locate the `grok` binary via official install locations first, then PATH.
@@ -93,7 +112,7 @@ mod tests {
     #[test]
     fn discover_paths() {
         let paths = GrokPaths::discover(None).unwrap();
-        assert!(paths.config_file.ends_with("control-panel/config.toml"));
+        assert!(paths.config_file.ends_with(".bombcode/config.toml") || std::env::var_os("BOMBCODE_HOME").is_some());
         assert!(paths.grok_cli_config_file.ends_with(".grok/config.toml"));
         assert!(paths.worktrees_dir.ends_with("worktrees"));
     }

@@ -182,14 +182,15 @@ fn session_files(root: &Path) -> Vec<PathBuf> {
 }
 
 /// A folder the thread can run in again. Bomb Code's own working folders
-/// (`~/.grok/…`) hold its internal sessions, and the home folder can't be a project.
+/// (`~/.bombcode/…`, and `~/.grok/…` from early builds) hold its internal sessions, and the
+/// home folder can't be a project.
 pub(super) fn importable_folder(cwd: &str) -> bool {
     let path = Path::new(cwd);
     if !path.is_absolute() || !path.is_dir() {
         return false;
     }
     match std::env::var_os("HOME").map(PathBuf::from) {
-        Some(home) => path != home && !path.starts_with(home.join(".grok")),
+        Some(home) => path != home && !path.starts_with(home.join(".grok")) && !path.starts_with(home.join(".bombcode")),
         None => true,
     }
 }

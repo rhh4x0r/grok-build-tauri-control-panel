@@ -297,7 +297,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let paths = GrokPaths {
             home_dir: dir.path().to_path_buf(),
-            grok_dir: dir.path().to_path_buf(),
+            grok_dir: dir.path().to_path_buf(), bomb_dir: dir.path().to_path_buf(),
             config_file: dir.path().join("config.toml"),
             grok_cli_config_file: dir.path().join("cli-config.toml"),
             worktrees_dir: dir.path().join("worktrees"),

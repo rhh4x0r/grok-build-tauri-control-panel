@@ -127,7 +127,7 @@ pub fn thumbnail(video: &Path) -> Option<PathBuf> {
 }
 
 fn thumbs_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".grok/control-panel/thumbnails"))
+    grok_config::paths::bomb_home().map(|h| h.join("thumbnails"))
 }
 
 fn hash(p: &Path) -> u64 {

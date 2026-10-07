@@ -652,7 +652,7 @@ impl AppModel {
     // ── moving projects between this Mac and a server ───────────────────
 
     fn transfer_dir() -> PathBuf {
-        std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp")).join(".grok/control-panel/transfer")
+        grok_config::paths::bomb_home().unwrap_or_else(|| PathBuf::from("/tmp/bombcode")).join("transfer")
     }
 
     /// The other side of a linked project, if this project has one.

@@ -13,8 +13,8 @@ struct Cache {
 
 pub async fn claude<F, Fut>(token: &str, fetch: F) -> AccountUsage
 where F: FnOnce() -> Fut, Fut: Future<Output = AccountUsage> {
-    let Some(home) = std::env::var_os("HOME") else { return fetch().await; };
-    let path = std::path::PathBuf::from(home).join(".grok/control-panel/cache/claude-usage.json");
+    let Some(home) = grok_config::paths::bomb_home() else { return fetch().await; };
+    let path = home.join("cache/claude-usage.json");
     // A non-secret fingerprint prevents retaining another account's usage after sign-in changes.
     let mut fingerprint = DefaultHasher::new();
     token.hash(&mut fingerprint);

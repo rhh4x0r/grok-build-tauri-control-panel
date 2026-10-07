@@ -890,3 +890,17 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
   - A one-shot 8-section merge timed out with grok-4.7, which is what led to the chunking.
   - Failed calls retry once, then are skipped (logged). 20-minute call limit.
 - First full run on Max's threads: 253 threads, 1,501 observations, a 219-point profile with no names and no assumed pronouns. Reading with Codex took ~45 min. The profile is long (48 KB); a condensed SKILL.md with the rest as reference is a likely next step.
+
+## 2026-10-07 — Bomb Code's home is ~/.bombcode
+
+- Everything the app writes now lives in `~/.bombcode` (`$BOMBCODE_HOME` overrides), like `~/.claude` and `~/.codex`. `~/.grok` is only read, for the Grok CLI's own login, config and binary.
+  - `GrokPaths` gained `bomb_dir`; `panel_dir`, config, memory, sessions and worktrees sit under it.
+  - `grok_config::paths::bomb_home()` serves code without `GrokPaths`: usage cache, thumbnails, server keys, transfers.
+  - MCP credentials moved too, and the protected-path list covers `.bombcode/mcp_credentials.json`.
+- One-time move on launch (`grok_config::migrate`): when `~/.grok/control-panel/sessions/control_panel.db` exists and `~/.bombcode/sessions/control_panel.db` doesn't.
+  - Renames the app-owned items and each `~/.grok/worktrees/*`, runs `git worktree repair` in each moved worktree, and leaves `MOVED.md`.
+  - `haven.toml` stays; Paul's Tauri app reads it from there.
+  - Then `rewrite_prefixes_in` replaces the old path prefixes in every text column of the threads and Foundry databases, once (kv `bombcode_home_paths_v1`).
+  - A saved `worktrees_root` pointing at `~/.grok/worktrees` is repointed at startup.
+- On Max's Mac: 10 items, 15 worktrees (registrations updated), 1,666 database cells. A clone backup is in `~/.bombcode-move-backup`.
+- Caveat: Claude Code keys sessions by folder, so Claude threads whose worktree moved may reopen history-only.

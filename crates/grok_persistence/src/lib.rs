@@ -1,7 +1,7 @@
 //! SQLite-backed session + transcript memory for Bomb Code.
 //!
 //! Survives app quit, reboot, and updates under:
-//! `~/.grok/control-panel/sessions/control_panel.db`
+//! `~/.bombcode/sessions/control_panel.db`
 
 pub mod workspaces;
 pub use workspaces::WorkspaceRecord;
@@ -282,6 +282,14 @@ impl Persistence {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Replace path prefixes in every text column of every table (e.g. after the app's data
+    /// moved folders). Returns how many cells changed.
+    pub fn rewrite_path_prefixes(&self, pairs: &[(String, String)]) -> Result<usize> {
+        let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut conn = self.conn()?;
+        rewrite_prefixes_in(&mut conn, pairs)
     }
 
     /// Update status + touch updated_at without rewriting full metadata.
@@ -601,6 +609,35 @@ impl Persistence {
 
 }
 
+/// The work behind [`Persistence::rewrite_path_prefixes`], for any SQLite database.
+pub fn rewrite_prefixes_in(conn: &mut Connection, pairs: &[(String, String)]) -> Result<usize> {
+    let tables: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")?
+        .query_map([], |r| r.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    let tx = conn.transaction()?;
+    let mut changed = 0;
+    for table in tables {
+        let columns: Vec<String> = tx
+            .prepare(&format!("PRAGMA table_info(\"{table}\")"))?
+            .query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?
+            .filter_map(|c| c.ok())
+            .filter(|(_, ty)| ty.to_ascii_uppercase().contains("TEXT"))
+            .map(|(name, _)| name)
+            .collect();
+        for column in columns {
+            for (old, new) in pairs {
+                changed += tx.execute(
+                    &format!("UPDATE \"{table}\" SET \"{column}\" = replace(\"{column}\", ?1, ?2) WHERE instr(\"{column}\", ?1) > 0"),
+                    params![old, new],
+                )?;
+            }
+        }
+    }
+    tx.commit()?;
+    Ok(changed)
+}
+
 fn kind_to_role(kind: &str) -> String {
     match kind {
         "prompt" | "user" => "user".into(),
@@ -625,6 +662,34 @@ fn parse_dt(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s)
         .map(|d| d.with_timezone(&Utc))
         .unwrap_or(DateTime::<Utc>::UNIX_EPOCH)
+}
+
+#[cfg(test)]
+mod rewrite_tests {
+    use super::*;
+
+    #[test]
+    fn rewrites_saved_paths_everywhere() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Persistence::open(dir.path().join("t.db")).unwrap();
+        let id = Uuid::new_v4();
+        let rec = SessionRecord {
+            id, cwd: "/u/.grok/worktrees/a".into(), mode: "acp".into(), model: String::new(), status: "idle".into(),
+            worktree: None, acp_session_id: None, metadata_json: r#"{"metadata":{"cwd":"/u/.grok/worktrees/a"}}"#.into(),
+            created_at: Utc::now(), updated_at: Utc::now(), message_count: 0,
+        };
+        db.upsert_session(&rec).unwrap();
+        db.append_message(id, "image", r#"{"path":"/u/.grok/control-panel/sessions/images/x.png"}"#, Utc::now()).unwrap();
+        db.set_kv("last_cwd", "/u/src/app").unwrap();
+        let pairs = vec![("/u/.grok/control-panel/".to_string(), "/u/.bombcode/".to_string()), ("/u/.grok/worktrees/".to_string(), "/u/.bombcode/worktrees/".to_string())];
+        assert_eq!(db.rewrite_path_prefixes(&pairs).unwrap(), 3);
+        let got = db.get_session(id).unwrap();
+        assert_eq!(got.cwd, "/u/.bombcode/worktrees/a");
+        assert!(got.metadata_json.contains("/u/.bombcode/worktrees/a"));
+        assert!(db.transcript_entries(id).unwrap()[0].body.contains("/u/.bombcode/sessions/images/x.png"));
+        assert_eq!(db.get_kv("last_cwd").unwrap().as_deref(), Some("/u/src/app"));
+        assert_eq!(db.rewrite_path_prefixes(&pairs).unwrap(), 0, "a second run changes nothing");
+    }
 }
 
 #[cfg(test)]

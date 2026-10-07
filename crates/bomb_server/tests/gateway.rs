@@ -21,7 +21,7 @@ async fn server() -> Server {
     let panel = grok.join("panel");
     let state = Arc::new(
         bomb_core::AppState::initialize_with_paths(grok_config::GrokPaths {
-            home_dir: home.clone(), grok_dir: grok.clone(), config_file: panel.join("config.toml"),
+            home_dir: home.clone(), grok_dir: grok.clone(), bomb_dir: panel.clone(), config_file: panel.join("config.toml"),
             grok_cli_config_file: grok.join("config.toml"), worktrees_dir: home.join("worktrees"),
             memory_dir: panel.join("memory"), sessions_dir: panel.join("sessions"), panel_dir: panel,
             project_config_file: None, project_root: None,

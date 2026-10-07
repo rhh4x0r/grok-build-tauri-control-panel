@@ -90,7 +90,7 @@ impl McpManager {
         grok_cli: Arc<GrokCli>,
         event_bus: Arc<EventBus>,
     ) -> Result<Arc<Self>> {
-        let cred_path = CredentialStore::default_path(&paths.grok_dir);
+        let cred_path = CredentialStore::default_path(&paths.bomb_dir);
         let credentials = CredentialStore::open(cred_path)?;
         Ok(Arc::new(Self {
             config,
@@ -679,7 +679,7 @@ mod tests {
     fn test_manager(dir: &std::path::Path) -> Arc<McpManager> {
         let paths = GrokPaths {
             home_dir: dir.to_path_buf(),
-            grok_dir: dir.to_path_buf(),
+            grok_dir: dir.to_path_buf(), bomb_dir: dir.to_path_buf(),
             config_file: dir.join("config.toml"),
             grok_cli_config_file: dir.join("cli-config.toml"),
             worktrees_dir: dir.join("worktrees"),

@@ -23,6 +23,7 @@ const DENIED_PATH_SUFFIXES: &[&str] = &[
     ".docker/config.json",
     "Library/Keychains",
     ".grok/mcp_credentials.json",
+    ".bombcode/mcp_credentials.json",
 ];
 
 const DENIED_EXACT: &[&str] = &["/", "/etc", "/private/etc", "/System", "/usr", "/bin", "/sbin"];

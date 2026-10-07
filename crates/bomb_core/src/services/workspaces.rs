@@ -961,7 +961,7 @@ mod tests {
         run_git(&root, &["add", "-A"]).await.unwrap(); run_git(&root, &["commit", "-m", "initial"]).await.unwrap();
         let home = temp.path().to_path_buf(); let grok = home.join("grok"); let panel = grok.join("panel");
         let state = AppState::initialize_with_paths(grok_config::GrokPaths {
-            home_dir: home.clone(), grok_dir: grok.clone(), config_file: panel.join("config.toml"),
+            home_dir: home.clone(), grok_dir: grok.clone(), bomb_dir: panel.clone(), config_file: panel.join("config.toml"),
             grok_cli_config_file: grok.join("config.toml"), worktrees_dir: home.join("worktrees"),
             memory_dir: panel.join("memory"), sessions_dir: panel.join("sessions"), panel_dir: panel,
             project_config_file: None, project_root: None,
@@ -998,7 +998,7 @@ mod tests {
         for args in [vec!["init", "-b", "main"], vec!["config", "user.name", "Test"], vec!["config", "user.email", "test@example.com"], vec!["commit", "--allow-empty", "-m", "initial"]] { run_git(&root, &args).await.unwrap(); }
         let home = temp.path().to_path_buf(); let grok = home.join("grok"); let panel = grok.join("panel");
         let state = AppState::initialize_with_paths(grok_config::GrokPaths {
-            home_dir: home.clone(), grok_dir: grok.clone(), config_file: panel.join("config.toml"),
+            home_dir: home.clone(), grok_dir: grok.clone(), bomb_dir: panel.clone(), config_file: panel.join("config.toml"),
             grok_cli_config_file: grok.join("config.toml"), worktrees_dir: home.join("worktrees"),
             memory_dir: panel.join("memory"), sessions_dir: panel.join("sessions"), panel_dir: panel,
             project_config_file: None, project_root: None,
@@ -1091,7 +1091,7 @@ mod tests {
         run_git(&root, &["checkout", "-q", "-b", "checked-out", "main"]).await.unwrap();
         let home = temp.path().to_path_buf(); let grok = home.join("grok"); let panel = grok.join("panel");
         let state = AppState::initialize_with_paths(grok_config::GrokPaths {
-            home_dir: home.clone(), grok_dir: grok.clone(), config_file: panel.join("config.toml"),
+            home_dir: home.clone(), grok_dir: grok.clone(), bomb_dir: panel.clone(), config_file: panel.join("config.toml"),
             grok_cli_config_file: grok.join("config.toml"), worktrees_dir: home.join("worktrees"),
             memory_dir: panel.join("memory"), sessions_dir: panel.join("sessions"), panel_dir: panel,
             project_config_file: None, project_root: None,
@@ -1133,7 +1133,7 @@ mod tests {
         run_git(&root, &["branch", "develop"]).await.unwrap();
         let home = temp.path().to_path_buf(); let grok = home.join("grok"); let panel = grok.join("panel");
         let state = AppState::initialize_with_paths(grok_config::GrokPaths {
-            home_dir: home.clone(), grok_dir: grok.clone(), config_file: panel.join("config.toml"),
+            home_dir: home.clone(), grok_dir: grok.clone(), bomb_dir: panel.clone(), config_file: panel.join("config.toml"),
             grok_cli_config_file: grok.join("config.toml"), worktrees_dir: home.join("worktrees"),
             memory_dir: panel.join("memory"), sessions_dir: panel.join("sessions"), panel_dir: panel,
             project_config_file: None, project_root: None,
@@ -1183,7 +1183,7 @@ mod tests {
         run_git(&root, &["add", "-A"]).await.unwrap(); run_git(&root, &["commit", "-m", "initial"]).await.unwrap();
         let home = temp.path().to_path_buf(); let grok = home.join("grok"); let panel = grok.join("panel");
         let state = AppState::initialize_with_paths(grok_config::GrokPaths {
-            home_dir: home.clone(), grok_dir: grok.clone(), config_file: panel.join("config.toml"),
+            home_dir: home.clone(), grok_dir: grok.clone(), bomb_dir: panel.clone(), config_file: panel.join("config.toml"),
             grok_cli_config_file: grok.join("config.toml"), worktrees_dir: home.join("worktrees"),
             memory_dir: panel.join("memory"), sessions_dir: panel.join("sessions"), panel_dir: panel,
             project_config_file: None, project_root: None,

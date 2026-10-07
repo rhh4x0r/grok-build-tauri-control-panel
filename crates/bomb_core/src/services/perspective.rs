@@ -123,7 +123,7 @@ fn set_status(f: impl FnOnce(&mut Status)) {
 
 /// Where the profile lives until the person exports it.
 pub fn output_dir(state: &AppState) -> PathBuf {
-    state.paths.grok_dir.join("control-panel").join("perspective")
+    state.paths.bomb_dir.join("perspective")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

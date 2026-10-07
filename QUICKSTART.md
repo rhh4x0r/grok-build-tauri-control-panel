@@ -53,10 +53,10 @@ Scheduler and Extensions currently have backend services but no dedicated deskto
 
 | File | Purpose |
 |------|---------|
-| `~/.grok/control-panel/config.toml` | Panel settings only |
+| `~/.bombcode/config.toml` | Panel settings only |
 | `~/.grok/config.toml` | Grok CLI config (**never overwritten** by panel) |
 | `~/.grok/mcp_credentials.json` | MCP secrets (mode 0600) |
-| `~/.grok/control-panel/sessions/` | Panel SQLite recovery DB |
+| `~/.bombcode/sessions/` | Panel SQLite recovery DB |
 
 ## Dev loop (rebuild UI/backend)
 

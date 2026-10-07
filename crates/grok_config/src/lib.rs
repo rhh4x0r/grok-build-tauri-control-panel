@@ -12,6 +12,7 @@ use tracing::{debug, info, warn};
 
 pub mod backends;
 pub mod env_bootstrap;
+pub mod migrate;
 pub mod paths;
 pub mod sandbox;
 
@@ -455,6 +456,7 @@ mod tests {
         let paths = GrokPaths {
             home_dir: dir.path().to_path_buf(),
             grok_dir: dir.path().to_path_buf(),
+            bomb_dir: dir.path().to_path_buf(),
             config_file: path.clone(),
             grok_cli_config_file: dir.path().join("cli-config.toml"),
             worktrees_dir: dir.path().join("worktrees"),

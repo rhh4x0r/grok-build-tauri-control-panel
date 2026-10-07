@@ -1,6 +1,6 @@
 //! Where this device keeps its key for each server: a private file, like an SSH key.
 //!
-//! `~/.grok/control-panel/servers/<server>.key.json`, readable only by the owner. No keychain: it
+//! `~/.bombcode/servers/<server>.key.json`, readable only by the owner. No keychain: it
 //! prompted for a password on every rebuild, and it does not exist on Linux or Windows. Set
 //! `BOMB_KEY_DIR` to keep the files elsewhere (tests).
 
@@ -10,8 +10,7 @@ use bomb_link::Identity;
 
 fn dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("BOMB_KEY_DIR") { return Some(PathBuf::from(dir)); }
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    Some(PathBuf::from(home).join(".grok/control-panel/servers"))
+    Some(grok_config::paths::bomb_home()?.join("servers"))
 }
 
 fn path(server: &str) -> Option<PathBuf> {
