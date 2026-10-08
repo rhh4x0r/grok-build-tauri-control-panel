@@ -27,6 +27,7 @@ pub async fn dispatch(state: &AppState, origin: &str, method: &str, p: Value) ->
 
         // Threads
         "list_threads" => out(services::list_threads(state).await?),
+        "sidebar_prefs" => out(services::sidebar_prefs(state).await?),
         "snapshot" => {
             let id: String = arg(&p, "id")?;
             let mut snap = state.journal.snapshot(Uuid::parse_str(&id).map_err(|e| e.to_string())?)?;

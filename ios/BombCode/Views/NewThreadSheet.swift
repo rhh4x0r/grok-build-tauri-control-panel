@@ -69,18 +69,36 @@ struct NewThreadSheet: View {
         .background { BombBackground(strength: 0.5) }
         .presentationDragIndicator(.visible)
         .task(id: machineId) { await loadProjects() }
-        .onAppear { machineId = machineId ?? app.machines.first(where: \.connected)?.id }
+        .onAppear { machineId = machineId ?? defaultMachine()?.id }
     }
 
     private var divider: some View {
         Rectangle().fill(Theme.hairline).frame(height: 1).padding(.leading, 46)
     }
 
+    /// Where the person last worked: the machine of the most recent real thread, a Mac before a server.
+    private func defaultMachine() -> MachineModel? {
+        let online = app.machines.filter(\.connected)
+        let recent = online.compactMap { m in m.threads.filter { $0.model != "mock" }.map(\.updatedAt).max().map { (m, $0) } }
+        return recent.max { $0.1 < $1.1 }?.0 ?? online.first(where: \.isMac) ?? online.first
+    }
+
     private func loadProjects() async {
         guard let machine else { return }
-        projects = (try? await machine.machine.listProjects()) ?? []
+        // The machine's projects, plus any folder its threads ran in, most recently used first.
+        let listed = (try? await machine.machine.listProjects()) ?? []
+        var byRecent: [String] = []
+        for thread in machine.threads.sorted(by: { $0.updatedAt > $1.updatedAt }) where !byRecent.contains(thread.projectRoot) {
+            byRecent.append(thread.projectRoot)
+        }
+        projects = byRecent + listed.filter { !byRecent.contains($0) }
         if project == nil || !projects.contains(project!) { project = projects.first }
         await machine.loadBackends()
+        // A different machine may not have the agent picked on the last one.
+        if let backend = choices.backend, !machine.backends.contains(where: { $0.id == backend }) {
+            choices.backend = nil
+            choices.model = nil
+        }
         if choices.backend == nil, let first = machine.backends.first {
             choices.backend = first.id
             choices.model = first.defaultModel.isEmpty ? nil : first.defaultModel

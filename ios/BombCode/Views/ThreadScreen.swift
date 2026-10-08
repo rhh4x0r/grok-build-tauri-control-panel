@@ -16,8 +16,17 @@ struct ThreadScreen: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background { BombBackground(strength: 0.35) }
+        // The transcript fades out under the bar instead of running into the title.
+        .overlay(alignment: .top) {
+            LinearGradient(colors: [Theme.bg, Theme.bg.opacity(0)], startPoint: .top, endPoint: .bottom)
+                .frame(height: 22)
+                .allowsHitTesting(false)
+        }
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(.hidden, for: .navigationBar)
+        // Just the chevron: a "Back" label crowds the title.
+        .toolbarRole(.editor)
+        .toolbarBackground(Theme.bg, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .principal) {
                 VStack(spacing: 1) {

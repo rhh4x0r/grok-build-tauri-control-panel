@@ -10,6 +10,8 @@ final class MachineModel: Identifiable {
     private(set) var threads: [ThreadSummary] = []
     /// Backends and models this machine offers, loaded once connected.
     private(set) var backends: [BackendChoice] = []
+    /// What the machine's own sidebar hides and pins, so the phone lists threads the same way.
+    private(set) var prefs = SidebarPrefs(archived: [], pinnedProjects: [])
     private var open: [String: ThreadModel] = [:]
 
     nonisolated var id: String { info.id }
@@ -48,13 +50,22 @@ final class MachineModel: Identifiable {
         backends = list.filter(\.available)
     }
 
+    func loadPrefs() async {
+        if let prefs = try? await machine.sidebarPrefs() { self.prefs = prefs }
+    }
+
+    func isArchived(_ thread: ThreadSummary) -> Bool { prefs.archived.contains(thread.id) }
+
     fileprivate func receive(link: LinkState) {
         self.link = link
-        if link == .connected { Task { await loadBackends() } }
+        if link == .connected { Task { await loadBackends(); await loadPrefs() } }
     }
 
     fileprivate func receive(threads: [ThreadSummary]) {
+        // A thread came or went: the Mac may have archived or pinned something too.
+        let changed = Set(threads.map(\.id)) != Set(self.threads.map(\.id))
         self.threads = threads
+        if changed { Task { await loadPrefs() } }
     }
 
     fileprivate func receive(threadId: String, patches: [ThreadPatch], presence: PresenceView) {

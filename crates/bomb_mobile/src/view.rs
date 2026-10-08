@@ -199,6 +199,8 @@ pub struct ThreadSummary {
     pub message_count: u64,
     /// RFC 3339.
     pub updated_at: String,
+    /// RFC 3339.
+    pub created_at: String,
 }
 
 /// The fields of a core's `ThreadDto` the phone uses.
@@ -217,6 +219,8 @@ pub(crate) struct ThreadRow {
     pub message_count: u64,
     #[serde(default)]
     pub updated_at: String,
+    #[serde(default)]
+    pub created_at: String,
     pub label: Option<String>,
     pub approval_mode: Option<String>,
     pub project_root: Option<String>,
@@ -238,6 +242,7 @@ impl ThreadSummary {
             running: false,
             message_count: row.message_count,
             updated_at: row.updated_at,
+            created_at: row.created_at,
         };
         summary.set_status(&row.status);
         summary
@@ -294,6 +299,14 @@ impl From<BackendRow> for BackendChoice {
         }).collect();
         Self { id: row.id, name: row.display_name, available: row.available, reason: row.reason, default_model: row.default_model, models }
     }
+}
+
+/// How the machine's desktop sidebar is organised: threads archived out of view, and pinned projects.
+#[derive(Debug, Clone, Default, PartialEq, uniffi::Record, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SidebarPrefs {
+    pub archived: Vec<String>,
+    pub pinned_projects: Vec<String>,
 }
 
 /// One provider's usage limits, for the bars under the thread list.

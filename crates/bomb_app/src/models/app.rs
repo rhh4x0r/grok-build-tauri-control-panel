@@ -23,14 +23,14 @@ use crate::runtime::{services as svc, spawn_service};
 pub struct AppModelHandle(pub Entity<AppModel>);
 impl Global for AppModelHandle {}
 
-const ARCHIVED_KEY: &str = "archived_threads";
+const ARCHIVED_KEY: &str = services::ARCHIVED_THREADS_KEY;
 const SIDEBAR_SORT_KEY: &str = "sidebar_sort";
 const RECENT_WINDOW_KEY: &str = "sidebar_recent_window";
 /// When each thread was last looked at (JSON map of id → RFC 3339).
 const THREAD_SEEN_KEY: &str = "thread_seen";
 /// Activity before this counts as seen: threads don't all light up the first time.
 const THREAD_SEEN_SINCE_KEY: &str = "thread_seen_since";
-const PINNED_PROJECTS_KEY: &str = "pinned_projects";
+const PINNED_PROJECTS_KEY: &str = services::PINNED_PROJECTS_KEY;
 const PROJECT_INTRO_KEY: &str = "project_intro_seen";
 
 #[derive(Debug, Clone)]

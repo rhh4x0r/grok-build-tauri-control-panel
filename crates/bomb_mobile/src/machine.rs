@@ -23,7 +23,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::pairing::{gateway_request, PairedMachine};
-use crate::view::{patches, BackendChoice, BackendRow, PresenceView, ThreadPatch, ThreadRow, ThreadSummary, UsageView};
+use crate::view::{patches, BackendChoice, BackendRow, PresenceView, SidebarPrefs, ThreadPatch, ThreadRow, ThreadSummary, UsageView};
 use crate::{on_runtime, runtime, MobileError, Result};
 
 /// Rows loaded when a thread opens, and added each time the person scrolls to the top.
@@ -192,6 +192,11 @@ impl Machine {
     pub async fn list_backends(&self) -> Result<Vec<BackendChoice>> {
         let rows: Vec<BackendRow> = self.call("list_backends", Value::Null).await?;
         Ok(rows.into_iter().map(BackendChoice::from).collect())
+    }
+
+    /// Archived threads and pinned projects from the machine's sidebar. Empty from a machine too old to say.
+    pub async fn sidebar_prefs(&self) -> Result<SidebarPrefs> {
+        Ok(self.call("sidebar_prefs", Value::Null).await.unwrap_or_default())
     }
 
     pub async fn account_usage(&self) -> Result<Vec<UsageView>> {
