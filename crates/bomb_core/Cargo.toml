@@ -7,6 +7,7 @@ description = "Bomb Code — framework-free application core (state, services, t
 
 [dependencies]
 bomb_foundry = { path = "../bomb_foundry" }
+bomb_transcript = { path = "../bomb_transcript" }
 anyhow.workspace = true
 base64 = "0.22"
 chrono.workspace = true

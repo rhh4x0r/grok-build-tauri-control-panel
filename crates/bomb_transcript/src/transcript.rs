@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use grok_events::{
     ControlEvent, PermissionOptionInfo, PlanUpdateEvent, SessionStatus, ToolCallEvent,
 };
-use grok_persistence::TranscriptEntry;
+use grok_events::TranscriptEntry;
 use serde_json::Value;
 
 use crate::presence::{Patch, Phase, Presence};
@@ -1182,7 +1182,7 @@ mod tests {
 
     #[test]
     fn a_saved_answer_joins_its_request_instead_of_adding_a_line() {
-        use grok_persistence::TranscriptEntry;
+        use grok_events::TranscriptEntry;
         let row = |role: &str, body: &str, seq| TranscriptEntry { role: role.into(), body: body.into(), at: "2026-09-20T19:18:00Z".into(), seq };
         let mut t = Thread::new();
         t.hydrate(&[

@@ -904,3 +904,11 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
   - A saved `worktrees_root` pointing at `~/.grok/worktrees` is repointed at startup.
 - On Max's Mac: 10 items, 15 worktrees (registrations updated), 1,666 database cells. A clone backup is in `~/.bombcode-move-backup`.
 - Caveat: Claude Code keys sessions by folder, so Claude threads whose worktree moved may reopen history-only.
+
+## 2026-10-07 — iOS companion, phase 0: shared reducer
+
+- Design approved: `docs/plan/ios_companion_plan.md`. A SwiftUI iPhone app with a shared Rust core (UniFFI) pairs directly with both the personal Mac (new "Phone access" host) and each linked `bombd` server, over Tailscale; APNs push from the user's own key.
+- `transcript.rs` and `presence.rs` moved unchanged from `bomb_core` into a new `crates/bomb_transcript` (deps: `grok_events`, `chrono`, `serde_json`, `base64`). `bomb_core` re-exports them as `bomb_core::{transcript, presence}`, so nothing else changed.
+- `TranscriptEntry` moved to `grok_events`; `grok_persistence` re-exports it. This keeps SQLite out of the phone build.
+- `rust-toolchain.toml` now lists `aarch64-apple-ios` and `aarch64-apple-ios-sim`. `bomb_proto`, `bomb_link` (ring/rustls) and `bomb_transcript` build for both.
+- Checked: `cargo check --workspace --all-targets`; clippy clean on the touched crates; `bomb_transcript` (33), `bomb_core` (67) tests pass; `BOMB_SMOKE=1` passes. Workspace-wide clippy still fails on five lints in `bomb_app` that predate this change (`models/app.rs`, `remote/mod.rs`, `views/composer.rs`, `views/project.rs`).

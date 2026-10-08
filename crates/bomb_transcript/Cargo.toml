@@ -1,0 +1,15 @@
+[package]
+name = "bomb_transcript"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bomb Code — pure event → thread reducers, shared by the desktop app and the iOS companion"
+
+[dependencies]
+base64 = "0.22"
+chrono.workspace = true
+grok_events = { path = "../grok_events" }
+serde_json.workspace = true
+
+[dev-dependencies]
+uuid.workspace = true

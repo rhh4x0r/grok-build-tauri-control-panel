@@ -174,6 +174,18 @@ pub struct PlanStep {
 // permanently loses transcript rows, so keep generous headroom.
 const DEFAULT_CAPACITY: usize = 8192;
 
+/// One saved transcript row, as stored by `grok_persistence` and sent to
+/// remote clients in a thread snapshot. Lives here so clients that never open
+/// the database (the iOS companion) can share the type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptEntry {
+    pub role: String,
+    pub body: String,
+    pub at: String,
+    pub seq: u64,
+}
+
 #[derive(Debug)]
 pub struct EventBus {
     tx: broadcast::Sender<ControlEvent>,

@@ -764,6 +764,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bomb_foundry",
+ "bomb_transcript",
  "chrono",
  "grok_acp",
  "grok_cli_wrapper",
@@ -850,6 +851,17 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "bomb_transcript"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "grok_events",
+ "serde_json",
  "uuid",
 ]
 
@@ -3645,6 +3657,7 @@ name = "grok_persistence"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "grok_events",
  "rusqlite",
  "serde",
  "serde_json",

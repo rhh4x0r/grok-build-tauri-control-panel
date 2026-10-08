@@ -1,3 +1,5 @@
 [toolchain]
 channel = "1.98.1"
 components = ["rustfmt", "clippy"]
+# iOS companion (crates/bomb_mobile → ios/): device + Apple-silicon simulator.
+targets = ["aarch64-apple-ios", "aarch64-apple-ios-sim"]
