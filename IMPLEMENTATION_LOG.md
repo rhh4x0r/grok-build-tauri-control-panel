@@ -922,3 +922,32 @@ All additive; `PROTOCOL_VERSION` stays 1 and a Mac that never calls the new meth
 - `register_push {token, sandbox?}` / `unregister_push`: one APNs token per paired device, keyed by the connection's client name, kept in kv `push_devices` (`bomb_core::rpc::push_devices`). Nothing sends pushes yet (phase 5).
 - Tests: `journal::tests` (filter rule) and `bomb_server/tests/core_socket.rs` `a_phone_streams_only_the_thread_it_has_open_pages_history_and_registers_for_push` (two mock threads; only the watched one streams; paging; push registration).
 - `bomb_core`'s `workspace_lifecycle_checkpoints_sharing_inline_and_archive` timed out once in the full serial run and passed alone and on the rerun; it's timing-sensitive, not related to this change.
+
+## 2026-10-07 — iOS companion, phase 2: `bomb_mobile`
+
+- New crate `crates/bomb_mobile`, a static library for iOS with Swift bindings through UniFFI 0.32 proc macros. It owns a 2-thread tokio runtime; exported async fns run on it, so Swift awaits them without knowing about tokio.
+- `pairing`:
+  - `pairing_hosts(text)` lists the hosts in a scanned code.
+  - `pair_all(text, label)` pairs with every link in a code. An unreachable one doesn't stop the others.
+  - Each machine gets its own P-256 key; Swift keeps it in the Keychain.
+  - `kind` comes from `gateway.whoami` and defaults to "server"; the Mac host will report "mac" (phase 4).
+- `bomb_link::bundle` / `parse_links`: `bomb://pair-bundle?l=<host>,<fp>,<secret>&l=…`, so one QR code pairs the Mac and its servers. A plain `bomb://pair?` link still works.
+- `machine::Machine` (one per paired machine):
+  - Connects on creation and reconnects with 1–30 s backoff. `set_active(false)` pauses in the background; `reconnect_now()` skips the wait.
+  - Sends a 60 s keepalive ping.
+  - Keeps the thread list current from lifecycle events (refreshing it, debounced, on create/complete/cancel).
+  - Opens a thread by `watch` + `snapshot{limit: 200}`; events arriving during the load are held and applied above `as_of`. `load_earlier` reloads with 200 more rows.
+  - Resync and backlog overflow rebuild open threads.
+  - The phone's own prompts are echoed locally (`note_prompt`), and its own `user_message` is skipped.
+  - Patches to Swift: `Reset` / `Upsert{index}` / `Stream{index, delta}` / `Trim`, plus a `PresenceView`. `presence(id)` is for the once-a-second status refresh.
+  - The phone accepts plan / ask / auto only. `yolo` is refused before anything is sent, and new threads default to plan.
+- `ControlEvent::session_id()` moved into `grok_events`; `journal::session_of` calls it.
+- `scripts/build-ios.sh [debug|release]` builds both iOS targets, generates `ios/BombCode/Generated/bomb_mobile.swift` and builds `ios/BombMobile.xcframework` (both gitignored).
+- Test `crates/bomb_mobile/tests/loopback.rs`, against a real gateway and core on loopback:
+  - pair from a two-link bundle where one link is dead; the secret is single-use;
+  - start a mock thread and watch it stream; the prompt echoes once;
+  - approval card, then the list shows it waiting, then answering closes it;
+  - the Mac's prompt shows on the phone; reopen; follow-up; yolo refused;
+  - pause/resume; unpair.
+  
+  Passed 4 runs in a row.

@@ -195,20 +195,7 @@ pub fn reaches(event: &ControlEvent, watching: Option<&HashSet<Uuid>>) -> bool {
 
 /// The session an event belongs to, if any.
 pub fn session_of(event: &ControlEvent) -> Option<Uuid> {
-    match event {
-        ControlEvent::SessionCreated { session_id, .. }
-        | ControlEvent::SessionStatusChanged { session_id, .. }
-        | ControlEvent::SessionCancelled { session_id, .. }
-        | ControlEvent::SessionCompleted { session_id, .. }
-        | ControlEvent::ToolCall { session_id, .. }
-        | ControlEvent::PlanUpdate { session_id, .. }
-        | ControlEvent::AgentMessage { session_id, .. }
-        | ControlEvent::ApprovalRequired { session_id, .. }
-        | ControlEvent::ApprovalResolved { session_id, .. }
-        | ControlEvent::UserMessage { session_id, .. } => Some(*session_id),
-        ControlEvent::Error { session_id, .. } | ControlEvent::Raw { session_id, .. } => *session_id,
-        ControlEvent::SchedulerJob { .. } | ControlEvent::McpChanged { .. } | ControlEvent::MemoryUpdated { .. } => None,
-    }
+    event.session_id()
 }
 
 #[cfg(test)]

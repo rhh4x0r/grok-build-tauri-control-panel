@@ -220,6 +220,27 @@ impl std::fmt::Display for PairingLink {
     }
 }
 
+/// Several pairing links in one QR code: a Mac's own link plus one for each server it is paired with,
+/// so a phone pairs with all of them in one scan. `bomb://pair-bundle?l=<host>,<fp>,<secret>&l=…`.
+pub fn bundle(links: &[PairingLink]) -> String {
+    let parts: Vec<String> = links.iter().map(|l| format!("l={},{},{}", l.host, l.fingerprint, l.secret)).collect();
+    format!("bomb://pair-bundle?{}", parts.join("&"))
+}
+
+/// Every link in a scanned or pasted text: one pairing link, or a [`bundle`].
+pub fn parse_links(text: &str) -> Result<Vec<PairingLink>, String> {
+    let text = text.trim();
+    let Some(query) = text.strip_prefix("bomb://pair-bundle?") else { return PairingLink::parse(text).map(|link| vec![link]) };
+    let bad = || "That doesn’t look like a Bomb Code pairing code.".to_string();
+    let links = query.split('&').filter_map(|part| part.strip_prefix("l=")).map(|triple| {
+        let mut fields = triple.splitn(3, ',');
+        let (host, fp, secret) = (fields.next().ok_or_else(bad)?, fields.next().ok_or_else(bad)?, fields.next().ok_or_else(bad)?);
+        PairingLink::parse(&format!("bomb://pair?h={host}&fp={fp}&s={secret}"))
+    }).collect::<Result<Vec<_>, _>>()?;
+    if links.is_empty() { return Err(bad()); }
+    Ok(links)
+}
+
 /// Compare two hex digests without leaking where they differ.
 pub fn same_digest(a: &str, b: &str) -> bool {
     a.len() == b.len() && bool::from(a.as_bytes().ct_eq(b.as_bytes()))
@@ -229,6 +250,17 @@ pub fn same_digest(a: &str, b: &str) -> bool {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn a_bundle_carries_several_links_and_a_single_link_still_parses() {
+        let mac = PairingLink::new("100.64.0.2:7443", &"ab".repeat(32));
+        let server = PairingLink::new("vps.example.com:7443", &"cd".repeat(32));
+        assert_eq!(parse_links(&bundle(&[mac.clone(), server.clone()])).unwrap(), vec![mac.clone(), server]);
+        assert_eq!(parse_links(&mac.to_string()).unwrap(), vec![mac]);
+        for bad in ["bomb://pair-bundle?", "bomb://pair-bundle?l=h:1,zz,00", "bomb://pair-bundle?l=onlyhost", "nonsense"] {
+            assert!(parse_links(bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn pairing_links_round_trip_and_reject_anything_else() {
