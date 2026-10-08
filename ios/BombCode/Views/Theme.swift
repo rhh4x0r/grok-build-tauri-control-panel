@@ -281,3 +281,52 @@ func describe(_ error: Error) -> String {
     if case let .Failed(message) = error as? MobileError { return message }
     return error.localizedDescription
 }
+
+/// A sheet's top bar: a leading action, the title in Geist, and a trailing action, over the canvas.
+struct SheetHeader<Leading: View, Trailing: View>: View {
+    let title: String
+    @ViewBuilder var leading: Leading
+    @ViewBuilder var trailing: Trailing
+
+    var body: some View {
+        ZStack {
+            Text(title).font(Theme.sans(16, .semibold)).foregroundStyle(Theme.text)
+            HStack {
+                leading
+                Spacer()
+                trailing
+            }
+            .font(Theme.sans(15, .medium))
+            .foregroundStyle(Theme.textMuted)
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, 18)
+        .padding(.bottom, 10)
+    }
+}
+
+/// A small mono label above a group, like the desktop's settings sections.
+struct SectionLabel: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text.uppercased())
+            .font(Theme.mono(11, .medium))
+            .tracking(0.6)
+            .foregroundStyle(Theme.textFaint)
+            .padding(.horizontal, 4)
+    }
+}
+
+/// A plain footnote under a group.
+struct Footnote: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text).font(Theme.caption).foregroundStyle(Theme.textFaint).padding(.horizontal, 4)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}

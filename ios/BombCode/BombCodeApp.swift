@@ -33,7 +33,12 @@ struct RootView: View {
                     if let machine = app.machine(id: ref.machineId) {
                         ThreadScreen(machine: machine, threadId: ref.threadId)
                     } else {
-                        ContentUnavailableView("That machine isn’t paired anymore", systemImage: "laptopcomputer.slash")
+                        VStack(spacing: 10) {
+                            Image(systemName: "laptopcomputer.slash").font(.system(size: 30)).foregroundStyle(Theme.textFaint)
+                            Text("That machine isn’t paired anymore").font(Theme.sans(17, .semibold)).foregroundStyle(Theme.text)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background { BombBackground(strength: 0.5) }
                     }
                 }
         }

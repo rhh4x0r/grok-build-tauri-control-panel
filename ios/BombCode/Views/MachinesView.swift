@@ -9,36 +9,66 @@ struct MachinesView: View {
     var prefilled: String?
 
     var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    ForEach(app.machines) { machine in
-                        HStack(spacing: 12) {
-                            Image(systemName: machine.isMac ? "laptopcomputer" : "server.rack").frame(width: 24)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(machine.name)
-                                Text(Theme.linkText(machine.link)).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                            }
-                            Spacer()
-                            Circle().fill(Theme.linkColor(machine.link)).frame(width: 8, height: 8)
-                        }
-                        .swipeActions {
-                            Button("Remove", role: .destructive) { Task { await app.remove(machine) } }
-                        }
-                    }
-                } footer: {
-                    Text("Away from home, the phone reaches your Mac and servers through Tailscale.")
-                }
-                Section {
-                    Button("Pair a Mac or server", systemImage: "qrcode.viewfinder") { pairing = true }
-                }
+        VStack(spacing: 0) {
+            SheetHeader(title: "Machines") { EmptyView() } trailing: {
+                Button("Done") { dismiss() }.foregroundStyle(Theme.text)
             }
-            .navigationTitle("Machines")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
-            .sheet(isPresented: $pairing) { PairSheet(code: prefilled ?? "") }
-            .onAppear { if prefilled != nil { pairing = true } }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    if !app.machines.isEmpty {
+                        SectionLabel("Paired")
+                        VStack(spacing: 0) {
+                            ForEach(Array(app.machines.enumerated()), id: \.element.id) { index, machine in
+                                if index > 0 { Rectangle().fill(Theme.hairline).frame(height: 1).padding(.leading, 50) }
+                                MachineRow(machine: machine)
+                                    .contextMenu {
+                                        Button("Remove", systemImage: "trash", role: .destructive) { Task { await app.remove(machine) } }
+                                    }
+                            }
+                        }
+                        .background(RoundedRectangle(cornerRadius: Theme.panelCorner).fill(Theme.glass))
+                        .overlay(RoundedRectangle(cornerRadius: Theme.panelCorner).stroke(Theme.hairline, lineWidth: 1))
+                        Footnote("Away from home, the phone reaches your Mac and servers through Tailscale. Press and hold a machine to remove it.")
+                    }
+                    Button { pairing = true } label: {
+                        Label("Pair a Mac or server", systemImage: "qrcode.viewfinder")
+                    }
+                    .buttonStyle(BombButtonStyle(prominent: true))
+                    .padding(.top, 14)
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 24)
+            }
+            .scrollIndicators(.hidden)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background { BombBackground(strength: 0.5) }
+        .presentationDragIndicator(.visible)
+        .sheet(isPresented: $pairing) { PairSheet(code: prefilled ?? "") }
+        .onAppear { if prefilled != nil { pairing = true } }
+    }
+}
+
+/// A paired machine: what it is, its name, and whether it's reachable.
+private struct MachineRow: View {
+    let machine: MachineModel
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: machine.isMac ? "laptopcomputer" : "server.rack")
+                .font(.system(size: 15))
+                .foregroundStyle(Theme.textMuted)
+                .frame(width: 26)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(machine.name).font(Theme.sans(15, .medium)).foregroundStyle(Theme.text).lineLimit(1)
+                Text(Theme.linkText(machine.link)).font(Theme.mono(11)).foregroundStyle(Theme.textFaint).lineLimit(2)
+            }
+            Spacer(minLength: 8)
+            Circle().fill(Theme.linkColor(machine.link)).frame(width: 7, height: 7)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 12)
+        .contentShape(Rectangle())
     }
 }
 
@@ -51,53 +81,115 @@ struct PairSheet: View {
     @State private var working = false
     @State private var error: String?
 
+    private var hosts: [String]? { try? pairingHosts(text: code) }
+
     var body: some View {
-        NavigationStack {
-            Form {
-                if DataScannerViewController.isSupported && outcomes.isEmpty && code.isEmpty {
-                    Section {
+        VStack(spacing: 0) {
+            SheetHeader(title: "Pair") {
+                Button(outcomes.isEmpty ? "Cancel" : "Done") { dismiss() }
+            } trailing: { EmptyView() }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    if DataScannerViewController.isSupported && outcomes.isEmpty && code.isEmpty {
                         QRScanner { scanned in code = scanned }
-                            .frame(height: 280)
-                            .listRowInsets(EdgeInsets())
+                            .frame(height: 300)
+                            .clipShape(RoundedRectangle(cornerRadius: Theme.corner))
+                            .overlay(RoundedRectangle(cornerRadius: Theme.corner).stroke(Theme.hairline, lineWidth: 1))
+                            .padding(.bottom, 8)
                     }
-                }
-                Section {
-                    TextField("bomb://pair…", text: $code, axis: .vertical)
-                        .lineLimit(1...4)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    if let hosts = try? pairingHosts(text: code), outcomes.isEmpty {
-                        ForEach(hosts, id: \.self) { Label($0, systemImage: "network") }
-                    }
-                } header: {
-                    Text("Pairing code")
-                } footer: {
-                    Text("On your Mac: Bomb Code → Settings → Phone. One code pairs the Mac and the servers it's linked to.")
-                }
-                ForEach(outcomes, id: \.host) { outcome in
-                    Label(outcome.machine?.name ?? outcome.host, systemImage: outcome.machine != nil ? "checkmark.circle.fill" : "exclamationmark.triangle")
-                        .foregroundStyle(outcome.machine != nil ? .green : .orange)
-                    if let error = outcome.error { Text(error).font(.caption).foregroundStyle(.secondary) }
-                }
-                if let error { Text(error).foregroundStyle(.red) }
-            }
-            .navigationTitle("Pair")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button(outcomes.isEmpty ? "Cancel" : "Done") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
                     if outcomes.isEmpty {
-                        Button("Pair") { Task { await pair() } }.disabled(working || (try? pairingHosts(text: code)) == nil)
+                        SectionLabel("Pairing code")
+                        TextField("", text: $code, prompt: Text("bomb://pair…").foregroundStyle(Theme.textFaint), axis: .vertical)
+                            .font(Theme.mono(13))
+                            .foregroundStyle(Theme.text)
+                            .lineLimit(1...4)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .padding(12)
+                            .background(RoundedRectangle(cornerRadius: Theme.panelCorner).fill(Theme.bubble))
+                        if let hosts {
+                            HostChips(items: hosts)
+                        }
+                        Footnote("On your Mac: Bomb Code → Settings → Phone. One code pairs the Mac and the servers it's linked to.")
+                        Button {
+                            Task { await pair() }
+                        } label: {
+                            if working { ProgressView().tint(Theme.onSolid) } else { Text("Pair") }
+                        }
+                        .buttonStyle(BombButtonStyle(prominent: true))
+                        .disabled(working || hosts == nil)
+                        .opacity(hosts == nil ? 0.4 : 1)
+                        .padding(.top, 14)
+                    } else {
+                        SectionLabel("Paired")
+                        GlassCard {
+                            ForEach(outcomes, id: \.host) { outcome in
+                                OutcomeRow(outcome: outcome)
+                            }
+                        }
+                    }
+                    if let error {
+                        Text(error).font(Theme.small).foregroundStyle(Theme.danger).padding(.horizontal, 4)
                     }
                 }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 24)
             }
+            .scrollIndicators(.hidden)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background { BombBackground(strength: 0.5) }
+        .presentationDragIndicator(.visible)
     }
 
     private func pair() async {
         working = true
         defer { working = false }
+        error = nil
         do { outcomes = try await app.pair(code: code) } catch { self.error = describe(error) }
+    }
+}
+
+/// How one machine in a pairing code went.
+private struct OutcomeRow: View {
+    let outcome: PairOutcome
+
+    var body: some View {
+        let ok = outcome.machine != nil
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                .font(.system(size: 14))
+                .foregroundStyle(ok ? Theme.success : Theme.warning)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(outcome.machine?.name ?? outcome.host).font(Theme.sans(15, .medium)).foregroundStyle(Theme.text)
+                if let error = outcome.error {
+                    Text(error).font(Theme.caption).foregroundStyle(Theme.textMuted)
+                } else {
+                    Text(outcome.host).font(Theme.mono(11)).foregroundStyle(Theme.textFaint)
+                }
+            }
+        }
+    }
+}
+
+/// The addresses in a pairing code, as mono chips.
+private struct HostChips: View {
+    let items: [String]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(items, id: \.self) { item in
+                HStack(spacing: 5) {
+                    Image(systemName: "network").font(.system(size: 10))
+                    Text(item).font(Theme.mono(11)).lineLimit(1)
+                }
+                .foregroundStyle(Theme.textMuted)
+                .padding(.horizontal, 8)
+                .frame(height: 22)
+                .overlay(Capsule().stroke(Theme.pillBorder, lineWidth: 1))
+            }
+        }
+        .padding(.horizontal, 2)
     }
 }
 
