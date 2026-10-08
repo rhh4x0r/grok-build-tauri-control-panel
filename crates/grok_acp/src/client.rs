@@ -200,6 +200,20 @@ struct PendingPermission {
     options: Vec<PermissionOptionInfo>,
 }
 
+/// The longest prefix of `s` within `max` bytes that ends on a character boundary. Slicing at
+/// a raw byte index panics inside a multi-byte character (e.g. '─'), and a panic in the event
+/// loop silently stops a thread's updates while its agent keeps working.
+fn clip_bytes(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Client-made marker queued after `session/load` answers (see `session_load`).
 const REPLAY_DONE: &str = "bomb/historyReplayDone";
 
@@ -2223,7 +2237,7 @@ impl AcpClient {
                                         out.get("output").and_then(|v| v.as_str()).unwrap_or("");
                                     if !text.is_empty() {
                                         let clip = if text.len() > 4000 {
-                                            format!("{}…", &text[..4000])
+                                            format!("{}…", clip_bytes(text, 4000))
                                         } else {
                                             text.to_string()
                                         };
@@ -2703,7 +2717,7 @@ impl AcpClient {
                     .map(|t| {
                         let t = t.replace('\n', " ");
                         if t.len() > 120 {
-                            format!("{}…", &t[..120])
+                            format!("{}…", clip_bytes(&t, 120))
                         } else {
                             t
                         }
@@ -2966,7 +2980,7 @@ impl AcpClient {
                 debug!(other, "unmapped session update");
                 let compact = serde_json::to_string(update).unwrap_or_default();
                 let compact = if compact.len() > 280 {
-                    format!("{}…", &compact[..280])
+                    format!("{}…", clip_bytes(&compact, 280))
                 } else {
                     compact
                 };
@@ -3496,6 +3510,16 @@ impl AcpClient {
 
     pub fn cwd(&self) -> &Path {
         &self.config.cwd
+    }
+}
+
+#[cfg(test)]
+mod clip_tests {
+    #[test]
+    fn clips_on_a_character_boundary() {
+        let line = format!("{}{}", "a".repeat(119), "─────");
+        assert_eq!(super::clip_bytes(&line, 120), "a".repeat(119));
+        assert_eq!(super::clip_bytes("short", 120), "short");
     }
 }
 
