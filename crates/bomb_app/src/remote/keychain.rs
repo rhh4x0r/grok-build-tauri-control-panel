@@ -66,12 +66,17 @@ pub fn forget(server: &str) {
     if let Some(path) = path(server) { let _ = std::fs::remove_file(path); }
 }
 
+/// Tests that point `BOMB_KEY_DIR` somewhere take turns: it's one variable for the whole process.
+#[cfg(test)]
+pub(crate) static KEY_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn keys_round_trip_in_a_private_file_and_ids_cannot_escape_the_folder() {
+        let _key_dir = KEY_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = tempfile::tempdir().unwrap();
         std::env::set_var("BOMB_KEY_DIR", temp.path());
         let identity = Identity::generate("mac").unwrap();

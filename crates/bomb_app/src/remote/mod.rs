@@ -263,7 +263,10 @@ mod tests {
 
     /// The whole client path, against a real gateway and core on loopback.
     #[tokio::test]
+    // The key folder lock is held for the whole test on purpose; the test's runtime is single-threaded.
+    #[allow(clippy::await_holding_lock)]
     async fn a_paired_mac_runs_a_project_on_the_server_and_survives_a_dropped_connection() {
+        let _key_dir = keychain::KEY_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = tempfile::tempdir().unwrap();
         std::env::set_var("BOMB_KEY_DIR", temp.path().join("keys"));
         // Mock-model threads are hidden from thread lists outside smoke runs.
