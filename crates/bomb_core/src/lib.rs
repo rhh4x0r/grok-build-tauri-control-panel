@@ -15,7 +15,7 @@ pub mod services;
 pub mod state;
 pub mod usage;
 
-pub use bomb_transcript::{presence, transcript};
+pub use bomb_transcript::{presence, summary, transcript};
 pub use grok_events::{ControlEvent, EventBus};
 pub use state::AppState;
 

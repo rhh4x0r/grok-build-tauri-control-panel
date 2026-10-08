@@ -4,6 +4,8 @@
 //!
 //! - [`transcript`] folds events and saved rows into a [`transcript::Thread`].
 //! - [`presence`] tracks what the current turn is doing.
+//! - [`summary`] labels a run of steps ("Thought · Ran 4 commands").
 
 pub mod presence;
+pub mod summary;
 pub mod transcript;

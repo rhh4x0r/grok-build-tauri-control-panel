@@ -312,3 +312,27 @@ pub struct UsageWindowView {
     /// RFC 3339.
     pub resets_at: Option<String>,
 }
+
+/// The parts of a tool row its label needs.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct ToolStep {
+    pub name: String,
+    pub args: String,
+}
+
+fn tool_row(step: &ToolStep) -> bomb_transcript::transcript::ToolRow {
+    bomb_transcript::transcript::ToolRow { tool_id: String::new(), name: step.name.clone(), status: String::new(), args: step.args.clone(), result: None }
+}
+
+/// "Thought · Ran 4 commands · Edited 1 file", the same line the Mac shows for a folded run of steps.
+#[uniffi::export]
+pub fn activity_label(thoughts: u32, steps: Vec<ToolStep>) -> String {
+    let rows: Vec<_> = steps.iter().map(tool_row).collect();
+    bomb_transcript::summary::activity_label(thoughts as usize, rows.iter())
+}
+
+/// "Running `npm test`", for the step in progress.
+#[uniffi::export]
+pub fn running_label(step: ToolStep) -> String {
+    bomb_transcript::summary::running_label(&tool_row(&step))
+}

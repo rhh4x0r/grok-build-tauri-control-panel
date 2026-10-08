@@ -184,6 +184,11 @@ impl Machine {
         self.call("list_projects", Value::Null).await
     }
 
+    /// A new empty Git project in the person's projects folder on a server. Returns its path.
+    pub async fn create_project(&self, name: String) -> Result<String> {
+        self.call("create_project", json!({ "name": name })).await
+    }
+
     pub async fn list_backends(&self) -> Result<Vec<BackendChoice>> {
         let rows: Vec<BackendRow> = self.call("list_backends", Value::Null).await?;
         Ok(rows.into_iter().map(BackendChoice::from).collect())

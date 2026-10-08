@@ -951,3 +951,24 @@ All additive; `PROTOCOL_VERSION` stays 1 and a Mac that never calls the new meth
   - pause/resume; unpair.
   
   Passed 4 runs in a row.
+
+## 2026-10-07 — iOS companion, phase 3: the iPhone app
+
+- `ios/BombCode.xcodeproj`: a hand-written Xcode 16 project (objectVersion 77) with a folder-synced `BombCode/` group, so new Swift files need no project edits. It links `BombMobile.xcframework`. iOS 17+, bundle id `com.bombcode.companion`. Info.plist settings: the `bomb://` URL scheme, plus camera and local-network usage strings. x86_64 simulator builds are excluded (the Rust library is built for Apple silicon only).
+- Models:
+  - `AppModel`: paired machines from the Keychain and the combined thread list. Pauses on background and reconnects on foreground.
+  - `MachineModel`: one per `Machine`. Its listener relays callbacks to the main queue in order.
+  - `ThreadModel`: applies patches; `TranscriptRow` folds thinking and tool runs.
+- Views:
+  - thread list grouped by project, with a Mac/server badge, status dots, search, pull to refresh and swipe to stop;
+  - thread screen: bubbles, markdown, folded steps (labels from `bomb_transcript::summary`, shared with the Mac), plan card, approval card with its choices, status line with progress, composer (photos downscaled to 1600 px JPEG, Plan/Ask/Auto, model and effort, send/stop);
+  - new-thread sheet (machine, project, own branch, first prompt);
+  - machines list (link state, remove = unpair);
+  - pairing by QR code (VisionKit), paste, or opening a `bomb://` link.
+- The "Thought · Ran N commands" helpers moved from `bomb_app/src/views/transcript.rs` to `bomb_transcript::summary`, and `bomb_mobile` exports `activity_label` / `running_label`. `Machine::create_project` was added.
+- Debug-only `Smoke` (`BOMB_SMOKE=1`, `BOMB_PAIR=<link>`, optional `BOMB_SMOKE_LIST=1`) pairs, starts a mock thread and opens it without taps.
+- Checked in the iPhone 16 Pro simulator against a local `bombd` with the mock agent:
+  - pairing, the thread starting, streamed markdown with a code block, the folded "Thought · Ran 1 command" line and the composer all render;
+  - after relaunching, the pairing is kept and the list shows the project, its server badge and the thread.
+  - Found while testing: an unsigned simulator build can't write to the Keychain. Build with `CODE_SIGN_IDENTITY=-`; a failed save now says so in the pairing result.
+- Not checked yet: a real device, the QR camera, the approval card with a real agent, background/foreground on a device, and dark mode.
