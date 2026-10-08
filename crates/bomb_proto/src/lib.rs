@@ -168,6 +168,8 @@ pub mod methods {
     pub const SEND_PROMPT: &str = "send_prompt";
     pub const CANCEL_SESSION: &str = "cancel_session";
     pub const RESPOND_APPROVAL: &str = "respond_approval";
+    /// Limit streamed events to the threads a client has open (`threads`: ids, or null for all).
+    pub const WATCH: &str = "watch";
 }
 
 #[cfg(test)]

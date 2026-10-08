@@ -912,3 +912,13 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
 - `TranscriptEntry` moved to `grok_events`; `grok_persistence` re-exports it. This keeps SQLite out of the phone build.
 - `rust-toolchain.toml` now lists `aarch64-apple-ios` and `aarch64-apple-ios-sim`. `bomb_proto`, `bomb_link` (ring/rustls) and `bomb_transcript` build for both.
 - Checked: `cargo check --workspace --all-targets`; clippy clean on the touched crates; `bomb_transcript` (33), `bomb_core` (67) tests pass; `BOMB_SMOKE=1` passes. Workspace-wide clippy still fails on five lints in `bomb_app` that predate this change (`models/app.rs`, `remote/mod.rs`, `views/composer.rs`, `views/project.rs`).
+
+## 2026-10-07 — iOS companion, phase 1: protocol additions for a phone
+
+All additive; `PROTOCOL_VERSION` stays 1 and a Mac that never calls the new methods behaves as before.
+- `watch {threads: [id…] | null}`: answered in order on the connection (`bomb_server/src/core.rs`) and returns `{seq}`. Afterwards streamed events (`agent_message`, `tool_call`, `plan_update`, `raw`) reach the client only for those threads. Lifecycle, approvals, prompts and errors still reach everyone, so a phone's thread list stays current. The rule is `bomb_core::journal::reaches`. Open a thread by watching it and then taking a snapshot. The backlog replayed on reconnect is filtered too, but only after the client sends `watch` again.
+- `snapshot` takes optional `limit` and `before_seq` and returns `has_more`, for the newest rows first and paging back from there.
+- `account_usage` (the sidebar's usage bars).
+- `register_push {token, sandbox?}` / `unregister_push`: one APNs token per paired device, keyed by the connection's client name, kept in kv `push_devices` (`bomb_core::rpc::push_devices`). Nothing sends pushes yet (phase 5).
+- Tests: `journal::tests` (filter rule) and `bomb_server/tests/core_socket.rs` `a_phone_streams_only_the_thread_it_has_open_pages_history_and_registers_for_push` (two mock threads; only the watched one streams; paging; push registration).
+- `bomb_core`'s `workspace_lifecycle_checkpoints_sharing_inline_and_archive` timed out once in the full serial run and passed alone and on the rerun; it's timing-sensitive, not related to this change.

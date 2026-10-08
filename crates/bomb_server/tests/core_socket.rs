@@ -188,3 +188,61 @@ async fn files_terminals_and_previews_work_over_the_connection_and_stay_inside_t
     let (stream, _) = mac.open_stream();
     assert!(mac.request("forward_open", json!({ "port": 1, "stream": stream })).await.is_err(), "a closed port is reported, not hung");
 }
+
+#[tokio::test]
+async fn a_phone_streams_only_the_thread_it_has_open_pages_history_and_registers_for_push() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = core(temp.path()).await;
+    let socket = temp.path().join("core.sock");
+    tokio::spawn({ let (state, socket) = (state.clone(), socket.clone()); async move { bomb_server::core::serve(state, &socket, std::future::pending()).await.unwrap() } });
+    while !socket.exists() { tokio::time::sleep(Duration::from_millis(10)).await; }
+    // Keep the whole connection: dropping its event receiver closes it once events flow.
+    let mac_connection = attach(&socket, None).await;
+    let mac = &mac_connection.client;
+    let mut phone = connect(UnixStream::connect(&socket).await.unwrap(), "test-phone", None).await.unwrap();
+
+    let cwd = temp.path().display().to_string();
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let started = mac.request("start_mock_session", json!({ "cwd": cwd })).await.unwrap();
+        let id = started["id"].as_str().or_else(|| started["session_id"].as_str()).unwrap().to_string();
+        mac.request("wait_until_idle", json!({ "id": id, "seconds": 10 })).await.unwrap();
+        ids.push(id);
+    }
+    let (open, closed) = (ids[0].clone(), ids[1].clone());
+    assert!(phone.client.request("watch", json!({ "threads": ["not-a-thread"] })).await.is_err());
+    phone.client.request("watch", json!({ "threads": [open] })).await.unwrap();
+    drain(&mut phone).await;
+
+    for id in [&open, &closed] {
+        mac.request("send_prompt", json!({ "id": id, "prompt": "build the thing" })).await.unwrap();
+        mac.request("wait_until_idle", json!({ "id": id, "seconds": 20 })).await.unwrap();
+    }
+    let events = drain(&mut phone).await;
+    let of = |id: &str, kind: &str| events.iter().any(|(_, e)| e["session_id"] == id && e["type"] == kind);
+    assert!(of(&open, "agent_message"), "the open thread streams: {events:?}");
+    assert!(!of(&closed, "agent_message"), "a thread the phone does not have open does not stream");
+    assert!(of(&closed, "user_message") || of(&closed, "session_status_changed"), "but its lifecycle still shows in the list: {events:?}");
+
+    // Newest rows first, then page back.
+    let full = phone.client.request("snapshot", json!({ "id": open })).await.unwrap();
+    let all = full["rows"].as_array().unwrap().clone();
+    assert!(all.len() >= 2, "{all:?}");
+    assert_eq!(full["has_more"], false);
+    let last = phone.client.request("snapshot", json!({ "id": open, "limit": 1 })).await.unwrap();
+    assert_eq!(last["rows"].as_array().unwrap(), &all[all.len() - 1..]);
+    assert_eq!(last["has_more"], true);
+    let before = last["rows"][0]["seq"].clone();
+    let earlier = phone.client.request("snapshot", json!({ "id": open, "before_seq": before })).await.unwrap();
+    assert_eq!(earlier["rows"].as_array().unwrap(), &all[..all.len() - 1]);
+
+    // One push token per device; registering again replaces it.
+    assert!(phone.client.request("register_push", json!({ "token": "nope" })).await.is_err());
+    let token = |c: char| c.to_string().repeat(64);
+    phone.client.request("register_push", json!({ "token": token('a'), "sandbox": true })).await.unwrap();
+    phone.client.request("register_push", json!({ "token": token('b') })).await.unwrap();
+    let devices = bomb_core::rpc::push_devices(&state);
+    assert_eq!(devices, vec![bomb_core::rpc::PushDevice { device: "test-phone".into(), token: token('b'), sandbox: false }]);
+    phone.client.request("unregister_push", Value::Null).await.unwrap();
+    assert!(bomb_core::rpc::push_devices(&state).is_empty());
+}
