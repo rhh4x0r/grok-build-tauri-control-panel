@@ -1407,12 +1407,9 @@ impl AppModel {
         if !needs {
             return;
         }
-        // A thread that already streamed in this session is the truth; the
-        // saved copy can only be older. Never replace live entries with it.
-        if !entity.read(cx).thread.entries.is_empty() {
-            entity.update(cx, |t, _| t.hydrated = true);
-            return;
-        }
+        // A thread can stream before it is ever opened (a prompt sent from the phone, a scheduled
+        // run): what it shows then is only that turn. The saved history holds the turn too, and
+        // everything before it, so load it either way.
         entity.update(cx, |t, _| t.loading = true);
         let core = self.core_of_thread(id, cx);
         let remote = core.is_remote();
@@ -1428,14 +1425,17 @@ impl AppModel {
                         Ok(snapshot) => {
                             let rows = snapshot.rows;
                             tracing::debug!(%id, rows = rows.len(), live = t.thread.entries.len(), "thread hydrated");
-                            if t.thread.entries.is_empty() {
+                            // Entries that streamed in before this loaded are in the saved rows as well.
+                            let had_live = !t.thread.entries.is_empty();
+                            if !had_live || rows.len() >= t.thread.entries.len() {
+                                if had_live { t.thread = bomb_core::transcript::Thread::new(); }
                                 t.thread.hydrate(&rows);
                                 t.after_hydrate(cx);
-                                // Saved rows drop an approval's id and choices; a server thread may be
-                                // waiting on one that was asked before this Mac connected.
-                                if remote { for approval in &snapshot.pending_approvals { t.apply(approval, cx); } }
-                                // The agent may still be working there: say so now, not at its next event.
-                                if remote && (t.meta.status == "running" || t.meta.status.contains("wait")) {
+                                // Saved rows drop an approval's id and choices; the thread may be waiting
+                                // on one asked before this Mac connected, or before the thread was opened.
+                                if remote || had_live { for approval in &snapshot.pending_approvals { t.apply(approval, cx); } }
+                                // The agent may still be working: say so now, not at its next event.
+                                if (remote || had_live) && (t.meta.status == "running" || t.meta.status.contains("wait")) {
                                     let ch = t.thread.resume_in_progress(std::time::Instant::now());
                                     t.absorb(&ch, cx);
                                 }
