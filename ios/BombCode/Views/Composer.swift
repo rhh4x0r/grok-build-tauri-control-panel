@@ -41,36 +41,47 @@ struct Composer: View {
                     }
                 }
             }
-            TextField(placeholder, text: $text, axis: .vertical)
+            TextField("", text: $text, prompt: Text(placeholder).foregroundStyle(Theme.textFaint), axis: .vertical)
+                .font(Theme.prose)
+                .foregroundStyle(Theme.text)
+                .tint(Theme.accent)
                 .lineLimit(1...6)
                 .focused($focused)
-            HStack(spacing: 14) {
+                .padding(.horizontal, 4)
+                .padding(.top, 2)
+            HStack(spacing: 8) {
                 PhotosPicker(selection: $picks, maxSelectionCount: 4, matching: .images) {
-                    Image(systemName: "photo")
+                    Image(systemName: "photo.on.rectangle")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Theme.textMuted)
+                        .frame(width: 30, height: 30)
                 }
                 ModeMenu(mode: $choices.mode)
                 ModelMenu(machine: machine, choices: $choices)
-                Spacer()
+                Spacer(minLength: 4)
+                let empty = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && images.isEmpty
                 if busy && text.isEmpty {
                     Button { Task { await stop() } } label: {
-                        Image(systemName: "stop.fill").font(.footnote).frame(width: 32, height: 32).background(Color.primary, in: Circle()).foregroundStyle(Color(uiColor: .systemBackground))
+                        Image(systemName: "stop.fill").font(.system(size: 12, weight: .bold))
+                            .frame(width: 34, height: 34).background(Theme.solid, in: Circle()).foregroundStyle(Theme.onSolid)
                     }
                 } else {
                     Button { Task { await submit() } } label: {
                         Group {
-                            if sending { ProgressView().tint(Color(uiColor: .systemBackground)) } else { Image(systemName: "arrow.up").font(.footnote.bold()) }
+                            if sending { ProgressView().tint(Theme.onSolid) } else { Image(systemName: "arrow.up").font(.system(size: 14, weight: .bold)) }
                         }
-                        .frame(width: 32, height: 32).background(Color.primary, in: Circle()).foregroundStyle(Color(uiColor: .systemBackground))
+                        .frame(width: 34, height: 34)
+                        .background(empty ? Theme.bubble : Theme.solid, in: Circle())
+                        .foregroundStyle(empty ? Theme.textFaint : Theme.onSolid)
                     }
-                    .disabled(sending || (text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && images.isEmpty))
+                    .disabled(sending || empty)
                 }
             }
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
         }
         .padding(12)
-        .background(Theme.panel, in: RoundedRectangle(cornerRadius: 22))
-        .overlay(RoundedRectangle(cornerRadius: 22).stroke(Theme.hairline, lineWidth: 0.5))
+        .background(RoundedRectangle(cornerRadius: Theme.composerCorner).fill(Theme.glass))
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Theme.composerCorner))
+        .overlay(RoundedRectangle(cornerRadius: Theme.composerCorner).stroke(Theme.hairline, lineWidth: 1))
         .onChange(of: picks) { _, items in Task { await attach(items) } }
     }
 
@@ -116,7 +127,10 @@ struct ModeMenu: View {
                 }
             }
         } label: {
-            Text(Self.modes.first { $0.0 == mode }?.1 ?? mode)
+            PillLabel {
+                Image(systemName: mode == "plan" ? "list.bullet.clipboard" : mode == "ask" ? "hand.raised" : "bolt").font(.system(size: 11))
+                Text(Self.modes.first { $0.0 == mode }?.1 ?? mode)
+            }
         }
     }
 }
@@ -146,7 +160,10 @@ struct ModelMenu: View {
                 }
             }
         } label: {
-            Text(label).lineLimit(1)
+            PillLabel {
+                if let backend = choices.backend { BrandMark(backend: backend, size: 11) }
+                Text(label).lineLimit(1)
+            }
         }
         .task { await machine.loadBackends() }
     }

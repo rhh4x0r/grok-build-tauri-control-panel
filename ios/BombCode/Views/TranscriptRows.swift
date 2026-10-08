@@ -30,6 +30,9 @@ struct UserBubble: View {
                 }
                 if !entry.text.isEmpty {
                     Text(entry.text)
+                        .font(Theme.prose)
+                        .lineSpacing(Theme.proseSpacing)
+                        .foregroundStyle(Theme.text)
                         .textSelection(.enabled)
                         .padding(.horizontal, 14).padding(.vertical, 10)
                         .background(Theme.bubble, in: RoundedRectangle(cornerRadius: Theme.corner))
@@ -62,17 +65,17 @@ struct ActivityLine: View {
             Button { withAnimation(.snappy) { expanded.toggle() } } label: {
                 HStack(spacing: 6) {
                     Text(label).lineLimit(1)
-                    Image(systemName: "chevron.right").font(.caption2).rotationEffect(.degrees(expanded ? 90 : 0))
+                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).rotationEffect(.degrees(expanded ? 90 : 0))
                 }
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .font(Theme.sans(13, .medium))
+                .foregroundStyle(Theme.textFaint)
             }
             .buttonStyle(.plain)
             if expanded {
                 VStack(alignment: .leading, spacing: 10) {
                     ForEach(items, id: \.id) { item in StepDetail(entry: item) }
                 }
-                .padding(.leading, 10)
+                .padding(.leading, 12)
                 .overlay(alignment: .leading) { Rectangle().fill(Theme.hairline).frame(width: 1) }
             }
         }
@@ -88,18 +91,20 @@ private struct StepDetail: View {
         case let .tool(_, name, status, args, result):
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
-                    Text(name).font(.footnote.weight(.medium))
-                    Text(status).font(.caption).foregroundStyle(status == "failed" ? .red : .secondary)
+                    Text(name).font(Theme.sans(13, .medium)).foregroundStyle(Theme.text)
+                    Text(status).font(Theme.mono(11)).foregroundStyle(status == "failed" ? Theme.danger : Theme.textFaint)
                 }
                 if !args.isEmpty {
-                    Text(args.prefix(600)).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).lineLimit(8)
+                    Text(args.prefix(600)).font(Theme.mono(12)).foregroundStyle(Theme.textMuted).lineLimit(8)
                 }
                 if let result, !result.isEmpty {
-                    Text(result.prefix(1200)).font(.system(.caption, design: .monospaced)).lineLimit(12)
+                    Text(result.prefix(1200)).font(Theme.mono(12)).foregroundStyle(Theme.textMuted).lineLimit(12)
+                        .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Theme.bubble, in: RoundedRectangle(cornerRadius: 8))
                 }
             }
         case let .text(text):
-            Text(text).font(.footnote).foregroundStyle(.secondary).italic()
+            Text(text).font(Theme.sans(13)).foregroundStyle(Theme.textMuted).italic()
         default:
             EmptyView()
         }
@@ -111,13 +116,14 @@ struct PlanCard: View {
 
     var body: some View {
         if case let .plan(title, markdown) = entry.body {
-            VStack(alignment: .leading, spacing: 8) {
-                Label(title ?? "Plan", systemImage: "list.bullet.clipboard").font(.subheadline.weight(.semibold))
+            GlassCard {
+                HStack(spacing: 6) {
+                    Image(systemName: "list.bullet.clipboard").font(.system(size: 12, weight: .semibold))
+                    Text(title ?? "Plan").font(Theme.sans(14, .semibold))
+                }
+                .foregroundStyle(Theme.text)
                 MarkdownText(source: markdown)
             }
-            .padding(14)
-            .background(Theme.panel, in: RoundedRectangle(cornerRadius: 14))
-            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.hairline, lineWidth: 0.5))
         }
     }
 }
@@ -133,35 +139,38 @@ struct ApprovalCard: View {
         if case let .approval(requestId, tool, summary, explanation, options, planApproval, allowPattern, resolution) = entry.body {
             if let resolution {
                 Label(outcome(resolution, options), systemImage: resolution.hasPrefix("reject") || resolution == "cancelled" ? "xmark.circle" : "checkmark.circle")
-                    .font(.subheadline).foregroundStyle(.secondary)
+                    .font(Theme.sans(13, .medium)).foregroundStyle(Theme.textFaint)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                VStack(alignment: .leading, spacing: 10) {
-                    Label(planApproval ? "Ready to build this plan?" : "\(tool) wants to run", systemImage: "hand.raised")
-                        .font(.subheadline.weight(.semibold))
-                    Text(summary).font(.system(.footnote, design: .monospaced)).lineLimit(10)
-                    if let explanation { Text(explanation).font(.footnote).foregroundStyle(.secondary) }
-                    ForEach(options, id: \.id) { option in
-                        Button {
-                            Task { await answer(requestId, option.id) }
-                        } label: {
-                            HStack {
-                                Text(option.label)
-                                Spacer()
-                                if sending == option.id { ProgressView() }
-                            }
-                            .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(option.kind.hasPrefix("reject") ? .red : option.kind == "allow_once" ? .accentColor : .primary)
-                        .disabled(sending != nil)
+                GlassCard(stroke: Theme.warning.opacity(0.55)) {
+                    HStack(spacing: 6) {
+                        Circle().fill(Theme.warning).frame(width: 6, height: 6)
+                        Text(planApproval ? "Ready to build this plan?" : "\(tool) wants to run")
+                            .font(Theme.sans(14, .semibold)).foregroundStyle(Theme.text)
                     }
-                    if let allowPattern { Text("Always allowing adds \(allowPattern)").font(.caption).foregroundStyle(.secondary) }
-                    if let note { Text(note).font(.caption).foregroundStyle(.secondary) }
+                    Text(summary).font(Theme.mono(12)).foregroundStyle(Theme.textMuted).lineLimit(10)
+                        .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Theme.bubble, in: RoundedRectangle(cornerRadius: 8))
+                    if let explanation { Text(explanation).font(Theme.small).foregroundStyle(Theme.textMuted) }
+                    VStack(spacing: 8) {
+                        ForEach(Array(options.enumerated()), id: \.element.id) { index, option in
+                            Button {
+                                Task { await answer(requestId, option.id) }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Text(option.label).lineLimit(1)
+                                    if sending == option.id { ProgressView().controlSize(.small) }
+                                }
+                            }
+                            // The first allow is the main action; denying stays visible but quiet.
+                            .buttonStyle(BombButtonStyle(prominent: index == 0 && !option.kind.hasPrefix("reject"),
+                                                         tint: option.kind.hasPrefix("reject") ? Theme.danger : nil))
+                            .disabled(sending != nil)
+                        }
+                    }
+                    if let allowPattern { Text("Always allowing adds \(allowPattern)").font(Theme.caption).foregroundStyle(Theme.textFaint) }
+                    if let note { Text(note).font(Theme.caption).foregroundStyle(Theme.textFaint) }
                 }
-                .padding(14)
-                .background(Theme.panel, in: RoundedRectangle(cornerRadius: 14))
-                .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.orange.opacity(0.6), lineWidth: 1))
             }
         }
     }
@@ -193,8 +202,8 @@ struct SystemLine: View {
 
     var body: some View {
         Text(entry.text)
-            .font(.footnote)
-            .foregroundStyle(entry.role == .error ? .red : .secondary)
+            .font(Theme.sans(12))
+            .foregroundStyle(entry.role == .error ? Theme.danger : Theme.textFaint)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

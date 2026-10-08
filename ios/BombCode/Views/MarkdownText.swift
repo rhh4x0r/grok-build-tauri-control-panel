@@ -11,20 +11,25 @@ struct MarkdownText: View {
                 case let .paragraph(text):
                     Text(inline(text))
                 case let .heading(level, text):
-                    Text(inline(text)).font(level == 1 ? .title3.bold() : level == 2 ? .headline : .subheadline.bold())
+                    Text(inline(text)).font(Theme.sans(level == 1 ? 19 : level == 2 ? 17 : 15, .semibold)).padding(.top, 4)
                 case let .bullet(marker, text):
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(marker).foregroundStyle(.secondary)
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(marker).foregroundStyle(Theme.textFaint)
                         Text(inline(text))
                     }
                 case let .code(text):
                     ScrollView(.horizontal, showsIndicators: false) {
-                        Text(text).font(.system(.footnote, design: .monospaced)).textSelection(.enabled).padding(10)
+                        Text(text).font(Theme.mono(13)).foregroundStyle(Theme.text).textSelection(.enabled).padding(12)
                     }
                     .background(Theme.bubble, in: RoundedRectangle(cornerRadius: 10))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.hairline, lineWidth: 1))
                 }
             }
         }
+        .font(Theme.prose)
+        .lineSpacing(Theme.proseSpacing)
+        .foregroundStyle(Theme.text)
+        .tint(Theme.accent)
         .frame(maxWidth: .infinity, alignment: .leading)
         .textSelection(.enabled)
     }

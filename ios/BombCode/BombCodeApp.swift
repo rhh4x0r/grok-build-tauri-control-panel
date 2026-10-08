@@ -5,6 +5,10 @@ struct BombCodeApp: App {
     @State private var app = AppModel()
     @Environment(\.scenePhase) private var phase
 
+    init() {
+        Theme.registerFonts()
+    }
+
     var body: some Scene {
         WindowGroup {
             RootView()
@@ -33,6 +37,7 @@ struct RootView: View {
                     }
                 }
         }
+        .tint(Theme.text)
         #if DEBUG
         .task { await Smoke.run(app) { path.append($0) } }
         #endif
