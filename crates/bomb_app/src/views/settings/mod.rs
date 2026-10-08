@@ -910,7 +910,7 @@ fn render_phone(cx: &mut App) -> AnyElement {
     let model = crate::models::phone::phone(cx);
     let (on, busy, error, code, devices, address) = {
         let p = model.read(cx);
-        (p.host.is_some(), p.busy, p.error.clone(), p.code.clone(), p.devices.clone(), p.address())
+        (p.host.is_some(), p.busy, p.error.clone(), p.code.clone(), p.devices.clone(), p.listening.clone())
     };
     let caption = |text: String| div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(text);
     let mut page = div().flex().flex_col().gap_3().w_full();

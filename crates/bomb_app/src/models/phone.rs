@@ -30,6 +30,11 @@ pub struct PairingCode {
 pub struct PhoneModel {
     pub settings: PhoneSettings,
     pub host: Option<Arc<PhoneHost>>,
+    /// `ip:port` the running host listens on, which pairing codes carry. It can lag `address()`
+    /// when no address was picked and a better one appeared since (Tailscale installed later).
+    pub listening: Option<String>,
+    /// Make a pairing code as soon as the host has (re)started.
+    code_after_start: bool,
     pub busy: bool,
     pub error: Option<String>,
     pub code: Option<PairingCode>,
@@ -80,6 +85,7 @@ impl PhoneModel {
 
     fn stop(&mut self, cx: &mut Context<Self>) {
         self.host = None;
+        self.listening = None;
         self.code = None;
         self.error = None;
         cx.notify();
@@ -95,6 +101,7 @@ impl PhoneModel {
         self.error = None;
         let state = services(cx);
         let this = cx.entity().downgrade();
+        let listening = address.clone();
         spawn_service(cx, async move {
             let name = std::process::Command::new("scutil").args(["--get", "ComputerName"]).output().ok()
                 .and_then(|o| String::from_utf8(o.stdout).ok()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
@@ -108,8 +115,13 @@ impl PhoneModel {
                     Ok(host) => {
                         m.devices = host.devices();
                         m.host = Some(Arc::new(host));
+                        m.listening = Some(listening);
+                        if std::mem::take(&mut m.code_after_start) { m.show_code(cx); }
                     }
-                    Err(error) => m.error = Some(error),
+                    Err(error) => {
+                        m.code_after_start = false;
+                        m.error = Some(error);
+                    }
                 }
                 cx.notify();
             });
@@ -119,6 +131,13 @@ impl PhoneModel {
 
     /// Make a fresh code: this Mac's link plus a new one from each connected server.
     pub fn show_code(&mut self, cx: &mut Context<Self>) {
+        // The best address changed since this started listening: move first, so the code carries the new one.
+        if self.host.is_some() && self.listening != self.address() {
+            self.stop(cx);
+            self.code_after_start = true;
+            self.start(cx);
+            return;
+        }
         let Some(host) = self.host.clone() else { return };
         let mac = match host.invite() {
             Ok(link) => link,
