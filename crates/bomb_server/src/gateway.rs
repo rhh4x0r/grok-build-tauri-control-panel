@@ -37,6 +37,8 @@ pub struct Gateway {
     /// How privileged work gets done: sudo on a shared server, unavailable on a one-person install.
     privileged: Box<dyn crate::admin::Privileged>,
     failures: Mutex<HashMap<IpAddr, Vec<Instant>>>,
+    /// What devices are told this machine is: "server" for `bombd`, "mac" when a Mac hosts its own threads.
+    about: Mutex<(String, Option<String>)>,
 }
 
 impl Gateway {
@@ -60,7 +62,12 @@ impl Gateway {
                 identity
             }
         };
-        Ok(Arc::new(Self { store, identity, public: public.to_string(), revoked: broadcast::channel(64).0, privileged, failures: Default::default() }))
+        Ok(Arc::new(Self { store, identity, public: public.to_string(), revoked: broadcast::channel(64).0, privileged, failures: Default::default(), about: Mutex::new(("server".into(), None)) }))
+    }
+
+    /// How this machine introduces itself to a paired device (`gateway.whoami`).
+    pub fn describe_as(&self, kind: &str, name: Option<String>) {
+        *self.about.lock().unwrap_or_else(|e| e.into_inner()) = (kind.to_string(), name);
     }
 
     pub fn store(&self) -> &Store {
@@ -234,7 +241,10 @@ impl Gateway {
     fn gateway_request(&self, method: &str, params: &Value, device: &Device, user: &User) -> Result<Value, String> {
         let registry = self.store.read().map_err(|e| e.to_string())?;
         match method {
-            "gateway.whoami" => Ok(json!({ "device_id": device.id, "user": user.name, "admin": user.admin })),
+            "gateway.whoami" => {
+                let (kind, name) = self.about.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                Ok(json!({ "device_id": device.id, "user": user.name, "admin": user.admin, "kind": kind, "name": name }))
+            }
             "gateway.list_devices" => Ok(json!(registry.devices.iter().filter(|d| user.admin || d.user == user.name).collect::<Vec<_>>())),
             "gateway.revoke_device" => {
                 let id = params.get("id").and_then(Value::as_str).unwrap_or_default().to_string();

@@ -24,3 +24,7 @@ dist
 
 # OS
 Thumbs.db
+
+# iOS companion: built by scripts/build-ios.sh
+/ios/BombMobile.xcframework
+/ios/BombCode/Generated/

@@ -27,10 +27,17 @@ pub async fn dispatch(state: &AppState, origin: &str, method: &str, p: Value) ->
 
         // Threads
         "list_threads" => out(services::list_threads(state).await?),
+        "sidebar_prefs" => out(services::sidebar_prefs(state).await?),
         "snapshot" => {
             let id: String = arg(&p, "id")?;
-            let snap = state.journal.snapshot(Uuid::parse_str(&id).map_err(|e| e.to_string())?)?;
-            Ok(json!({ "as_of": snap.as_of, "rows": snap.rows, "pending_approvals": snap.pending_approvals }))
+            let mut snap = state.journal.snapshot(Uuid::parse_str(&id).map_err(|e| e.to_string())?)?;
+            // A phone asks for the newest rows first and pages back with `before_seq`; a Mac asks for all.
+            let before: Option<u64> = arg(&p, "before_seq")?;
+            let limit: Option<usize> = arg(&p, "limit")?;
+            if let Some(before) = before { snap.rows.retain(|row| row.seq < before); }
+            let has_more = limit.is_some_and(|limit| snap.rows.len() > limit);
+            if let Some(limit) = limit { snap.rows.drain(..snap.rows.len().saturating_sub(limit)); }
+            Ok(json!({ "as_of": snap.as_of, "rows": snap.rows, "pending_approvals": snap.pending_approvals, "has_more": has_more }))
         }
         "start_session" => out(services::start_session(state, arg(&p, "cwd")?, arg(&p, "opts")?).await?),
         "start_mock_session" => out(services::start_mock_session(state, arg(&p, "cwd")?).await?),
@@ -203,6 +210,25 @@ pub async fn dispatch(state: &AppState, origin: &str, method: &str, p: Value) ->
 
         // What this core can run
         "list_backends" => out(services::list_backends(state).await?),
+        "account_usage" => out(services::account_usage().await),
+
+        // Where to send a notification when a thread needs this person (see `push_devices`).
+        "register_push" => {
+            let token: String = arg(&p, "token")?;
+            if !(32..=200).contains(&token.len()) || !token.bytes().all(|b| b.is_ascii_hexdigit()) { return Err("bad `token`".into()); }
+            let sandbox = arg::<Option<bool>>(&p, "sandbox")?.unwrap_or(false);
+            let mut devices = push_devices(state);
+            devices.retain(|d| d.device != origin && d.token != token);
+            devices.push(PushDevice { device: origin.to_string(), token, sandbox });
+            save_push_devices(state, &devices)?;
+            Ok(Value::Null)
+        }
+        "unregister_push" => {
+            let mut devices = push_devices(state);
+            devices.retain(|d| d.device != origin);
+            save_push_devices(state, &devices)?;
+            Ok(Value::Null)
+        }
         "backend_auth_status" => out(services::backend_auth_status(state).await?),
         // The command that signs a provider in on this machine; the app runs it in a terminal here so the
         // person sees the link or code. The Mac's own login files are never sent.
@@ -210,6 +236,28 @@ pub async fn dispatch(state: &AppState, origin: &str, method: &str, p: Value) ->
 
         other => Err(format!("unknown method `{other}`")),
     }
+}
+
+/// A phone that asked to be told when a thread needs it: its APNs token, one per paired device.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PushDevice {
+    /// The paired device (the client name it connects with), so re-registering replaces its old token.
+    pub device: String,
+    pub token: String,
+    /// Debug builds get tokens for Apple's sandbox push service.
+    #[serde(default)]
+    pub sandbox: bool,
+}
+
+const PUSH_DEVICES_KEY: &str = "push_devices";
+
+pub fn push_devices(state: &AppState) -> Vec<PushDevice> {
+    state.persistence.get_kv(PUSH_DEVICES_KEY).ok().flatten().and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default()
+}
+
+fn save_push_devices(state: &AppState, devices: &[PushDevice]) -> Result<(), String> {
+    let raw = serde_json::to_string(devices).map_err(|e| e.to_string())?;
+    state.persistence.set_kv(PUSH_DEVICES_KEY, &raw).map_err(|e| e.to_string())
 }
 
 /// Where a person's projects live on a server: `~/projects`.

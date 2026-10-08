@@ -4,6 +4,7 @@
 
 use crate::views::button::Button;
 use crate::models::app::AppModelHandle;
+use bomb_core::summary::{activity_label, running_label, tool_kind};
 use bomb_core::transcript::{ApprovalCard, Body, Entry, PlanDoc, Role, ToolRow};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::ButtonVariants;
@@ -2070,35 +2071,6 @@ fn respond_button(
     .into_any_element()
 }
 
-fn tool_kind(name: &str) -> &'static str {
-    let n = name.to_ascii_lowercase();
-    if ["bash", "shell", "terminal", "exec", "command"]
-        .iter()
-        .any(|k| n.contains(k))
-    {
-        "command"
-    } else if ["edit", "write", "patch", "create", "apply"]
-        .iter()
-        .any(|k| n.contains(k))
-    {
-        "edit"
-    } else if [
-        "read", "glob", "grep", "search", "ls", "list", "find", "cat", "view",
-    ]
-    .iter()
-    .any(|k| n.contains(k))
-    {
-        "read"
-    } else if ["fetch", "web", "http", "browse"]
-        .iter()
-        .any(|k| n.contains(k))
-    {
-        "web"
-    } else {
-        "other"
-    }
-}
-
 fn tool_icon(name: &str) -> Lucide {
     match tool_kind(name) {
         "command" => Lucide::Terminal,
@@ -2132,77 +2104,9 @@ fn activity_summary(items: &[Activity]) -> String {
             _ => None,
         })
         .collect();
-    let base = tool_group_summary(rows.into_iter());
-    match (base.is_empty(), thoughts) {
-        (_, 0) => base,
-        (true, 1) => "Thought".into(),
-        (true, n) => format!("Thought {n} times"),
-        (false, 1) => format!("Thought · {base}"),
-        (false, n) => format!("Thought {n} times · {base}"),
-    }
+    activity_label(thoughts, rows.into_iter())
 }
 
-/// "Ran 2 commands · Edited 1 file · Read 3 files"
-/// A running step in a few words: "Running `npm test`", "Editing src/app.ts", "Reading 3 files…".
-fn running_label(row: &ToolRow) -> String {
-    let first = row.args.lines().next().unwrap_or_default().trim();
-    // Arguments often arrive as JSON; pull out the part a person would recognise.
-    let detail = serde_json::from_str::<serde_json::Value>(&row.args).ok().and_then(|v| {
-        ["command", "file_path", "path", "url", "pattern", "query"].iter().find_map(|k| v.get(*k).and_then(|x| x.as_str()).map(str::to_owned))
-    }).unwrap_or_else(|| first.to_string());
-    let detail: String = detail.lines().next().unwrap_or_default().chars().take(80).collect();
-    let verb = match tool_kind(&row.name) { "command" => "Running", "edit" => "Editing", "read" => "Reading", "web" => "Fetching", _ => "Working on" };
-    match (detail.is_empty(), tool_kind(&row.name)) {
-        (true, "command") => "Running a command".into(),
-        (true, _) => format!("{verb} {}", if row.name.is_empty() || row.name == "tool" { "a step" } else { row.name.as_str() }),
-        (false, "command") => format!("{verb} `{detail}`"),
-        (false, _) => format!("{verb} {detail}"),
-    }
-}
-
-pub fn tool_group_summary<'a>(rows: impl Iterator<Item = &'a ToolRow>) -> String {
-    let (mut cmd, mut edit, mut read, mut web, mut other) = (0, 0, 0, 0, 0);
-    let mut last_name = String::new();
-    for r in rows {
-        last_name = r.name.clone();
-        match tool_kind(&r.name) {
-            "command" => cmd += 1,
-            "edit" => edit += 1,
-            "read" => read += 1,
-            "web" => web += 1,
-            _ => other += 1,
-        }
-    }
-    let mut parts = Vec::new();
-    if cmd > 0 {
-        parts.push(format!("Ran {cmd} command{}", plural(cmd)));
-    }
-    if edit > 0 {
-        parts.push(format!("Edited {edit} file{}", plural(edit)));
-    }
-    if read > 0 {
-        parts.push(format!("Read {read} file{}", plural(read)));
-    }
-    if web > 0 {
-        parts.push(format!("Fetched {web} page{}", plural(web)));
-    }
-    if other > 0 {
-        if parts.is_empty() && other == 1 && !last_name.is_empty() && last_name != "tool" {
-            parts.push(last_name);
-        } else {
-            parts.push(format!("{other} other tool call{}", plural(other)));
-        }
-    }
-    parts.join(" · ")
-}
-
-fn plural(n: usize) -> &'static str {
-    if n == 1 {
-        ""
-    } else {
-        "s"
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -2232,8 +2136,8 @@ mod tests {
         assert_eq!(super::running_label(&row("terminal", "")), "Running a command");
         assert_eq!(super::running_label(&row("tool", "")), "Working on a step");
         // A lone unnamed step no longer renders as the bare word "tool".
-        assert_eq!(super::tool_group_summary([row("tool", "")].iter()), "1 other tool call");
-        assert_eq!(super::tool_group_summary([row("Task", "")].iter()), "Task");
+        assert_eq!(bomb_core::summary::tool_group_summary([row("tool", "")].iter()), "1 other tool call");
+        assert_eq!(bomb_core::summary::tool_group_summary([row("Task", "")].iter()), "Task");
     }
 
     #[test]
@@ -2253,7 +2157,8 @@ mod tests {
         assert_eq!(a("plain text", false), "plain text");
     }
     // No glob import: `gpui_kit::*` carries a `test` macro that shadows `#[test]`.
-    use super::{tool_group_summary, ToolRow};
+    use super::ToolRow;
+    use bomb_core::summary::tool_group_summary;
 
     fn row(name: &str) -> ToolRow {
         ToolRow {

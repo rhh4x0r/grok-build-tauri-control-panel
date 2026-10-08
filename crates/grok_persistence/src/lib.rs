@@ -57,15 +57,7 @@ pub struct TranscriptChunk {
     pub at: DateTime<Utc>,
 }
 
-/// Frontend-friendly transcript row.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TranscriptEntry {
-    pub role: String,
-    pub body: String,
-    pub at: String,
-    pub seq: u64,
-}
+pub use grok_events::TranscriptEntry;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelUsage {

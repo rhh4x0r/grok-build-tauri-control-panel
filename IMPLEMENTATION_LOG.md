@@ -904,3 +904,89 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
   - A saved `worktrees_root` pointing at `~/.grok/worktrees` is repointed at startup.
 - On Max's Mac: 10 items, 15 worktrees (registrations updated), 1,666 database cells. A clone backup is in `~/.bombcode-move-backup`.
 - Caveat: Claude Code keys sessions by folder, so Claude threads whose worktree moved may reopen history-only.
+
+## 2026-10-07 — iOS companion, phase 0: shared reducer
+
+- Design approved: `docs/plan/ios_companion_plan.md`. A SwiftUI iPhone app with a shared Rust core (UniFFI) pairs directly with both the personal Mac (new "Phone access" host) and each linked `bombd` server, over Tailscale; APNs push from the user's own key.
+- `transcript.rs` and `presence.rs` moved unchanged from `bomb_core` into a new `crates/bomb_transcript` (deps: `grok_events`, `chrono`, `serde_json`, `base64`). `bomb_core` re-exports them as `bomb_core::{transcript, presence}`, so nothing else changed.
+- `TranscriptEntry` moved to `grok_events`; `grok_persistence` re-exports it. This keeps SQLite out of the phone build.
+- `rust-toolchain.toml` now lists `aarch64-apple-ios` and `aarch64-apple-ios-sim`. `bomb_proto`, `bomb_link` (ring/rustls) and `bomb_transcript` build for both.
+- Checked: `cargo check --workspace --all-targets`; clippy clean on the touched crates; `bomb_transcript` (33), `bomb_core` (67) tests pass; `BOMB_SMOKE=1` passes. Workspace-wide clippy still fails on five lints in `bomb_app` that predate this change (`models/app.rs`, `remote/mod.rs`, `views/composer.rs`, `views/project.rs`).
+
+## 2026-10-07 — iOS companion, phase 1: protocol additions for a phone
+
+All additive; `PROTOCOL_VERSION` stays 1 and a Mac that never calls the new methods behaves as before.
+- `watch {threads: [id…] | null}`: answered in order on the connection (`bomb_server/src/core.rs`) and returns `{seq}`. Afterwards streamed events (`agent_message`, `tool_call`, `plan_update`, `raw`) reach the client only for those threads. Lifecycle, approvals, prompts and errors still reach everyone, so a phone's thread list stays current. The rule is `bomb_core::journal::reaches`. Open a thread by watching it and then taking a snapshot. The backlog replayed on reconnect is filtered too, but only after the client sends `watch` again.
+- `snapshot` takes optional `limit` and `before_seq` and returns `has_more`, for the newest rows first and paging back from there.
+- `account_usage` (the sidebar's usage bars).
+- `register_push {token, sandbox?}` / `unregister_push`: one APNs token per paired device, keyed by the connection's client name, kept in kv `push_devices` (`bomb_core::rpc::push_devices`). Nothing sends pushes yet (phase 5).
+- Tests: `journal::tests` (filter rule) and `bomb_server/tests/core_socket.rs` `a_phone_streams_only_the_thread_it_has_open_pages_history_and_registers_for_push` (two mock threads; only the watched one streams; paging; push registration).
+- `bomb_core`'s `workspace_lifecycle_checkpoints_sharing_inline_and_archive` timed out once in the full serial run and passed alone and on the rerun; it's timing-sensitive, not related to this change.
+
+## 2026-10-07 — iOS companion, phase 2: `bomb_mobile`
+
+- New crate `crates/bomb_mobile`, a static library for iOS with Swift bindings through UniFFI 0.32 proc macros. It owns a 2-thread tokio runtime; exported async fns run on it, so Swift awaits them without knowing about tokio.
+- `pairing`:
+  - `pairing_hosts(text)` lists the hosts in a scanned code.
+  - `pair_all(text, label)` pairs with every link in a code. An unreachable one doesn't stop the others.
+  - Each machine gets its own P-256 key; Swift keeps it in the Keychain.
+  - `kind` comes from `gateway.whoami` and defaults to "server"; the Mac host will report "mac" (phase 4).
+- `bomb_link::bundle` / `parse_links`: `bomb://pair-bundle?l=<host>,<fp>,<secret>&l=…`, so one QR code pairs the Mac and its servers. A plain `bomb://pair?` link still works.
+- `machine::Machine` (one per paired machine):
+  - Connects on creation and reconnects with 1–30 s backoff. `set_active(false)` pauses in the background; `reconnect_now()` skips the wait.
+  - Sends a 60 s keepalive ping.
+  - Keeps the thread list current from lifecycle events (refreshing it, debounced, on create/complete/cancel).
+  - Opens a thread by `watch` + `snapshot{limit: 200}`; events arriving during the load are held and applied above `as_of`. `load_earlier` reloads with 200 more rows.
+  - Resync and backlog overflow rebuild open threads.
+  - The phone's own prompts are echoed locally (`note_prompt`), and its own `user_message` is skipped.
+  - Patches to Swift: `Reset` / `Upsert{index}` / `Stream{index, delta}` / `Trim`, plus a `PresenceView`. `presence(id)` is for the once-a-second status refresh.
+  - The phone accepts plan / ask / auto only. `yolo` is refused before anything is sent, and new threads default to plan.
+- `ControlEvent::session_id()` moved into `grok_events`; `journal::session_of` calls it.
+- `scripts/build-ios.sh [debug|release]` builds both iOS targets, generates `ios/BombCode/Generated/bomb_mobile.swift` and builds `ios/BombMobile.xcframework` (both gitignored).
+- Test `crates/bomb_mobile/tests/loopback.rs`, against a real gateway and core on loopback:
+  - pair from a two-link bundle where one link is dead; the secret is single-use;
+  - start a mock thread and watch it stream; the prompt echoes once;
+  - approval card, then the list shows it waiting, then answering closes it;
+  - the Mac's prompt shows on the phone; reopen; follow-up; yolo refused;
+  - pause/resume; unpair.
+  
+  Passed 4 runs in a row.
+
+## 2026-10-07 — iOS companion, phase 3: the iPhone app
+
+- `ios/BombCode.xcodeproj`: a hand-written Xcode 16 project (objectVersion 77) with a folder-synced `BombCode/` group, so new Swift files need no project edits. It links `BombMobile.xcframework`. iOS 17+, bundle id `com.bombcode.companion`. Info.plist settings: the `bomb://` URL scheme, plus camera and local-network usage strings. x86_64 simulator builds are excluded (the Rust library is built for Apple silicon only).
+- Models:
+  - `AppModel`: paired machines from the Keychain and the combined thread list. Pauses on background and reconnects on foreground.
+  - `MachineModel`: one per `Machine`. Its listener relays callbacks to the main queue in order.
+  - `ThreadModel`: applies patches; `TranscriptRow` folds thinking and tool runs.
+- Views:
+  - thread list grouped by project, with a Mac/server badge, status dots, search, pull to refresh and swipe to stop;
+  - thread screen: bubbles, markdown, folded steps (labels from `bomb_transcript::summary`, shared with the Mac), plan card, approval card with its choices, status line with progress, composer (photos downscaled to 1600 px JPEG, Plan/Ask/Auto, model and effort, send/stop);
+  - new-thread sheet (machine, project, own branch, first prompt);
+  - machines list (link state, remove = unpair);
+  - pairing by QR code (VisionKit), paste, or opening a `bomb://` link.
+- The "Thought · Ran N commands" helpers moved from `bomb_app/src/views/transcript.rs` to `bomb_transcript::summary`, and `bomb_mobile` exports `activity_label` / `running_label`. `Machine::create_project` was added.
+- Debug-only `Smoke` (`BOMB_SMOKE=1`, `BOMB_PAIR=<link>`, optional `BOMB_SMOKE_LIST=1`) pairs, starts a mock thread and opens it without taps.
+- Checked in the iPhone 16 Pro simulator against a local `bombd` with the mock agent:
+  - pairing, the thread starting, streamed markdown with a code block, the folded "Thought · Ran 1 command" line and the composer all render;
+  - after relaunching, the pairing is kept and the list shows the project, its server badge and the thread.
+  - Found while testing: an unsigned simulator build can't write to the Keychain. Build with `CODE_SIGN_IDENTITY=-`; a failed save now says so in the pairing result.
+- Not checked yet: a real device, the QR camera, the approval card with a real agent, background/foreground on a device, and dark mode.
+
+## 2026-10-08 — iOS companion, phase 4: Phone access on the Mac
+
+- `bomb_app/src/remote/host.rs` `PhoneHost`: runs `bomb_server`'s gateway and core inside the app, around the app's own `AppState`, so a phone sees this Mac's threads live and the Mac's window sees what the phone does (same event bus).
+  - Data is in `~/.bombcode/host` (gateway identity and registry).
+  - Each start gets a fresh core socket, and the owner's registry entry is repointed at it, so a stopping core can't delete the new one's socket.
+  - It listens only on the chosen `ip:port` (default port 7444, so it never collides with `bombd`'s 7443).
+  - `interfaces()` lists the Mac's IPv4 addresses (getifaddrs), Tailscale (100.64/10) first, then private home-network ones; loopback, link-local and public addresses are left out.
+  - While any live thread is working, `/usr/bin/caffeinate -i -w <pid>` keeps the Mac from idle sleep. A closed lid still sleeps.
+- `Gateway::describe_as(kind, name)`; `gateway.whoami` now returns `kind` ("server" by default, "mac" here) and `name` (the Mac's ComputerName), which the phone shows.
+- `models/phone.rs` `PhoneModel` (global `PhoneHandle`): the setting is saved in kv `phone_access` and restarts at launch when on. `show_code` builds one `bomb://pair-bundle` with this Mac's invite plus a fresh `gateway.create_invite` from each connected server, and lists any server it skipped. Remove revokes a phone.
+- Settings → Phone: the on/off switch, an address dropdown (Tailscale / Home network), "Show pairing code" (a QR code drawn as runs of modules, a "Copy code as a link" button, and the hosts it pairs with), and paired phones with Remove.
+- `bomb_server` is now a normal dependency of `bomb_app`. Also added `qrcode` (no default features) and `libc`; `bomb_mobile` is a dev-dependency for the test.
+- Test `remote::host::tests::a_phone_pairs_with_this_mac_and_its_thread_shows_up_here`:
+  - the phone pairs with the Mac host and sees `kind = mac` and the Mac's name;
+  - it starts a mock thread, and the Mac's local journal (what the window reads) gets `session_created` and the phone's `user_message`;
+  - removing the phone takes it offline.
+- Checked: `bomb_app` 37/37 tests serially; `BOMB_SMOKE=1` passes; clippy shows only the five `bomb_app` lints that were already there. Not checked: the Settings → Phone page on screen (screen recording is blocked in this terminal), and a real iPhone over Tailscale.

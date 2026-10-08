@@ -8,7 +8,7 @@
 //! `transcripts.seq` cannot serve as the cursor: streamed text is merged into
 //! the last row in place, and most events create no row at all.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use grok_events::{ControlEvent, EventBus};
@@ -181,20 +181,38 @@ impl Journal {
     }
 }
 
+/// Whether a client watching only `watching` threads gets this event (`None` watches everything).
+///
+/// Lifecycle, approvals, prompts and errors reach every client, so a phone's thread list stays current;
+/// streamed text, tool calls and plans go only to clients that have the thread open.
+pub fn reaches(event: &ControlEvent, watching: Option<&HashSet<Uuid>>) -> bool {
+    let streamed = matches!(event, ControlEvent::AgentMessage { .. } | ControlEvent::ToolCall { .. } | ControlEvent::PlanUpdate { .. } | ControlEvent::Raw { .. });
+    match (watching, session_of(event)) {
+        (Some(threads), Some(session)) if streamed => threads.contains(&session),
+        _ => true,
+    }
+}
+
 /// The session an event belongs to, if any.
 pub fn session_of(event: &ControlEvent) -> Option<Uuid> {
-    match event {
-        ControlEvent::SessionCreated { session_id, .. }
-        | ControlEvent::SessionStatusChanged { session_id, .. }
-        | ControlEvent::SessionCancelled { session_id, .. }
-        | ControlEvent::SessionCompleted { session_id, .. }
-        | ControlEvent::ToolCall { session_id, .. }
-        | ControlEvent::PlanUpdate { session_id, .. }
-        | ControlEvent::AgentMessage { session_id, .. }
-        | ControlEvent::ApprovalRequired { session_id, .. }
-        | ControlEvent::ApprovalResolved { session_id, .. }
-        | ControlEvent::UserMessage { session_id, .. } => Some(*session_id),
-        ControlEvent::Error { session_id, .. } | ControlEvent::Raw { session_id, .. } => *session_id,
-        ControlEvent::SchedulerJob { .. } | ControlEvent::McpChanged { .. } | ControlEvent::MemoryUpdated { .. } => None,
+    event.session_id()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_watching_client_gets_streamed_events_only_for_its_threads() {
+        let (open, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let at = chrono::Utc::now();
+        let text = |session_id| ControlEvent::AgentMessage { session_id, text: "hi".into(), at };
+        let done = |session_id| ControlEvent::SessionCompleted { session_id, at };
+        let watching: HashSet<Uuid> = [open].into();
+        assert!(reaches(&text(open), Some(&watching)));
+        assert!(!reaches(&text(other), Some(&watching)));
+        assert!(reaches(&done(other), Some(&watching)), "lifecycle reaches everyone");
+        assert!(reaches(&text(other), None), "no watch list means everything");
+        assert!(reaches(&ControlEvent::Raw { session_id: None, payload: serde_json::Value::Null }, Some(&watching)));
     }
 }

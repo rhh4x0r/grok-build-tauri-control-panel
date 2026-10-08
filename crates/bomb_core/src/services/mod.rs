@@ -685,6 +685,43 @@ pub async fn kv_set(state: &AppState, key: &str, value: &str) -> Result<(), Stri
     state.persistence.set_kv(key, value).map_err(err)
 }
 
+/// The desktop sidebar's kv keys: threads hidden from the sidebar (comma-separated ids),
+/// and projects pinned to the top (a JSON array of roots).
+pub const ARCHIVED_THREADS_KEY: &str = "archived_threads";
+pub const PINNED_PROJECTS_KEY: &str = "pinned_projects";
+
+/// How the desktop sidebar is organised, so the phone lists threads the same way.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SidebarPrefs {
+    /// Threads archived one by one, plus every thread of an archived worktree.
+    pub archived: Vec<String>,
+    pub pinned_projects: Vec<String>,
+}
+
+pub async fn sidebar_prefs(state: &AppState) -> Result<SidebarPrefs, String> {
+    let mut archived: Vec<String> = kv_get(state, ARCHIVED_THREADS_KEY)
+        .await?
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+    for w in state.persistence.list_workspaces().map_err(err)? {
+        if w.archived_at.is_some() {
+            archived.extend(w.threads);
+        }
+    }
+    archived.sort();
+    archived.dedup();
+    let pinned_projects = kv_get(state, PINNED_PROJECTS_KEY)
+        .await?
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    Ok(SidebarPrefs { archived, pinned_projects })
+}
+
 /// Account usage limits for every backend that exposes them.
 pub async fn account_usage() -> Vec<crate::usage::AccountUsage> {
     crate::usage::all().await
