@@ -61,6 +61,7 @@ impl Render for SettingsView {
                         memory_page(),
                         perspective_page(),
                         servers_page(),
+                        phone_page(),
                         permissions_page(cx),
                         advanced_page(),
                     ]),
@@ -868,6 +869,116 @@ fn render_servers(cx: &mut App) -> AnyElement {
             ),
     )
     .into_any_element()
+}
+
+// ── Phone ───────────────────────────────────────────────────────────────
+
+fn phone_page() -> SettingPage {
+    use crate::models::phone::phone;
+    let addresses: Vec<(SharedString, SharedString)> = crate::remote::host::interfaces()
+        .into_iter()
+        .map(|i| (i.ip.to_string().into(), format!("{} · {}", i.kind, i.ip).into()))
+        .collect();
+    SettingPage::new("Phone")
+        .description("Keep working from your iPhone: see every thread, answer questions, send follow-ups and start new threads. Threads keep running here; the phone steers them.")
+        .group(
+            SettingGroup::new()
+                .item(
+                    SettingItem::new(
+                        "Let my phone reach this Mac",
+                        SettingField::switch(|cx| phone(cx).read(cx).settings.enabled, |v, cx| phone(cx).update(cx, |p, cx| p.set_enabled(v, cx))),
+                    )
+                    .description("Only phones you pair can connect. While a thread is working, this Mac stays awake; with the lid closed it still sleeps, so use a server for overnight work."),
+                )
+                .item(
+                    SettingItem::new(
+                        "Address",
+                        SettingField::dropdown(
+                            addresses,
+                            |cx| phone(cx).read(cx).address().and_then(|a| a.rsplit_once(':').map(|(ip, _)| ip.to_string())).unwrap_or_default().into(),
+                            |v, cx| phone(cx).update(cx, |p, cx| p.set_address(v.to_string(), cx)),
+                        ),
+                    )
+                    .description("Use Tailscale to reach this Mac from anywhere. A home network address only works on the same Wi-Fi."),
+                )
+                .item(SettingItem::render(|_, _, cx| render_phone(cx))),
+        )
+}
+
+fn render_phone(cx: &mut App) -> AnyElement {
+    let ui = Ui::of(cx);
+    let model = crate::models::phone::phone(cx);
+    let (on, busy, error, code, devices, address) = {
+        let p = model.read(cx);
+        (p.host.is_some(), p.busy, p.error.clone(), p.code.clone(), p.devices.clone(), p.address())
+    };
+    let caption = |text: String| div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(text);
+    let mut page = div().flex().flex_col().gap_3().w_full();
+    if let Some(error) = error {
+        page = page.child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.danger).child(error));
+    }
+    if !on {
+        return page.when(busy, |el| el.child(caption("Starting…".into()))).into_any_element();
+    }
+    page = page.child(caption(format!("Listening on {}.", address.unwrap_or_default())));
+    let show = model.clone();
+    page = page.child(
+        div().flex().items_center().gap_2().child(
+            Button::new("phone-code").outline().small().label(if code.is_some() { "New pairing code" } else { "Show pairing code" }).disabled(busy).on_click(move |_, _, cx| {
+                show.update(cx, |p, cx| p.show_code(cx));
+            }),
+        ),
+    );
+    if let Some(code) = code {
+        const MODULE: f32 = 4.;
+        let quiet = 4.;
+        let mut qr = div().flex().flex_col().p(px(quiet * MODULE)).bg(gpui_kit::white()).rounded(px(8.));
+        for row in &code.rows {
+            // One element per run of dark modules keeps the code cheap to draw.
+            let mut line = div().flex().h(px(MODULE));
+            let mut x = 0;
+            while x < row.len() {
+                let dark = row[x];
+                let start = x;
+                while x < row.len() && row[x] == dark { x += 1; }
+                let width = px((x - start) as f32 * MODULE);
+                line = line.child(div().w(width).h_full().when(dark, |el| el.bg(gpui_kit::black())));
+            }
+            qr = qr.child(line);
+        }
+        let text = code.text.clone();
+        page = page
+            .child(div().flex().child(qr))
+            .child(div().flex().child(Button::new("phone-copy").ghost().small().label("Copy code as a link").on_click(move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+            })))
+            .child(caption(format!("Scan with Bomb Code on your iPhone. It pairs with {} and works once, for 10 minutes.", code.hosts.join(", "))))
+            .when(!code.skipped.is_empty(), |el| el.child(caption(format!("Not included (not connected right now): {}.", code.skipped.join(", ")))));
+    }
+    let refresh = model.clone();
+    page = page.child(
+        div().flex().items_center().gap_2().pt_2()
+            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Paired phones"))
+            .child(Button::new("phone-devices").ghost().small().label("Refresh").on_click(move |_, _, cx| refresh.update(cx, |p, cx| p.refresh_devices(cx)))),
+    );
+    if devices.is_empty() {
+        page = page.child(empty_list("No phones yet.", &ui));
+    }
+    for device in devices {
+        let (m, id) = (model.clone(), device.id.clone());
+        page = page.child(
+            list_row(&ui).child(
+                row_line()
+                    .child(row_title(device.label.clone()))
+                    .child(row_meta(format!("paired {}", chrono::DateTime::from_timestamp(device.created as i64, 0).map(|d| d.format("%b %-d").to_string()).unwrap_or_default()), &ui))
+                    .child(div().flex_1())
+                    .child(Button::new(SharedString::from(format!("phone-revoke-{id}"))).ghost().small().label("Remove").on_click(move |_, _, cx| {
+                        m.update(cx, |p, cx| p.revoke(id.clone(), cx));
+                    })),
+            ),
+        );
+    }
+    page.into_any_element()
 }
 
 // ── Worktrees ───────────────────────────────────────────────────────────

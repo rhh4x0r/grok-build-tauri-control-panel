@@ -82,6 +82,9 @@ fn main() {
         let model = cx.new(models::app::AppModel::new);
         runtime::start_bridge(cx, model.downgrade());
         model.update(cx, |m, cx| m.load_servers(cx));
+        let phone = cx.new(|_| models::phone::PhoneModel::default());
+        phone.update(cx, |p, cx| p.load(cx));
+        cx.set_global(models::phone::PhoneHandle(phone));
         cx.set_global(models::app::AppModelHandle(model.clone()));
         views::root::open_main_window(model.clone(), cx);
         smoke::maybe_run(model, cx);

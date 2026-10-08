@@ -972,3 +972,21 @@ All additive; `PROTOCOL_VERSION` stays 1 and a Mac that never calls the new meth
   - after relaunching, the pairing is kept and the list shows the project, its server badge and the thread.
   - Found while testing: an unsigned simulator build can't write to the Keychain. Build with `CODE_SIGN_IDENTITY=-`; a failed save now says so in the pairing result.
 - Not checked yet: a real device, the QR camera, the approval card with a real agent, background/foreground on a device, and dark mode.
+
+## 2026-10-08 — iOS companion, phase 4: Phone access on the Mac
+
+- `bomb_app/src/remote/host.rs` `PhoneHost`: runs `bomb_server`'s gateway and core inside the app, around the app's own `AppState`, so a phone sees this Mac's threads live and the Mac's window sees what the phone does (same event bus).
+  - Data is in `~/.bombcode/host` (gateway identity and registry).
+  - Each start gets a fresh core socket, and the owner's registry entry is repointed at it, so a stopping core can't delete the new one's socket.
+  - It listens only on the chosen `ip:port` (default port 7444, so it never collides with `bombd`'s 7443).
+  - `interfaces()` lists the Mac's IPv4 addresses (getifaddrs), Tailscale (100.64/10) first, then private home-network ones; loopback, link-local and public addresses are left out.
+  - While any live thread is working, `/usr/bin/caffeinate -i -w <pid>` keeps the Mac from idle sleep. A closed lid still sleeps.
+- `Gateway::describe_as(kind, name)`; `gateway.whoami` now returns `kind` ("server" by default, "mac" here) and `name` (the Mac's ComputerName), which the phone shows.
+- `models/phone.rs` `PhoneModel` (global `PhoneHandle`): the setting is saved in kv `phone_access` and restarts at launch when on. `show_code` builds one `bomb://pair-bundle` with this Mac's invite plus a fresh `gateway.create_invite` from each connected server, and lists any server it skipped. Remove revokes a phone.
+- Settings → Phone: the on/off switch, an address dropdown (Tailscale / Home network), "Show pairing code" (a QR code drawn as runs of modules, a "Copy code as a link" button, and the hosts it pairs with), and paired phones with Remove.
+- `bomb_server` is now a normal dependency of `bomb_app`. Also added `qrcode` (no default features) and `libc`; `bomb_mobile` is a dev-dependency for the test.
+- Test `remote::host::tests::a_phone_pairs_with_this_mac_and_its_thread_shows_up_here`:
+  - the phone pairs with the Mac host and sees `kind = mac` and the Mac's name;
+  - it starts a mock thread, and the Mac's local journal (what the window reads) gets `session_created` and the phone's `user_message`;
+  - removing the phone takes it offline.
+- Checked: `bomb_app` 37/37 tests serially; `BOMB_SMOKE=1` passes; clippy shows only the five `bomb_app` lints that were already there. Not checked: the Settings → Phone page on screen (screen recording is blocked in this terminal), and a real iPhone over Tailscale.
