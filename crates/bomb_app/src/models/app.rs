@@ -94,6 +94,7 @@ pub enum RightTab {
     Processes,
     Files,
     Changes,
+    Subagents,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -665,6 +666,12 @@ impl AppModel {
             _ => {}
         }
         cx.notify();
+    }
+
+    /// The thread in view (the parent, when a subagent is open) and its subagents.
+    pub fn subagents_in_view(&self) -> (Option<Uuid>, Vec<services::SubagentInfo>) {
+        let parent = self.selected.map(|id| self.subagent_of.get(&id).copied().unwrap_or(id));
+        (parent, parent.and_then(|p| self.subagents.get(&p).cloned()).unwrap_or_default())
     }
 
     /// Open a subagent's own transcript (read-only), in place of the thread view.

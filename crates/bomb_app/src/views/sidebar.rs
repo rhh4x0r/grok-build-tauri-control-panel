@@ -633,7 +633,7 @@ impl SidebarView {
         let is_archived = self.model.read(cx).archived.contains(&id);
         let menu_model = self.model.clone();
         let current_title = title.clone();
-        let row = div()
+        div()
             .id(SharedString::from(format!("thread-{id}")))
             .when(is_archived, |el| el.opacity(0.6))
             .flex()
@@ -742,89 +742,7 @@ impl SidebarView {
                         .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(b)),
                 )
             })
-            .child(model_history_stack(&history, &current, ui));
-        let subagents = self.subagent_rows(id, ui, cx);
-        div().flex().flex_col().child(row).children(subagents)
-    }
-
-    /// A thread's subagents under its row: shown while any is working, else folded behind
-    /// "N subagents". Each opens its own transcript.
-    fn subagent_rows(&self, parent: Uuid, ui: &Ui, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (list, selected) = {
-            let m = self.model.read(cx);
-            (m.subagents.get(&parent).cloned().unwrap_or_default(), m.selected)
-        };
-        if list.is_empty() {
-            return None;
-        }
-        let key = format!("subagents:{parent}");
-        let working = list.iter().filter(|s| s.state == "running").count();
-        let open = working > 0 || self.expanded.contains(&key) || list.iter().any(|s| Some(s.id.as_str()) == selected.map(|x| x.to_string()).as_deref());
-        let hover = ui.hover;
-        let summary = if working > 0 {
-            format!("{working} of {} subagents working", list.len())
-        } else if list.len() == 1 {
-            "1 subagent".into()
-        } else {
-            format!("{} subagents", list.len())
-        };
-        let toggle_key = key.clone();
-        let header = div()
-            .id(SharedString::from(format!("subagents-{parent}")))
-            .flex()
-            .items_center()
-            .gap(px(4.))
-            .h(px(20.))
-            .px(px(6.))
-            .rounded(px(6.))
-            .cursor_pointer()
-            .text_size(px(crate::theme::Type::CAPTION))
-            .text_color(ui.text_faint)
-            .hover(move |s| s.bg(hover))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if !this.expanded.remove(&toggle_key) { this.expanded.insert(toggle_key.clone()); }
-                cx.notify();
-            }))
-            .child(div().size(px(10.)).child(Icon::from(if open { Lucide::ChevronDown } else { Lucide::ChevronRight })))
-            .child(summary);
-        let mut column = div().flex().flex_col().gap(px(1.)).ml(px(GROUP_INDENT + 6.)).pl(px(6.)).border_l_1().border_color(Ui::alpha(ui.border, 0.7)).child(header);
-        if open {
-            for info in list {
-                let Ok(child) = Uuid::parse_str(&info.id) else { continue };
-                let is_selected = selected == Some(child);
-                let (icon, color) = match info.state.as_str() {
-                    "running" => (Lucide::CircleDot, ui.accent),
-                    "completed" => (Lucide::Check, ui.success),
-                    "cancelled" => (Lucide::X, ui.text_faint),
-                    _ => (Lucide::X, ui.danger),
-                };
-                let corner = if info.state == "running" { "Working".to_string() } else { time_ago(info.ended_at.as_deref().unwrap_or(&info.started_at)) };
-                let model = self.model.clone();
-                let selected_bg = ui.selected_bg();
-                column = column.child(
-                    div()
-                        .id(SharedString::from(format!("subagent-{child}")))
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .h(px(26.))
-                        .px(px(6.))
-                        .rounded(px(6.))
-                        .cursor_pointer()
-                        .when(is_selected, move |el| el.bg(selected_bg))
-                        .when(!is_selected, move |el| el.hover(move |s| s.bg(hover)))
-                        .on_click(move |_, _, cx| model.update(cx, |m, cx| m.open_subagent(child, cx)))
-                        .child(div().size(px(11.)).flex_shrink_0().text_color(color).child(Icon::from(icon)))
-                        .child(div().flex_shrink_0().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text).child(info.name.clone()))
-                        .child(
-                            div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap()
-                                .text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint).child(info.task.clone()),
-                        )
-                        .child(div().flex_shrink_0().text_size(px(crate::theme::Type::CAPTION)).text_color(if info.state == "running" { ui.accent } else { ui.text_faint }).child(corner)),
-                );
-            }
-        }
-        Some(column.into_any_element())
+            .child(model_history_stack(&history, &current, ui))
     }
 
     /// Filtered rows under Today / Yesterday / This week / Earlier labels.

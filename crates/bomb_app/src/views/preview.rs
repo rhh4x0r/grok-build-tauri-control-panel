@@ -206,6 +206,10 @@ pub fn panel_tabs(active: RightTab, model: &Entity<AppModel>, ui: &Ui, cx: &App)
         .child(tab("tab-processes", if running > 0 { format!("Processes {running}") } else { "Processes".into() }, RightTab::Processes))
         .child(tab("tab-files", "Files".into(), RightTab::Files))
         .child(tab("tab-changes", "Changes".into(), RightTab::Changes))
+        .child({
+            let working = model.read(cx).subagents_in_view().1.iter().filter(|s| s.state == "running").count();
+            tab("tab-subagents", if working > 0 { format!("Subagents {working}") } else { "Subagents".into() }, RightTab::Subagents)
+        })
         .child(div().flex_1())
         .child(Button::new("right-panel-close").ghost().small().icon(Lucide::X).tooltip("Close panel")
             .on_click(ask(RightPanelRequest::Close)))
@@ -344,6 +348,79 @@ impl PreviewPanel {
             .into_any_element()
     }
 
+    /// The open thread's subagents: what each was asked, how it's going, and a way into its transcript.
+    fn render_subagents(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let ui = Ui::of(cx);
+        let (parent, list) = self.model.read(cx).subagents_in_view();
+        let selected = self.model.read(cx).selected;
+        if parent.is_none() || list.is_empty() {
+            let (title, body) = if parent.is_none() {
+                ("No thread open", "Open a thread to see the subagents it starts.")
+            } else {
+                ("No subagents yet", "When the agent hands work to subagents, each one shows here with what it was asked and how it's going. Ask for it in a prompt: \"use two subagents to…\"")
+            };
+            return div().flex_1().flex().flex_col().items_center().justify_center().gap_2().p_4()
+                .child(div().text_base().font_weight(FontWeight::MEDIUM).text_color(ui.text).child(title))
+                .child(Self::empty(body, &ui))
+                .into_any_element();
+        }
+        let hover = ui.hover;
+        let selected_bg = ui.selected_bg();
+        let working = list.iter().filter(|s| s.state == "running").count();
+        let summary = match (working, list.len()) {
+            (0, 1) => "1 subagent, finished".to_string(),
+            (0, n) => format!("{n} subagents, all finished"),
+            (w, n) => format!("{w} of {n} working"),
+        };
+        div()
+            .id("subagent-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .p_2()
+            .gap_2()
+            .child(div().px_1().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint).child(summary))
+            .children(list.into_iter().filter_map(|info| {
+                let child = uuid::Uuid::parse_str(&info.id).ok()?;
+                let (icon, color, word) = match info.state.as_str() {
+                    "running" => (Lucide::CircleDot, ui.accent, "Working".to_string()),
+                    "completed" => (Lucide::Check, ui.success, format!("Finished {}", crate::views::sidebar::time_ago(info.ended_at.as_deref().unwrap_or(&info.started_at)))),
+                    "cancelled" => (Lucide::X, ui.text_faint, "Stopped".to_string()),
+                    _ => (Lucide::X, ui.danger, "Failed".to_string()),
+                };
+                let is_open = selected == Some(child);
+                let model = self.model.clone();
+                Some(
+                    div()
+                        .id(SharedString::from(format!("subagent-card-{child}")))
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .p_3()
+                        .rounded(px(12.))
+                        .border_1()
+                        .border_color(if is_open { ui.accent } else { ui.border })
+                        .cursor_pointer()
+                        .when(is_open, move |el| el.bg(selected_bg))
+                        .when(!is_open, move |el| el.hover(move |s| s.bg(hover)))
+                        .on_click(move |_, _, cx| model.update(cx, |m, cx| m.open_subagent(child, cx)))
+                        .child(
+                            div().flex().items_center().gap_2()
+                                .child(div().size(px(12.)).flex_shrink_0().text_color(color).child(gpui_kit::component::Icon::from(icon)))
+                                .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().font_weight(FontWeight::MEDIUM).text_color(ui.text).child(info.name.clone()))
+                                .child(div().flex_shrink_0().text_size(px(crate::theme::Type::CAPTION)).text_color(if info.state == "running" { ui.accent } else { ui.text_faint }).child(word)),
+                        )
+                        .when(!info.task.is_empty(), |el| {
+                            el.child(div().text_size(px(crate::theme::Type::SMALL)).line_height(px(18.)).text_color(ui.text_muted).line_clamp(3).child(info.task.clone()))
+                        })
+                        .into_any_element(),
+                )
+            }))
+            .into_any_element()
+    }
+
     fn render_processes(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let ui = Ui::of(cx);
         let (folder, scanned, list) = {
@@ -445,6 +522,7 @@ impl Render for PreviewPanel {
                 div().flex_1().min_h_0().child(self.files.clone()).into_any_element()
             }
             RightTab::Processes => self.render_processes(cx),
+            RightTab::Subagents => self.render_subagents(cx),
             RightTab::Preview | RightTab::Changes => self.render_preview(window, cx),
         };
         div()
