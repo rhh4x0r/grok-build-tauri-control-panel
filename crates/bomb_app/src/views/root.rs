@@ -3,7 +3,7 @@
 
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::{h_resizable, resizable_panel, Icon, Root, TitleBar, WindowExt};
+use gpui_kit::component::{h_resizable, resizable_panel, Icon, ResizablePanelEvent, ResizableState, Root, TitleBar, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -34,6 +34,14 @@ pub struct RootView {
     /// The user opened the sidebar themselves while the window was narrow; leave it alone until it is wide again.
     sidebar_kept: bool,
     preview_open: bool,
+    /// The main split's sizes, owned here so opening or closing a panel can't resize the others.
+    split: Entity<ResizableState>,
+    /// Which side panels the split had at the last render (sidebar, right panel).
+    split_layout: (bool, bool),
+    /// The widths last chosen for the sidebar and the right panel, put back after a panel
+    /// opens or closes (the split otherwise rescales every panel to the window).
+    sidebar_width: Option<Pixels>,
+    right_width: Option<Pixels>,
     settings: Option<Entity<crate::views::settings::SettingsView>>,
     settings_open: bool,
     foundry: Option<Entity<crate::views::foundry::FoundryView>>,
@@ -121,8 +129,21 @@ impl RootView {
                 cx.stop_propagation();
             });
         });
+        let split = cx.new(|_| ResizableState::default());
+        // A drag (or a restore below) settles the widths to remember.
+        cx.subscribe(&split, |this: &mut Self, split, _: &ResizablePanelEvent, cx| {
+            let sizes = split.read(cx).sizes().clone();
+            let (sidebar, right) = this.split_layout;
+            if sidebar { this.sidebar_width = sizes.first().copied(); }
+            if right && sizes.len() > 1 { this.right_width = sizes.last().copied(); }
+        })
+        .detach();
         Self {
             _mode_shortcut: mode_shortcut,
+            split,
+            split_layout: (true, false),
+            sidebar_width: None,
+            right_width: None,
             review,
             model,
             sidebar,
@@ -139,6 +160,32 @@ impl RootView {
             foundry_open: false,
             process_folder: None,
         }
+    }
+
+    /// After the sidebar or the right panel opens or closes, put the other panels back at the
+    /// widths they had: the split rescales every panel to the window when the count changes.
+    fn keep_panel_widths(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let layout = (self.sidebar_open, self.preview_open || self.model.read(cx).review_open);
+        if layout == self.split_layout { return; }
+        // The widths as they are now, before the split rescales (unmeasured panels skipped).
+        let sizes = self.split.read(cx).sizes().clone();
+        let measured = |w: Option<&Pixels>| w.copied().filter(|w| f32::from(*w) > 120.);
+        if self.split_layout.0 { if let Some(w) = measured(sizes.first()) { self.sidebar_width = Some(w); } }
+        if self.split_layout.1 && sizes.len() > 1 { if let Some(w) = measured(sizes.last()) { self.right_width = Some(w); } }
+        self.split_layout = layout;
+        let (sidebar, right) = (layout.0.then_some(self.sidebar_width).flatten(), layout.1.then_some(self.right_width).flatten());
+        if sidebar.is_none() && right.is_none() { return; }
+        let split = self.split.clone();
+        // Once this frame has laid the new panels out.
+        window.defer(cx, move |window, cx| {
+            split.update(cx, |state, cx| {
+                if let Some(width) = sidebar { state.resize_panel(0, width, window, cx); }
+                if let Some(width) = right {
+                    let last = state.sizes().len().saturating_sub(1);
+                    if last > 0 { state.resize_panel(last, width, window, cx); }
+                }
+            });
+        });
     }
 
     fn drain_toasts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -244,6 +291,7 @@ impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::theme::follow_system(window, cx);
         self.drain_toasts(window, cx);
+        self.keep_panel_widths(window, cx);
         // With nothing focused (no project or thread picked yet), window actions like
         // Settings (⌘,) have no handler in the focus path and the menu greys them out.
         // The root handles them, so it takes focus whenever nothing else has it.
@@ -454,6 +502,7 @@ impl Render for RootView {
                 // The split is 100% tall internally; give it only the space below the title bar.
                 div().flex_1().min_h_0().w_full().overflow_hidden().child(
                 h_resizable("main-split")
+                    .with_state(&self.split)
                     .when(self.sidebar_open, |el| {
                         el.child(
                             resizable_panel()
@@ -463,15 +512,15 @@ impl Render for RootView {
                         )
                     })
                     .child(resizable_panel().child(if self.foundry_open { self.foundry.clone().unwrap().into_any_element() } else { self.thread.clone().into_any_element() }))
-                    .when(self.model.read(cx).review_open, |el| {
-                        el.child(resizable_panel().size(px(640.)).size_range(px(400.)..px(1100.)).child(self.review.clone()))
-                    })
-                    .when(self.preview_open && !self.model.read(cx).review_open, |el| {
+                    // One right panel: Changes and the other tabs share its size, so switching tabs
+                    // never resizes it, and its content can't force it wider than it is.
+                    .when(self.preview_open || self.model.read(cx).review_open, |el| {
+                        let content = if self.model.read(cx).review_open { self.review.clone().into_any_element() } else { self.preview.clone().into_any_element() };
                         el.child(
                             resizable_panel()
                                 .size(px(520.))
                                 .size_range(px(360.)..px(1100.))
-                                .child(self.preview.clone()),
+                                .child(div().size_full().min_w_0().overflow_hidden().child(content)),
                         )
                     }),
             ))),

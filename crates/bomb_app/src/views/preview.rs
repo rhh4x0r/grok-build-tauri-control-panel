@@ -28,6 +28,8 @@ pub struct PreviewPanel {
     error: Option<String>,
     files: Entity<super::file_tree::FileTree>,
     project_root_override: Option<std::path::PathBuf>,
+    /// Subagent cards showing their whole task.
+    open_tasks: std::collections::HashSet<String>,
     context_root: Option<std::path::PathBuf>,
     /// Processes asked to quit; a second press force-quits.
     stopping: HashSet<u32>,
@@ -42,6 +44,7 @@ impl PreviewPanel {
             tab: RightTab::Preview,
             context_root: None,
             project_root_override: None,
+            open_tasks: Default::default(),
             model,
             webview: None,
             loaded_url: None,
@@ -181,6 +184,16 @@ impl PreviewPanel {
     }
 }
 
+/// The task in one paragraph, for a card: the whole prompt with its line breaks and headings
+/// run together (the card shows two lines of it).
+fn task_summary(task: &str) -> String {
+    task.lines()
+        .map(|l| l.trim().trim_start_matches('#').trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The right panel's tab bar, shared by this panel and Changes. Tabs and close go
 /// through the model so the window decides which panel shows.
 pub fn panel_tabs(active: RightTab, model: &Entity<AppModel>, ui: &Ui, cx: &App) -> Div {
@@ -190,9 +203,20 @@ pub fn panel_tabs(active: RightTab, model: &Entity<AppModel>, ui: &Ui, cx: &App)
         let model = model.clone();
         move |_: &ClickEvent, _: &mut Window, cx: &mut App| model.update(cx, |m, cx| { m.right_panel_request = Some(request); cx.notify(); })
     };
-    let tab = |id: &'static str, label: String, which: RightTab| {
-        Button::new(id).ghost().small().label(label).selected(active == which).on_click(ask(RightPanelRequest::Show(which)))
+    // Icons, with the open tab also named: fits any width, so nothing changes shape as the
+    // panel is resized. Counts stay beside their icon; names are tooltips.
+    let tab = |id: &'static str, name: &'static str, icon: Lucide, count: usize, which: RightTab| {
+        let open = active == which;
+        let tooltip = if count > 0 { format!("{name} · {count}") } else { name.to_string() };
+        let button = Button::new(id).ghost().small().icon(icon).selected(open).on_click(ask(RightPanelRequest::Show(which)));
+        match (open, count) {
+            (true, 0) => button.label(name),
+            (true, n) => button.label(format!("{name} {n}")),
+            (false, 0) => button.tooltip(tooltip),
+            (false, n) => button.label(n.to_string()).tooltip(tooltip),
+        }
     };
+    let working = model.read(cx).subagents_in_view().1.iter().filter(|s| s.state == "running").count();
     div()
         .flex()
         .items_center()
@@ -202,17 +226,14 @@ pub fn panel_tabs(active: RightTab, model: &Entity<AppModel>, ui: &Ui, cx: &App)
         .flex_shrink_0()
         .border_b_1()
         .border_color(ui.border)
-        .child(tab("tab-preview", "Preview".into(), RightTab::Preview))
-        .child(tab("tab-processes", if running > 0 { format!("Processes {running}") } else { "Processes".into() }, RightTab::Processes))
-        .child(tab("tab-files", "Files".into(), RightTab::Files))
-        .child(tab("tab-changes", "Changes".into(), RightTab::Changes))
-        .child({
-            let working = model.read(cx).subagents_in_view().1.iter().filter(|s| s.state == "running").count();
-            tab("tab-subagents", if working > 0 { format!("Subagents {working}") } else { "Subagents".into() }, RightTab::Subagents)
-        })
-        .child(div().flex_1())
-        .child(Button::new("right-panel-close").ghost().small().icon(Lucide::X).tooltip("Close panel")
-            .on_click(ask(RightPanelRequest::Close)))
+        .child(div().flex().items_center().gap_1().flex_1().min_w_0().overflow_hidden()
+            .child(tab("tab-preview", "Preview", Lucide::Monitor, 0, RightTab::Preview))
+            .child(tab("tab-processes", "Processes", Lucide::Activity, running, RightTab::Processes))
+            .child(tab("tab-files", "Files", Lucide::FolderTree, 0, RightTab::Files))
+            .child(tab("tab-changes", "Changes", Lucide::GitCompare, 0, RightTab::Changes))
+            .child(tab("tab-subagents", "Subagents", Lucide::Bot, working, RightTab::Subagents)))
+        .child(div().flex_shrink_0().child(Button::new("right-panel-close").ghost().small().icon(Lucide::X).tooltip("Close panel")
+            .on_click(ask(RightPanelRequest::Close))))
 }
 
 fn running_for(secs: u64) -> String {
@@ -392,12 +413,18 @@ impl PreviewPanel {
                 };
                 let is_open = selected == Some(child);
                 let model = self.model.clone();
+                let task_open = self.open_tasks.contains(&info.id);
+                let panel = cx.entity().downgrade();
+                let task_id = info.id.clone();
                 Some(
                     div()
                         .id(SharedString::from(format!("subagent-card-{child}")))
                         .flex()
                         .flex_col()
                         .gap_1()
+                        .w_full()
+                        .min_w_0()
+                        .overflow_hidden()
                         .p_3()
                         .rounded(px(12.))
                         .border_1()
@@ -415,10 +442,32 @@ impl PreviewPanel {
                         .when(info.model.is_some() || info.tokens.is_some(), |el| {
                             let facts = [info.model.clone(), info.tokens.map(|t| format!("{} tokens", bomb_core::presence::format_count(t as usize)))]
                                 .into_iter().flatten().collect::<Vec<_>>().join(" · ");
-                            el.child(div().font_family(ui.mono.clone()).text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint).child(facts))
+                            el.child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().font_family(ui.mono.clone()).text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint).child(facts))
                         })
                         .when(!info.task.is_empty(), |el| {
-                            el.child(div().text_size(px(crate::theme::Type::SMALL)).line_height(px(18.)).text_color(ui.text_muted).line_clamp(3).child(info.task.clone()))
+                            let text = div().w_full().min_w_0().text_size(px(crate::theme::Type::SMALL)).line_height(px(18.)).text_color(ui.text_muted);
+                            el.child(if task_open {
+                                text.whitespace_normal().child(info.task.clone())
+                            } else {
+                                text.line_clamp(2).child(task_summary(&info.task))
+                            })
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("subagent-task-{child}")))
+                                    .text_size(px(crate::theme::Type::CAPTION))
+                                    .text_color(ui.text_faint)
+                                    .cursor_pointer()
+                                    .hover(|s| s.underline())
+                                    // Toggling doesn't open the subagent's thread.
+                                    .on_click(move |_, _, cx| {
+                                        cx.stop_propagation();
+                                        let _ = panel.update(cx, |p, cx| {
+                                            if !p.open_tasks.remove(&task_id) { p.open_tasks.insert(task_id.clone()); }
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(if task_open { "Hide task" } else { "Show task" }),
+                            )
                         })
                         .into_any_element(),
                 )
