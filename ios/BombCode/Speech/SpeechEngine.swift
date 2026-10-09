@@ -371,7 +371,15 @@ final class SpeechPlayer {
 
     /// Keep a few chunks queued from the file, as far as it's rendered.
     private func feedLocked() {
-        guard playing, let file, let format else { return }
+        guard playing, let file else { return }
+        // The voice's own sample rate is known once its first audio arrives (16 kHz for some voices,
+        // 22 kHz for most, higher for Premium ones): rebuild the audio path to match before playing.
+        if connectedRate != sampleRate {
+            haltLocked()
+            restartFrom = restartFrom ?? startFrame
+            startEngineLocked()
+        }
+        guard let format else { return }
         if let from = restartFrom {
             haltLocked()
             startFrame = from

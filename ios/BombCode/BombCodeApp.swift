@@ -17,6 +17,8 @@ struct BombCodeApp: App {
         .onChange(of: phase) { _, phase in
             // iOS closes sockets in the background anyway; pause cleanly and reconnect on return.
             app.setActive(phase == .active)
+            // Back from Settings with a newly downloaded voice: list it.
+            if phase == .active { ReadAloud.shared.refreshVoices() }
         }
     }
 }
