@@ -289,8 +289,8 @@ impl AcpClient {
                 // The oldest waiting `spawn_subagent` call is this subagent's.
                 let prompt = {
                     let mut spawns = self.grok_spawns.lock().unwrap_or_else(|e| e.into_inner());
-                    let next = spawns.0.pop_front();
-                    if let Some((tool_id, _)) = &next { spawns.1.insert(tool_id.clone(), child_session.to_string()); }
+                    let next = spawns.waiting.pop_front();
+                    if let Some((tool_id, _)) = &next { spawns.children.insert(tool_id.clone(), child_session.to_string()); }
                     next.map(|(_, prompt)| prompt)
                 };
                 self.subagent_started(bus, parent, parent, child_session, &description, &description, prompt.as_deref(), model).await;
@@ -321,13 +321,13 @@ impl AcpClient {
                     || update.get("title").and_then(Value::as_str) == Some("spawn_subagent");
                 if !spawn { return false; }
                 let prompt = update.pointer("/rawInput/prompt").and_then(Value::as_str).unwrap_or_default().to_string();
-                self.grok_spawns.lock().unwrap_or_else(|e| e.into_inner()).0.push_back((tool_id.to_string(), prompt));
+                self.grok_spawns.lock().unwrap_or_else(|e| e.into_inner()).waiting.push_back((tool_id.to_string(), prompt));
                 true
             }
             "tool_call_update" => {
                 let (pending, child_session) = {
                     let spawns = self.grok_spawns.lock().unwrap_or_else(|e| e.into_inner());
-                    (spawns.0.iter().any(|(t, _)| t == tool_id), spawns.1.get(tool_id).cloned())
+                    (spawns.waiting.iter().any(|(t, _)| t == tool_id), spawns.children.get(tool_id).cloned())
                 };
                 if let Some(child_session) = child_session {
                     match update.get("status").and_then(Value::as_str) {
@@ -508,7 +508,15 @@ pub struct AcpClient {
     subagents: std::sync::Mutex<HashMap<String, Uuid>>,
     /// Grok: `spawn_subagent` calls waiting for their `subagent_spawned` (tool call id, prompt),
     /// and each call's child session once known, so the call's end ends the subagent.
-    grok_spawns: std::sync::Mutex<(std::collections::VecDeque<(String, String)>, HashMap<String, String>)>,
+    grok_spawns: std::sync::Mutex<GrokSpawns>,
+}
+
+/// Grok's `spawn_subagent` calls: those waiting for their `subagent_spawned` (call id, prompt),
+/// and each call's child session once known.
+#[derive(Default)]
+struct GrokSpawns {
+    waiting: std::collections::VecDeque<(String, String)>,
+    children: HashMap<String, String>,
 }
 
 /// Claude Code starts a turn by itself when a background job it launched finishes. With no
