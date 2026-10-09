@@ -12,6 +12,11 @@ struct NewThreadSheet: View {
     @State private var choices = ComposerChoices()
     @State private var ownWorktree = true
     @State private var error: String?
+    /// Making a project: which kind is being asked for, what's typed, and whether it's under way.
+    @State private var asking: NewProjectKind?
+    @State private var newName = ""
+    @State private var newURL = ""
+    @State private var making = false
 
     private var machine: MachineModel? { app.machine(id: machineId ?? "") }
 
@@ -31,12 +36,16 @@ struct NewThreadSheet: View {
                             }
                         }
                         divider
-                        PickRow(icon: "folder", label: "Project", value: project.map(projectName) ?? (projects.isEmpty ? "No projects" : "Choose")) {
+                        PickRow(icon: making ? "hourglass" : "folder", label: "Project",
+                                value: making ? "Setting up…" : project.map(projectName) ?? (projects.isEmpty ? "None yet" : "Choose")) {
                             ForEach(projects, id: \.self) { root in
                                 Button(projectName(root)) { project = root }
                             }
+                            Divider()
+                            Button("New project…", systemImage: "plus") { newName = ""; asking = .empty }
+                            Button("Clone from Git…", systemImage: "arrow.down.circle") { newURL = ""; newName = ""; asking = .clone }
                         }
-                        .disabled(projects.isEmpty)
+                        .disabled(machine == nil || making)
                         divider
                         HStack(spacing: 12) {
                             Image(systemName: "arrow.triangle.branch").font(.system(size: 14)).foregroundStyle(Theme.textMuted).frame(width: 22)
@@ -69,6 +78,21 @@ struct NewThreadSheet: View {
         .background { BombBackground(strength: 0.5) }
         .presentationDragIndicator(.visible)
         .task(id: machineId) { await loadProjects() }
+        .alert("New project", isPresented: Binding(get: { asking == .empty }, set: { if !$0 { asking = nil } })) {
+            TextField("Name", text: $newName).textInputAutocapitalization(.never).autocorrectionDisabled()
+            Button("Cancel", role: .cancel) {}
+            Button("Create") { Task { await makeProject(.empty) } }
+        } message: {
+            Text("An empty project with Git, on \(machine?.name ?? "the machine").")
+        }
+        .alert("Clone from Git", isPresented: Binding(get: { asking == .clone }, set: { if !$0 { asking = nil } })) {
+            TextField("https://github.com/you/repo", text: $newURL).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+            TextField("Name (optional)", text: $newName).textInputAutocapitalization(.never).autocorrectionDisabled()
+            Button("Cancel", role: .cancel) {}
+            Button("Clone") { Task { await makeProject(.clone) } }
+        } message: {
+            Text("Cloned on \(machine?.name ?? "the machine") with its own Git sign-in, so private repositories work if it can reach them.")
+        }
         .onAppear { machineId = machineId ?? defaultMachine()?.id }
     }
 
@@ -102,6 +126,26 @@ struct NewThreadSheet: View {
         if choices.backend == nil, let first = machine.backends.first {
             choices.backend = first.id
             choices.model = first.defaultModel.isEmpty ? nil : first.defaultModel
+        }
+    }
+
+    /// Make the project on the machine, then pick it. A brand-new project starts on its main branch.
+    private func makeProject(_ kind: NewProjectKind) async {
+        guard let machine else { return }
+        let (name, url) = (newName.trimmingCharacters(in: .whitespaces), newURL.trimmingCharacters(in: .whitespaces))
+        if kind == .empty ? name.isEmpty : url.isEmpty { return }
+        error = nil
+        making = true
+        defer { making = false }
+        do {
+            let path = kind == .empty
+                ? try await machine.machine.createProject(name: name)
+                : try await machine.machine.cloneProject(url: url, name: name.isEmpty ? nil : name)
+            if !projects.contains(path) { projects.insert(path, at: 0) }
+            project = path
+            if kind == .empty { ownWorktree = false }
+        } catch {
+            self.error = describe(error)
         }
     }
 
@@ -143,3 +187,5 @@ private struct PickRow<Choices: View>: View {
         }
     }
 }
+
+private enum NewProjectKind { case empty, clone }

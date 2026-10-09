@@ -100,6 +100,12 @@ async fn a_paired_phone_starts_a_thread_watches_it_and_answers_an_approval() {
     let machine = Machine::new(paired.clone(), Box::new(Listener(screen.clone())));
     until(&screen, "connected", |s| s.link == Some(LinkState::Connected)).await;
     assert_eq!(machine.list_projects().await.unwrap(), vec![root.clone()]);
+    // A project made from the phone: an empty one; a clone takes only a remote Git address.
+    let made = machine.create_project("Pocket Game".into()).await.unwrap();
+    assert!(made.ends_with("pocket-game") && std::path::Path::new(&made).join(".git").exists());
+    assert!(machine.create_project("Pocket Game".into()).await.is_err(), "names don't collide");
+    assert!(machine.list_projects().await.unwrap().contains(&made));
+    assert!(machine.clone_project(made.clone(), Some("pocket-copy".into())).await.is_err(), "no local paths");
     assert!(machine.list_backends().await.unwrap().iter().any(|b| b.id == "grok"));
 
     // Read-aloud settings are shared: what the phone sets, the machine keeps, and every device hears of it.

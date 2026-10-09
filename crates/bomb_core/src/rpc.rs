@@ -134,9 +134,9 @@ pub async fn dispatch(state: &AppState, origin: &str, method: &str, p: Value) ->
         "create_project" => {
             let name: String = arg(&p, "name")?;
             let slug = project_slug(&name)?;
-            let path = server_projects_dir(state).join(&slug);
-            if path.exists() { return Err(format!("There is already a project named {slug} on this server.")); }
-            std::fs::create_dir_all(server_projects_dir(state)).map_err(|e| format!("Could not create the projects folder: {e}"))?;
+            let path = new_projects_dir(state).join(&slug);
+            if path.exists() { return Err(format!("There is already a project named {slug} here.")); }
+            std::fs::create_dir_all(new_projects_dir(state)).map_err(|e| format!("Could not create the projects folder: {e}"))?;
             services::thread_setup::create(&path).await?;
             services::add_project(state, path.display().to_string()).await?;
             Ok(json!(path.display().to_string()))
@@ -193,7 +193,9 @@ pub async fn dispatch(state: &AppState, origin: &str, method: &str, p: Value) ->
         "clone_project" => {
             let url: String = arg(&p, "url")?;
             let name = arg::<Option<String>>(&p, "name")?.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| url.trim_end_matches('/').trim_end_matches(".git").rsplit(['/', ':']).next().unwrap_or("project").to_string());
-            let path = server_projects_dir(state).join(project_slug(&name)?);
+            let path = new_projects_dir(state).join(project_slug(&name)?);
+            if path.exists() { return Err(format!("There is already a project named {} here.", project_slug(&name)?)); }
+            std::fs::create_dir_all(new_projects_dir(state)).map_err(|e| format!("Could not create the projects folder: {e}"))?;
             services::project_sync::clone_url(url.trim(), &path).await?;
             services::add_project(state, path.display().to_string()).await?;
             Ok(json!(path.display().to_string()))
@@ -281,6 +283,12 @@ fn save_push_devices(state: &AppState, devices: &[PushDevice]) -> Result<(), Str
 /// Where a person's projects live on a server: `~/projects`.
 pub fn server_projects_dir(state: &AppState) -> std::path::PathBuf {
     state.paths.home_dir.join("projects")
+}
+
+/// Where a project made from another device (a phone, or a Mac for a server) goes: a Mac keeps them
+/// where its own new projects go (`~/Documents/BombCode`), a server in the person's `~/projects`.
+fn new_projects_dir(state: &AppState) -> std::path::PathBuf {
+    if cfg!(target_os = "macos") { state.paths.home_dir.join("Documents").join("BombCode") } else { server_projects_dir(state) }
 }
 
 /// A folder-safe project name.

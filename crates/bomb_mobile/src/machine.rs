@@ -197,9 +197,16 @@ impl Machine {
         self.call("list_projects", Value::Null).await
     }
 
-    /// A new empty Git project in the person's projects folder on a server. Returns its path.
+    /// A new empty Git project (with a first commit, so threads can start in it): in
+    /// `~/Documents/BombCode` on a Mac, `~/projects` on a server. Returns its path.
     pub async fn create_project(&self, name: String) -> Result<String> {
         self.call("create_project", json!({ "name": name })).await
+    }
+
+    /// Clone a Git repository (GitHub or any URL the machine's own Git can reach) as a new project,
+    /// next to the ones `create_project` makes. `name` defaults to the repository's. Returns its path.
+    pub async fn clone_project(&self, url: String, name: Option<String>) -> Result<String> {
+        self.call("clone_project", json!({ "url": url, "name": name })).await
     }
 
     pub async fn list_backends(&self) -> Result<Vec<BackendChoice>> {
