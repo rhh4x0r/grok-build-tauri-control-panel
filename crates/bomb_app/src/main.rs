@@ -3,6 +3,7 @@
 mod actions;
 mod core_router;
 mod dictation;
+mod speech;
 mod models;
 mod remote;
 mod runtime;
@@ -98,6 +99,9 @@ fn main() {
         let phone = cx.new(|_| models::phone::PhoneModel::default());
         phone.update(cx, |p, cx| p.load(cx));
         cx.set_global(models::phone::PhoneHandle(phone));
+        let read_aloud = cx.new(|_| models::read_aloud::ReadAloud::default());
+        read_aloud.update(cx, |r, cx| r.load(cx));
+        cx.set_global(models::read_aloud::ReadAloudHandle(read_aloud));
         cx.set_global(models::app::AppModelHandle(model.clone()));
         views::root::open_main_window(model.clone(), cx);
         smoke::maybe_run(model, cx);

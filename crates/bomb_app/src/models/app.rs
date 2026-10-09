@@ -1375,6 +1375,8 @@ impl AppModel {
         // Leaving a thread counts as having seen what it did while it was open.
         for seen in self.selected.into_iter().chain(id) { self.mark_seen(seen, cx); }
         self.selected = id;
+        // Reading aloud is for the thread in view.
+        crate::models::read_aloud::read_aloud(cx).update(cx, |r, cx| r.thread_changed(id, cx));
         self.prefs.fast_mode = Some(false);
         self.new_thread_open = false;
         self.review = None;

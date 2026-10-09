@@ -62,6 +62,7 @@ impl Render for SettingsView {
                         perspective_page(),
                         servers_page(),
                         phone_page(),
+                        voice_page(),
                         permissions_page(cx),
                         advanced_page(),
                     ]),
@@ -869,6 +870,104 @@ fn render_servers(cx: &mut App) -> AnyElement {
             ),
     )
     .into_any_element()
+}
+
+// ── Voice (read-aloud) ──────────────────────────────────────────────────
+
+fn voice_page() -> SettingPage {
+    use crate::models::read_aloud::{read_aloud, RATES};
+    SettingPage::new("Voice")
+        .description("Read replies aloud with your Mac's own voices: on this Mac, offline, free. Use the speaker under a reply.")
+        .group(
+            SettingGroup::new()
+                .item(
+                    SettingItem::new(
+                        "Speed",
+                        SettingField::dropdown(
+                            RATES.iter().map(|r| (SharedString::from(r.to_string()), SharedString::from(format!("{r}×")))).collect(),
+                            |cx| read_aloud(cx).read(cx).settings.rate.to_string().into(),
+                            |v, cx| { if let Ok(r) = v.parse::<f32>() { read_aloud(cx).update(cx, |m, cx| m.set_rate(r, cx)); } },
+                        ),
+                    )
+                    .description("Where reading starts; the player changes it too."),
+                )
+                .item(SettingItem::render(|_, _, cx| render_voices(cx))),
+        )
+}
+
+/// The voices, best first in your language, each with a preview; plus how to get better ones.
+fn render_voices(cx: &mut App) -> AnyElement {
+    let ui = Ui::of(cx);
+    let model = crate::models::read_aloud::read_aloud(cx);
+    let (available, voices, chosen, needs_better, personal) = {
+        let m = model.read(cx);
+        (m.available, m.voices.clone(), m.chosen_voice(), m.needs_better_voice, m.personal_voice)
+    };
+    let caption = |text: String| div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(text);
+    if !available {
+        return caption("Read-aloud isn't available on this Mac.".into()).into_any_element();
+    }
+    if voices.is_empty() {
+        model.update(cx, |m, cx| m.refresh_voices(cx));
+        return caption("Looking for voices…".into()).into_any_element();
+    }
+    let hover = ui.hover;
+    let selected_bg = ui.selected_bg();
+    let mut list = div().flex().flex_col().gap(px(2.)).w_full();
+    let mut last_group = String::new();
+    for v in voices.iter() {
+        let group = if v.personal { "Personal Voice".to_string() } else {
+            match v.quality.as_str() { "premium" => "Premium", "enhanced" => "Enhanced", _ => "Default" }.to_string()
+        };
+        if group != last_group {
+            list = list.child(div().pt_2().pb_1().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint).child(group.clone()));
+            last_group = group;
+        }
+        let is_chosen = chosen.as_deref() == Some(v.id.as_str());
+        let (pick, preview) = (model.clone(), model.clone());
+        let (id_pick, id_preview) = (v.id.clone(), v.id.clone());
+        list = list.child(
+            div()
+                .id(SharedString::from(format!("voice-{}", v.id)))
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .h(px(32.))
+                .rounded(px(8.))
+                .cursor_pointer()
+                .when(is_chosen, move |el| el.bg(selected_bg))
+                .when(!is_chosen, move |el| el.hover(move |s| s.bg(hover)))
+                .on_click(move |_, _, cx| pick.update(cx, |m, cx| m.set_voice(id_pick.clone(), cx)))
+                .child(div().size(px(14.)).text_color(ui.accent).when(is_chosen, |el| el.child(gpui_kit::component::Icon::from(gpui_kit::assets::IconName::Check))))
+                .child(div().flex_1().min_w_0().text_color(ui.text).child(v.name.clone()))
+                .child(div().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint).child(v.language.clone()))
+                .child(
+                    Button::new(SharedString::from(format!("voice-preview-{}", v.id))).ghost().small().icon(gpui_kit::assets::IconName::Play).tooltip("Preview")
+                        .on_click(move |_, _, cx| preview.update(cx, |m, cx| m.preview(&id_preview, cx))),
+                ),
+        );
+    }
+    let mut page = div().flex().flex_col().gap_3().w_full();
+    if needs_better {
+        page = page.child(
+            div().flex().flex_col().gap_2().p_3().rounded(px(10.)).border_1().border_color(ui.border)
+                .child(div().font_weight(FontWeight::MEDIUM).text_color(ui.text).child("Get a better voice"))
+                .child(caption("Only basic voices are installed for your language. Enhanced and Premium voices sound far more natural. On your Mac: System Settings → Accessibility → Spoken Content → System Voice → Manage Voices, then download one. It shows up here on its own.".into()))
+                .child(div().flex().child(Button::new("open-spoken-content").outline().small().label("Open Spoken Content settings").on_click(|_, _, cx| {
+                    cx.open_url("x-apple.systempreferences:com.apple.preference.universalaccess?SpokenContent");
+                }))),
+        );
+    }
+    let personal_model = model.clone();
+    page = page
+        .child(div().flex().items_center().gap_2()
+            .child(Button::new("personal-voice").outline().small().label("Use my Personal Voice").on_click(move |_, _, cx| {
+                personal_model.update(cx, |m, cx| m.request_personal_voice(cx));
+            }))
+            .when(personal == Some(false), |el| el.child(caption("Not allowed, or no Personal Voice on this Mac (macOS 14 and later).".into()))))
+        .child(list);
+    page.into_any_element()
 }
 
 // ── Phone ───────────────────────────────────────────────────────────────

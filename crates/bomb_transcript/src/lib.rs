@@ -7,5 +7,6 @@
 //! - [`summary`] labels a run of steps ("Thought · Ran 4 commands").
 
 pub mod presence;
+pub mod speech;
 pub mod summary;
 pub mod transcript;

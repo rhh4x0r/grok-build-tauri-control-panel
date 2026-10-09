@@ -27,6 +27,8 @@ pub struct ThreadView {
     transcript: Option<(String, Entity<TranscriptView>)>,
     composer: Entity<ComposerView>,
     review_loop: Entity<super::review_loop::ReviewLoopView>,
+    /// The read-aloud player, shown while a reply in this thread is being read.
+    player: Entity<super::read_aloud::PlayerBar>,
     search_open: bool,
     terminals: std::collections::HashMap<String, Entity<super::terminal::TerminalPanel>>,
     terminals_open: std::collections::HashSet<String>,
@@ -57,11 +59,15 @@ impl ThreadView {
             _ => {}
         })
         .detach();
+        let read_aloud = crate::models::read_aloud::read_aloud(cx);
+        cx.observe(&read_aloud, |_, _, cx| cx.notify()).detach();
+        let player = cx.new(|cx| super::read_aloud::PlayerBar::new(read_aloud, cx));
         let mut this = Self {
             model,
             transcript: None,
             composer,
             review_loop,
+            player,
             search_open: false,
             terminals: std::collections::HashMap::new(),
             terminals_open: std::collections::HashSet::new(),
@@ -768,6 +774,7 @@ impl Render for ThreadView {
                     ),
             )
             .when(!crate::runtime::services(cx).foundry.for_thread(&tid).is_some_and(|r| matches!(r.status,bomb_foundry::RunStatus::Completed|bomb_foundry::RunStatus::Stopped)), |el|el.child(self.review_loop.clone()))
+            .when(crate::models::read_aloud::read_aloud(cx).read(cx).playing.as_ref().is_some_and(|p| p.thread.to_string() == tid), |el| el.child(self.player.clone()))
             .map(|el| match subagent_banner(&self.model, &tid, &ui, cx) {
                 // A subagent takes no messages: say whose it is, and offer the way back.
                 Some(banner) => el.child(banner),

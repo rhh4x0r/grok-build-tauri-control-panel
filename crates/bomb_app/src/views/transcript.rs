@@ -564,6 +564,7 @@ impl TranscriptView {
             })
             .when(last && !streaming, |el| {
                 let hover = ui.hover;
+                let speaker = read_aloud_button(&self.thread, id, raw, ui, cx);
                 let text_for_copy: SharedString = bomb_foundry::presentation::stage_prose(raw).to_string().into();
                 let text_for_mem = text_for_copy.clone();
                 let action = |id: &'static str, label: &'static str| {
@@ -595,7 +596,8 @@ impl TranscriptView {
                                 let t = text_for_mem.to_string();
                                 app.update(cx, |m, cx| m.remember(t, cx));
                             }),
-                        ),
+                        )
+                        .children(speaker),
                 )
             });
         if raw.contains("<foundry-result>") && !streaming {
@@ -1357,6 +1359,17 @@ impl Render for TranscriptView {
                 .collect(),
             None => Vec::new(),
         };
+        // The read-aloud player asked to show the message it's reading.
+        let reading = crate::models::read_aloud::read_aloud(cx);
+        if let Some((thread, entry)) = reading.read(cx).reveal {
+            if self.thread.read(cx).meta.id == thread.to_string() {
+                if let Some(ix) = self.rows.iter().position(|r| matches!(r, Row::Agent { id, .. } if *id == entry)) {
+                    self.list.pause_following_tail();
+                    self.list.scroll_to_reveal_item(ix);
+                }
+                reading.update(cx, |r, _| r.reveal = None);
+            }
+        }
         let active_match = self.search.as_ref().and_then(|(_, ix)| self.matches.get(*ix).copied());
         if let Some(target) = active_match {
             if self.scrolled_to != Some(target) {
@@ -2357,4 +2370,35 @@ mod model_switch_tests {
         assert_eq!(switch_identity(to), ("codex", "gpt-6-astra"));
         assert!(switch_parts("An ordinary message").is_none());
     }
+}
+
+/// Read a reply aloud, or stop it; shows that it's playing while it is. Hidden where the Mac can't
+/// read aloud.
+fn read_aloud_button(thread: &Entity<crate::models::thread::ThreadModel>, entry: u64, raw: &str, ui: &Ui, cx: &App) -> Option<AnyElement> {
+    let model = crate::models::read_aloud::read_aloud(cx);
+    if !model.read(cx).available {
+        return None;
+    }
+    let thread_id = uuid::Uuid::parse_str(&thread.read(cx).meta.id).ok()?;
+    let playing = model.read(cx).playing.as_ref().is_some_and(|p| p.thread == thread_id && p.entry == entry);
+    let text = raw.to_string();
+    let title = bomb_core::transcript_speech::speakable_sentences(raw).into_iter().next().unwrap_or_default();
+    let hover = ui.hover;
+    let icon = div()
+        .size(px(14.))
+        .text_color(if playing { ui.accent } else { ui.text_faint })
+        .child(Icon::from(if playing { Lucide::AudioLines } else { Lucide::Volume2 }));
+    Some(
+        div()
+            .id(("read-aloud", entry))
+            .px_1p5()
+            .py(px(2.))
+            .rounded(px(4.))
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover))
+            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(if playing { "Stop reading" } else { "Read aloud" }).build(window, cx))
+            .on_click(move |_, _, cx| model.update(cx, |m, cx| m.toggle(thread_id, entry, &text, title.clone(), cx)))
+            .child(if playing { super::motion::breathe(("reading", entry), 0.9, icon).into_any_element() } else { icon.into_any_element() })
+            .into_any_element(),
+    )
 }

@@ -429,3 +429,9 @@ mod media_tests {
         assert!(media_refs(&agent("Edited /Users/max/src/main.rs and clip.webm")).is_empty());
     }
 }
+
+/// A reply as it should be read aloud, sentence by sentence (shared with the Mac).
+#[uniffi::export]
+pub fn speakable_sentences(text: String) -> Vec<String> {
+    bomb_transcript::speech::speakable_sentences(&text)
+}
