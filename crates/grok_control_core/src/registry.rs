@@ -786,11 +786,18 @@ impl SessionRegistry {
         self.sessions.len()
     }
 
+    /// Stop every agent as the app quits. A thread in the middle of a turn is cancelled (that turn
+    /// really was cut off); an idle one is closed quietly, with nothing added to its transcript.
     pub async fn shutdown_all(&self) {
         let ids: Vec<Uuid> = self.sessions.iter().map(|e| *e.key()).collect();
         for id in ids {
-            if let Err(e) = self.cancel_session(id).await {
-                warn!(%id, error = %e, "error cancelling session during shutdown");
+            let busy = self.sessions.get(&id).is_some_and(|e| {
+                matches!(e.metadata.status, SessionStatus::Running | SessionStatus::WaitingApproval | SessionStatus::Cancelling)
+            });
+            if busy {
+                if let Err(e) = self.cancel_session(id).await {
+                    warn!(%id, error = %e, "error cancelling session during shutdown");
+                }
             }
             if let Some((_, handle)) = self.sessions.remove(&id) {
                 if let Some(client) = handle.acp_client {
@@ -848,6 +855,23 @@ mod tests {
         while let Ok(event) = events.try_recv() {
             assert!(!matches!(event, grok_events::ControlEvent::SessionCancelled { .. } | grok_events::ControlEvent::SessionStatusChanged { status: SessionStatus::Cancelled, .. }));
         }
+    }
+
+    #[tokio::test]
+    async fn quitting_closes_idle_threads_quietly_and_cancels_busy_ones() {
+        let reg = test_registry();
+        let idle = reg.spawn_mock("/tmp").await.unwrap();
+        let busy = reg.spawn_mock("/tmp").await.unwrap();
+        reg.sessions.get_mut(&idle).unwrap().metadata.status = SessionStatus::Idle;
+        reg.sessions.get_mut(&busy).unwrap().metadata.status = SessionStatus::Running;
+        let mut events = reg.event_bus.subscribe();
+        reg.shutdown_all().await;
+        assert_eq!(reg.session_count(), 0);
+        let mut cancelled = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let grok_events::ControlEvent::SessionCancelled { session_id, .. } = event { cancelled.push(session_id); }
+        }
+        assert_eq!(cancelled, vec![busy], "only the busy thread is cancelled");
     }
 
     #[tokio::test]
