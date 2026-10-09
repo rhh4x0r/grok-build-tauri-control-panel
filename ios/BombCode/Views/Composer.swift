@@ -22,6 +22,9 @@ struct Composer: View {
     @State private var images: [ImageUpload] = []
     @State private var picks: [PhotosPickerItem] = []
     @State private var sending = false
+    /// The running `Dictation` (iOS 26+), while listening.
+    @State private var dictation: AnyObject?
+    @State private var dictationError: String?
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -41,7 +44,10 @@ struct Composer: View {
                     }
                 }
             }
-            TextField("", text: $text, prompt: Text(placeholder).foregroundStyle(Theme.textFaint), axis: .vertical)
+            if let dictationError {
+                Text(dictationError).font(Theme.caption).foregroundStyle(Theme.danger).padding(.horizontal, 4)
+            }
+            TextField("", text: $text, prompt: Text(dictation == nil ? placeholder : "Listening…").foregroundStyle(Theme.textFaint), axis: .vertical)
                 .font(Theme.prose)
                 .foregroundStyle(Theme.text)
                 .tint(Theme.accent)
@@ -55,6 +61,9 @@ struct Composer: View {
                         .font(.system(size: 14))
                         .foregroundStyle(Theme.textMuted)
                         .frame(width: 30, height: 30)
+                }
+                if #available(iOS 26.0, *), Dictation.isAvailable || Smoke.showMic {
+                    MicButton(listening: dictation != nil) { Task { await toggleDictation() } }
                 }
                 ModeMenu(mode: $choices.mode)
                 ModelMenu(machine: machine, choices: $choices)
@@ -83,9 +92,38 @@ struct Composer: View {
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Theme.composerCorner))
         .overlay(RoundedRectangle(cornerRadius: Theme.composerCorner).stroke(Theme.hairline, lineWidth: 1))
         .onChange(of: picks) { _, items in Task { await attach(items) } }
+        .onDisappear { Task { await stopDictation() } }
+    }
+
+    /// Tap to listen, tap to stop. Words land after what's already typed and are never sent on
+    /// their own, so a prompt can be dictated in parts and edited in between.
+    private func toggleDictation() async {
+        guard #available(iOS 26.0, *) else { return }
+        if dictation != nil { return await stopDictation() }
+        dictationError = nil
+        let base = text
+        let gap = base.isEmpty || base.hasSuffix(" ") || base.hasSuffix("\n") ? "" : " "
+        let listener = Dictation()
+        dictation = listener
+        do {
+            try await listener.start { final, volatile in
+                let words = (final + volatile).drop(while: \.isWhitespace)
+                text = words.isEmpty ? base : base + gap + words
+            }
+        } catch {
+            dictation = nil
+            dictationError = describe(error)
+        }
+    }
+
+    private func stopDictation() async {
+        guard #available(iOS 26.0, *), let listener = dictation as? Dictation else { return }
+        dictation = nil
+        await listener.stop()
     }
 
     private func submit() async {
+        await stopDictation()
         sending = true
         let sent = await send(text, images)
         sending = false
@@ -166,5 +204,30 @@ struct ModelMenu: View {
             }
         }
         .task { await machine.loadBackends() }
+    }
+}
+
+/// The microphone: plain while idle, red and breathing while it listens.
+private struct MicButton: View {
+    let listening: Bool
+    let toggle: () -> Void
+    @State private var pulse = false
+
+    var body: some View {
+        Button(action: toggle) {
+            Image(systemName: listening ? "mic.fill" : "mic")
+                .font(.system(size: 14, weight: listening ? .semibold : .regular))
+                .foregroundStyle(listening ? Theme.danger : Theme.textMuted)
+                .frame(width: 30, height: 30)
+                .background {
+                    if listening {
+                        Circle().fill(Theme.danger.opacity(pulse ? 0.22 : 0.08))
+                            .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: pulse)
+                    }
+                }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(listening ? "Stop dictation" : "Dictate")
+        .onChange(of: listening, initial: true) { _, on in pulse = on }
     }
 }

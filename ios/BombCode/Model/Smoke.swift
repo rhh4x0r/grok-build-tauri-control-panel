@@ -7,6 +7,8 @@ import Foundation
 ///     SIMCTL_CHILD_BOMB_SMOKE=1 SIMCTL_CHILD_BOMB_PAIR='bomb://pair?…' xcrun simctl launch booted com.bombcode.companion
 enum Smoke {
     static var enabled: Bool { ProcessInfo.processInfo.environment["BOMB_SMOKE"] == "1" }
+    /// Show the dictation button where dictation isn't available (the simulator), to check its layout.
+    static var showMic: Bool { enabled && ProcessInfo.processInfo.environment["BOMB_SMOKE_MIC"] == "1" }
 
     @MainActor
     static func run(_ app: AppModel, open: @escaping (ThreadRef) -> Void) async {
@@ -33,5 +35,11 @@ enum Smoke {
             print("smoke: start failed", describe(error))
         }
     }
+}
+#endif
+
+#if !DEBUG
+enum Smoke {
+    static let showMic = false
 }
 #endif
