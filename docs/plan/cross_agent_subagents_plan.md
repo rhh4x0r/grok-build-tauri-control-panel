@@ -34,7 +34,7 @@ three agents, so Bomb Code is where cross-agent work has to happen.
 | Tool | What it does |
 |---|---|
 | `list_agents()` | Agents and models this machine can run right now: logged-in backends only, with each model's id and display name (so "Astra" or "Opus 5.5" resolve). |
-| `start_helper({ agent, model, task, name?, edits? })` | Starts a helper and returns its id at once. `model` accepts an id, alias or display name. `edits` defaults to false (read-only). |
+| `start_helper({ agent, model, task, name? })` | Starts a helper and returns its id at once. `model` accepts an id, alias or display name. The helper runs in its parent's mode (see Rules). |
 | `wait_helpers({ ids, timeout_secs? })` | Waits until those helpers finish or the timeout passes (default 120 s, capped below the agents' MCP tool timeouts). Returns each one's status and, once finished, its report. Call again to keep waiting. |
 | `helper_status({ ids })` | Status, step count, and the latest line of each, without waiting. |
 | `message_helper({ id, text })` | A follow-up to a finished helper (the same as writing to a thread). |
@@ -55,11 +55,13 @@ on a paired server, where `bombd` starts it.
 
 ## Rules
 
-- **Never escalate permissions.** A helper runs in Plan or Ask unless `edits: true`, and never in a
-  more permissive mode than its parent. Always-approve is never inherited or defaulted.
-- **Edits happen on a branch.** A read-only helper works in the parent's folder. An editing helper
-  gets its own worktree (the existing thread isolation), so two helpers can't overwrite each
-  other or the parent; its work comes back as a branch the parent or person can merge.
+- **Same mode as the thread.** A helper runs in its parent's approval mode at the time it starts
+  (Plan, Ask or Auto), never a more permissive one. Always-approve is never chosen for a helper
+  by Bomb Code; it carries over only when the person put the parent in it themselves.
+- **Edits happen on a branch.** In a parent that can't edit (Plan), helpers read the parent's
+  folder. In one that can, each helper gets its own worktree (the existing thread isolation), so
+  helpers can't overwrite each other or the parent; its work comes back as a branch to review
+  and merge, like any thread's.
 - **One level only.** Helpers don't get the `bomb` server, so a helper can't start helpers.
 - **Limits:** at most 4 helpers running per thread and 8 per thread in total, both configurable.
   `start_helper` explains the limit instead of failing silently.
@@ -76,7 +78,7 @@ transcript, the phone's cards and read-only transcripts), plus:
 
 - each helper's **agent mark and model** ("Codex · Astra", "Claude · Opus 5.5");
 - **"needs you"** when a helper waits on an approval;
-- each helper's **usage**, where the agent reports it.
+- each helper's **usage on its card** ("Codex · Astra · 42k tokens"), where the agent reports it.
 
 Native subagents should show their model too. Claude's adapter doesn't send it today (the
 `subagent_spawned` update has no model, and the Agent tool call that carries it is consumed by
@@ -100,12 +102,11 @@ updates if it appears there.
 5. **Polish.** Settings for the limits, a short "helpers" line in each agent's instructions so they
    know the tools exist, and a /help entry with example prompts.
 
-## Open questions
+## Decisions (2026-10-08)
 
-1. **Default for edits:** read-only helpers by default (proposed), or follow the parent's mode?
-2. **Where an editing helper's work lands:** its own branch to review and merge (proposed), or
-   straight into the parent's worktree when the parent is the only writer?
-3. **Cost visibility:** show each helper's usage on its card, or only a total on the parent?
-4. **Grok's native subagents:** Grok doesn't send subagent sessions over ACP. Show its
-   `spawn_subagent` calls as subagent cards from the tool call alone (status, id, step count,
-   duration from its `<subagent_meta>`), or wait for xAI to support the ACP extension?
+1. **Mode:** helpers follow the parent thread's mode (not read-only by default).
+2. **Edits:** an editing helper works on its own branch, reviewed and merged like a thread.
+3. **Cost:** each helper's usage shows on its card.
+4. **Grok's native subagents:** shown as subagent cards now, from the `spawn_subagent` tool call
+   alone (status, step count, duration from its `<subagent_meta>`). They can't be opened, since
+   Grok doesn't send their steps; switch to real subagent sessions if xAI adopts the ACP extension.
