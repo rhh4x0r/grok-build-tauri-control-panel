@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde_json::json;
 use tracing::{info, warn};
@@ -84,7 +84,6 @@ async fn connect_and_fill(
                 entry.metadata.brain_mode = brain_mode;
                 entry.metadata.status = SessionStatus::Idle;
                 entry.acp_client = Some(client);
-                entry.touch();
             } else {
                 // Session was removed while starting — kill the orphan.
                 let _ = client.shutdown().await;
@@ -131,8 +130,14 @@ impl SessionRegistry {
                             ..
                         }) => {
                             if let Some(mut entry) = sessions.get_mut(&session_id) {
+                                // Starting up or reconnecting isn't activity; a turn and its end are.
+                                let connecting = matches!(status, SessionStatus::Starting)
+                                    || entry.metadata.status == SessionStatus::Starting;
+                                let changed = entry.metadata.status != status;
                                 entry.metadata.status = status;
-                                entry.metadata.last_activity = Utc::now();
+                                if changed && !connecting {
+                                    entry.metadata.last_activity = Utc::now();
+                                }
                             }
                         }
                         Ok(_) => {}
@@ -176,6 +181,13 @@ impl SessionRegistry {
             .get_mut(&id)
             .ok_or(CoreError::SessionNotFound(id))?;
         entry.metadata.label = Some(label.to_string());
+        Ok(())
+    }
+
+    /// Set when the thread last did something (a reconnect restores the saved time).
+    pub fn set_last_activity(&self, id: Uuid, at: DateTime<Utc>) -> Result<()> {
+        let mut entry = self.sessions.get_mut(&id).ok_or(CoreError::SessionNotFound(id))?;
+        entry.metadata.last_activity = at;
         Ok(())
     }
 
@@ -298,7 +310,7 @@ impl SessionRegistry {
             approved_high_risk_mcp: opts.approved_high_risk_mcp.clone(),
             created_at: created_at.unwrap_or(now),
             last_activity: now,
-            label: None,
+            label: opts.label.clone(),
             brain_mode: BrainMode::Fresh,
             parent_thread: opts.parent_thread.clone(),
             subagent: opts.subagent.clone(),
@@ -637,7 +649,6 @@ impl SessionRegistry {
             if enabled {
                 entry.metadata.always_approve = false;
             }
-            entry.touch();
             entry.acp_client.clone()
         };
         if let Some(client) = client {
@@ -699,7 +710,6 @@ impl SessionRegistry {
         entry.metadata.approval_mode = mode;
         entry.metadata.plan_mode = mode == ApprovalMode::Plan;
         entry.metadata.always_approve = mode == ApprovalMode::Yolo;
-        entry.touch();
         Ok(())
     }
 
@@ -726,7 +736,6 @@ impl SessionRegistry {
             if enabled {
                 entry.metadata.plan_mode = false;
             }
-            entry.touch();
             entry.acp_client.clone()
         };
         if let Some(client) = client {

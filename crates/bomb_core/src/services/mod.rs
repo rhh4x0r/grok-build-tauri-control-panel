@@ -898,7 +898,7 @@ pub async fn send_prompt(
                             metadata_json: serde_json::to_string(&snap)
                                 .unwrap_or_else(|_| "{}".into()),
                             created_at: snap.metadata.created_at,
-                            updated_at: Utc::now(),
+                            updated_at: snap.metadata.last_activity,
                             message_count: 0,
                         });
                     }
@@ -1120,6 +1120,9 @@ async fn resume_saved_session(
     // A helper stays tied to the thread that started it.
     opts.parent_thread = extract_meta_string(&rec.metadata_json, "parentThread");
     opts.subagent = serde_json::from_str::<serde_json::Value>(&rec.metadata_json).ok().and_then(|v| v.pointer("/metadata/subagent").cloned());
+    // Keep its name: reconnecting rebuilds the thread's details, and saving them without the
+    // name would leave it "New thread" everywhere.
+    opts.label = extract_meta_string(&rec.metadata_json, "label");
     if opts.parent_thread.is_none() {
         if let Some(server) = crate::helpers::mcp_server(state, id) {
             opts.mcp_servers.push(server);
@@ -1183,6 +1186,8 @@ async fn resume_saved_session(
         .resume_session(id, &rec.cwd, opts, Some(rec.created_at), connect_opts)
         .await
         .map_err(err)?;
+    // Reconnecting isn't activity: the thread keeps its place in the list.
+    let _ = state.registry.set_last_activity(id, rec.updated_at);
 
     let msg = match brain {
         grok_control_core::BrainMode::FullBrain => {
@@ -2308,7 +2313,9 @@ async fn persist_session(state: &AppState, id: Uuid) {
             acp_session_id: snap.metadata.acp_session_id.clone(),
             metadata_json,
             created_at: snap.metadata.created_at,
-            updated_at: Utc::now(),
+            // When the thread last did something, not when its details were saved: saving
+            // after a reconnect must not move it to the top of the list.
+            updated_at: snap.metadata.last_activity,
             message_count: 0,
         };
         let _ = state.persistence.upsert_session(&rec);
@@ -3018,6 +3025,7 @@ mod speed_selection_tests {
 pub mod model_catalog;
 
 pub mod model_suggestions;
+pub mod speech_key;
 
 #[cfg(test)]
 mod slug_tests {

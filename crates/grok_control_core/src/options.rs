@@ -58,6 +58,8 @@ pub struct SpawnOptions {
     /// Set for a helper: the thread that started it, and what it is (see `SessionMetadata`).
     pub parent_thread: Option<String>,
     pub subagent: Option<serde_json::Value>,
+    /// The thread's name, carried over when an existing thread is reconnected.
+    pub label: Option<String>,
 }
 
 impl Default for SpawnOptions {
@@ -93,6 +95,7 @@ impl Default for SpawnOptions {
             effort: None,
             parent_thread: None,
             subagent: None,
+            label: None,
         }
     }
 }

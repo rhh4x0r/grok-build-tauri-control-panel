@@ -327,20 +327,45 @@ impl SidebarView {
         // Only the few most recently active open threads show until "View more" is opened.
         let more_key = format!("more:{}", g.root);
         let show_all = self.expanded.contains(&more_key);
+        // Open rows, newest first: a thread in its own worktree is that worktree's row; threads
+        // that share a folder (the project's own checkout, or inline) each get a row of their own,
+        // so a recent one never hides behind an older one's name.
+        let entries: Vec<OpenRow> = {
+            let m = self.model.read(cx);
+            let mut entries: Vec<(crate::models::app::SortKey, OpenRow)> = Vec::new();
+            for w in rows.iter().filter(|w| w.inline || w.archived_at.is_none()) {
+                let live: Vec<Uuid> = w.threads.iter().filter_map(|t| Uuid::parse_str(t).ok()).filter(|id| !m.archived.contains(id)).collect();
+                if live.is_empty() { continue; }
+                if !w.inline && w.threads.len() == 1 {
+                    let t = m.threads.get(&live[0]).map(|t| t.read(cx));
+                    let key = crate::models::app::SortKey {
+                        name: t.map(|t| t.title()).unwrap_or_else(|| w.name.clone()),
+                        updated: t.map(|t| t.meta.updated_at.clone()).unwrap_or_default(),
+                        created: w.created_at.clone(),
+                    };
+                    entries.push((key, OpenRow::Workspace(w.id.clone())));
+                    continue;
+                }
+                for id in live {
+                    let Some(t) = m.threads.get(&id).map(|t| t.read(cx)) else { continue };
+                    let key = crate::models::app::SortKey { name: t.title(), updated: t.meta.updated_at.clone(), created: t.meta.created_at.clone() };
+                    entries.push((key, OpenRow::Thread(id)));
+                }
+            }
+            crate::models::app::sort_rows(&mut entries, m.sidebar_sort);
+            entries.into_iter().map(|(_, e)| e).collect()
+        };
         let hidden: std::collections::HashSet<String> = {
             let m = self.model.read(cx);
             let updated = |id: &Uuid| m.threads.get(id).map(|t| t.read(cx).meta.updated_at.clone()).unwrap_or_default();
-            let mut open: Vec<(String, bool, String)> = Vec::new();
-            for w in rows.iter().filter(|w| w.archived_at.is_none()) {
-                let live: Vec<Uuid> = w.threads.iter().filter_map(|t| Uuid::parse_str(t).ok()).filter(|id| !m.archived.contains(id)).collect();
-                if live.is_empty() { continue; }
-                if w.inline {
-                    for id in live { open.push((updated(&id), m.selected == Some(id), id.to_string())); }
-                } else {
-                    let current = m.active_workspace.as_deref() == Some(&w.id);
-                    open.push((live.iter().map(updated).max().unwrap_or_default(), current, w.id.clone()));
+            let open: Vec<(String, bool, String)> = entries.iter().map(|e| match e {
+                OpenRow::Thread(id) => (updated(id), m.selected == Some(*id), id.to_string()),
+                OpenRow::Workspace(wid) => {
+                    let latest = rows.iter().find(|w| &w.id == wid).into_iter().flat_map(|w| w.threads.iter())
+                        .filter_map(|t| Uuid::parse_str(t).ok()).map(|id| updated(&id)).max().unwrap_or_default();
+                    (latest, m.active_workspace.as_deref() == Some(wid), wid.clone())
                 }
-            }
+            }).collect();
             crate::models::app::hidden_rows(open, VISIBLE_OPEN_THREADS)
         };
         let hidden_count = hidden.len();
@@ -370,7 +395,23 @@ impl SidebarView {
                 );
             }
             if archived && !archive_open { continue; }
-            for w in rows.iter().filter(|w| !w.inline && w.archived_at.is_some() == archived) {
+            let shown: Vec<OpenRow> = if archived {
+                rows.iter().filter(|w| !w.inline && w.archived_at.is_some()).map(|w| OpenRow::Workspace(w.id.clone())).collect()
+            } else {
+                entries.clone()
+            };
+            for entry in shown {
+                let wid = match entry {
+                    OpenRow::Thread(id) => {
+                        if hidden.contains(&id.to_string()) { continue; }
+                        if let Some(t) = self.model.read(cx).threads.get(&id).cloned() {
+                            group = group.child(self.thread_row(id, &t, "", self.model.read(cx).selected == Some(id), ui, cx));
+                        }
+                        continue;
+                    }
+                    OpenRow::Workspace(wid) => wid,
+                };
+                let Some(w) = rows.iter().find(|w| w.id == wid) else { continue };
                 // These rows stand in for conversations. Empty workspaces remain
                 // available in the project overview; archived threads live below.
                 if !w.threads.iter().filter_map(|id| Uuid::parse_str(id).ok())
@@ -521,16 +562,6 @@ impl SidebarView {
                 }
             }
         }
-        for w in rows.iter().filter(|w| w.inline) {
-            for id in &w.threads {
-                if let Ok(id) = Uuid::parse_str(id) {
-                    if self.model.read(cx).archived.contains(&id) || hidden.contains(&id.to_string()) { continue; }
-                    if let Some(t) = self.model.read(cx).threads.get(&id).cloned() {
-                        group = group.child(self.thread_row(id, &t, "", self.model.read(cx).selected == Some(id), ui, cx));
-                    }
-                }
-            }
-        }
         if hidden_count > 0 {
             let hover = ui.hover;
             group = group.child(
@@ -620,12 +651,16 @@ impl SidebarView {
         } else {
             "idle"
         };
-        let branch = tm
-            .meta
-            .worktree
-            .as_deref()
-            .and_then(|w| std::path::Path::new(w).file_name())
-            .map(|s| s.to_string_lossy().to_string());
+        // The branch, as the worktree row shows it; the worktree's folder name only when the
+        // thread's workspace isn't known.
+        let id_text = id.to_string();
+        let branch = self.model.read(cx).workspaces.iter()
+            .find(|w| w.threads.contains(&id_text))
+            .map(|w| w.branch.clone())
+            .filter(|b| !b.is_empty())
+            .or_else(|| tm.meta.worktree.as_deref()
+                .and_then(|w| std::path::Path::new(w).file_name())
+                .map(|s| s.to_string_lossy().to_string()));
         // Server and Mac threads of one project sit together; say where each one runs.
         let thread_root = tm.meta.project_root.clone().unwrap_or_else(|| tm.meta.cwd.clone());
         let runs_on_server = crate::remote::is_server_root(&thread_root);
@@ -1154,6 +1189,13 @@ fn usage_bar(backend: &str, ix: usize, w: &bomb_core::usage::UsageWindow, ui: &U
                 .text_color(ui.text_faint)
                 .child(format!("{}%", pct.round() as i64)),
         )
+}
+
+/// One open row in a project: a worktree standing for its thread, or a thread of its own.
+#[derive(Clone)]
+enum OpenRow {
+    Workspace(String),
+    Thread(Uuid),
 }
 
 /// Shared by ordinary rows, workspace rows and the open thread's overflow menu.

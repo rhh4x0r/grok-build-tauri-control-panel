@@ -13,7 +13,7 @@ fn valid(key: &str) -> bool {
     !key.trim().is_empty() && !key.contains(['\r', '\n'])
 }
 
-fn protect_database(db: &Persistence) -> Result<(), String> {
+pub(crate) fn protect_database(db: &Persistence) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

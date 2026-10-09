@@ -43,7 +43,10 @@ fn build(name: &str, sources: &[PathBuf], arch: &str, out: &Path, bin_dir: &Path
         .output();
     match result {
         Ok(o) if o.status.success() => {
-            if let Err(e) = std::fs::copy(&built, &helper) {
+            // A new file, swapped in: copying over the old one in place keeps macOS's cached code
+            // signature for it, and the new binary is killed as soon as it starts.
+            let staged = helper.with_extension("new");
+            if let Err(e) = std::fs::copy(&built, &staged).and_then(|_| std::fs::rename(&staged, &helper)) {
                 println!("cargo:warning={name} built but not copied: {e}");
             }
         }

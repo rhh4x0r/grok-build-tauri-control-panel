@@ -1047,3 +1047,14 @@ All additive; `PROTOCOL_VERSION` stays 1 and a Mac that never calls the new meth
   - Reply footer (time, copy, speaker), mini player above the composer, and a Voice settings sheet from a gear on the thread list.
 - Older systems: everything is gated (Personal Voice on iOS 17/macOS 14; the voices-changed notice on macOS 14). The Mac helper targets macOS 13, and read-aloud hides itself where the helper can't run.
 - Checked: the engine on this Mac, muted (render, play, seek, 2×, end, cache); the iPhone player in the simulator on a mock reply; 295 tests; workspace clippy clean. Not checked: hearing it, the Mac player and Voice page on screen, and the lock-screen controls on a real iPhone.
+
+## 2026-10-09 — Read-aloud on Fish Audio; thread names, sorting, sidebar rows
+
+- Read-aloud now uses Fish Audio instead of Apple's voices (dictation still uses Apple's SpeechAnalyzer).
+  - Shared Swift engine (`SpeechEngine.swift`, iPhone + Mac `bomb-speak`): `FishAudio` client. `POST /v1/tts` with model `s2.1-pro-free`, raw 16-bit PCM at 44.1 kHz, streamed into the same float cache, so the player, timeline, seek and speed are unchanged. The first sentence is its own request (quick start), then ~400-character chunks.
+  - Voices: `GET /model` lists Recommended (Fish Official, in your language), Popular (by score, searchable), and Mine. Previews play each voice's sample recording. The default voice is "Sarah". Errors are put into words (bad key, out of credit, rate limited).
+  - Key: Mac settings table at `settings/credentials/fish_audio` (owner-only DB, never over RPC, never logged); iPhone Keychain (this device only). Apple voice ids saved earlier are dropped.
+- Thread names survive reconnects (`SpawnOptions.label` carried on resume); lost names restored from backups.
+- Thread "last active" is real activity only: reconnecting, saving details and mode switches no longer bump it; 75 threads' times repaired from their transcripts.
+- Sidebar: threads sharing a folder (project checkout, inline) get their own rows sorted by their own time instead of hiding in "N conversations"; thread rows show the real branch.
+- Checked: helper voice list and error path; iPhone Voice sheet in the simulator against live Fish data; tests and workspace clippy. Not checked: speech with a real key.

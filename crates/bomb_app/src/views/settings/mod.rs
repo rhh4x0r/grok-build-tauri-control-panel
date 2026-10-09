@@ -877,9 +877,10 @@ fn render_servers(cx: &mut App) -> AnyElement {
 fn voice_page() -> SettingPage {
     use crate::models::read_aloud::{read_aloud, RATES};
     SettingPage::new("Voice")
-        .description("Read replies aloud with your Mac's own voices: on this Mac, offline, free. Use the speaker under a reply.")
+        .description("Read replies aloud with Fish Audio voices. Add your Fish Audio API key, pick a voice, then use the speaker under a reply.")
         .group(
             SettingGroup::new()
+                .item(SettingItem::render(|_, window, cx| render_fish_key(window, cx)))
                 .item(
                     SettingItem::new(
                         "Speed",
@@ -891,83 +892,138 @@ fn voice_page() -> SettingPage {
                     )
                     .description("Where reading starts; the player changes it too."),
                 )
-                .item(SettingItem::render(|_, _, cx| render_voices(cx))),
+                .item(SettingItem::render(|_, window, cx| render_voices(window, cx))),
         )
 }
 
-/// The voices, best first in your language, each with a preview; plus how to get better ones.
-fn render_voices(cx: &mut App) -> AnyElement {
+/// The Fish Audio key: paste and save, or remove the saved one.
+fn render_fish_key(window: &mut Window, cx: &mut App) -> AnyElement {
+    use gpui_kit::component::input::InputState;
     let ui = Ui::of(cx);
     let model = crate::models::read_aloud::read_aloud(cx);
-    let (available, voices, chosen, needs_better, personal) = {
-        let m = model.read(cx);
-        (m.available, m.voices.clone(), m.chosen_voice(), m.needs_better_voice, m.personal_voice)
+    let input = match model.read(cx).key_input.clone() {
+        Some(input) => input,
+        None => {
+            let input = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Paste your Fish Audio API key"));
+            model.update(cx, |m, _| m.key_input = Some(input.clone()));
+            input
+        }
     };
+    if model.read(cx).clear_key_input {
+        input.update(cx, |i, cx| i.set_value("", window, cx));
+        model.update(cx, |m, _| m.clear_key_input = false);
+    }
+    let saved = model.read(cx).api_key.is_some();
+    let checking = model.read(cx).checking_key();
+    let key_error = model.read(cx).key_error.clone();
+    let caption = |text: &'static str| div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(text);
+    let (save_model, save_input, remove_model) = (model.clone(), input.clone(), model.clone());
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .w_full()
+        .child(div().font_weight(FontWeight::MEDIUM).text_color(ui.text).child("Fish Audio API key"))
+        .child(div().flex().items_center().gap_2()
+            .child(div().flex_1().child(Input::new(&input)))
+            .child(Button::new("fish-key-save").primary().small().label(if checking { "Checking…" } else { "Save" }).disabled(checking).on_click(move |_, _, cx| {
+                let key = save_input.read(cx).value().to_string();
+                if key.trim().is_empty() { return; }
+                save_model.update(cx, |m, cx| m.save_api_key(key, cx));
+            }))
+            .when(saved, |el| el.child(Button::new("fish-key-remove").ghost().small().label("Remove").on_click(move |_, _, cx| {
+                remove_model.update(cx, |m, cx| m.remove_api_key(cx));
+            }))))
+        .when_some(key_error, |el, error| el.child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.danger).child(error)))
+        .child(if saved { caption("A key is saved on this Mac. Replies use the free s2.1-pro-free model.") } else { caption("No key yet. Make one at fish.audio → API Keys; the free developer tier works.") })
+        .child(div().flex().child(Button::new("fish-key-get").ghost().small().label("Get a key at fish.audio").on_click(|_, _, cx| cx.open_url("https://fish.audio/app/api-keys/"))))
+        .into_any_element()
+}
+
+/// The voice picker: Recommended / Popular / Mine, a search, and a preview on each voice.
+fn render_voices(window: &mut Window, cx: &mut App) -> AnyElement {
+    use crate::speech::VoiceList;
+    use gpui_kit::component::input::InputState;
+    let ui = Ui::of(cx);
+    let model = crate::models::read_aloud::read_aloud(cx);
     let caption = |text: String| div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(text);
-    if !available {
-        return caption("Read-aloud isn't available on this Mac.".into()).into_any_element();
+    if !model.read(cx).available {
+        return caption("Read-aloud isn't part of this build.".into()).into_any_element();
     }
-    if voices.is_empty() {
+    let search = match model.read(cx).search_input.clone() {
+        Some(input) => input,
+        None => {
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search voices"));
+            model.update(cx, |m, _| m.search_input = Some(input.clone()));
+            input
+        }
+    };
+    // The search follows what's typed (each new search replaces the one before).
+    let typed = search.read(cx).value().to_string();
+    if typed != model.read(cx).query {
+        model.update(cx, |m, cx| m.set_query(typed, cx));
+    }
+    let (voices, list, loading, error, (chosen, chosen_name), previewing) = {
+        let m = model.read(cx);
+        (m.voices.clone(), m.voice_list, m.voices_loading, m.voices_error.clone(), m.chosen_voice(), m.previewing.clone())
+    };
+    if voices.is_empty() && !loading && error.is_none() {
         model.update(cx, |m, cx| m.refresh_voices(cx));
-        return caption("Looking for voices…".into()).into_any_element();
     }
+    let tab = |id: &'static str, label: &'static str, which: VoiceList| {
+        let pick = model.clone();
+        let b = Button::new(id).small().label(label).on_click(move |_, _, cx| pick.update(cx, |m, cx| m.set_voice_list(which, cx)));
+        if list == which { b.primary() } else { b.ghost() }
+    };
     let hover = ui.hover;
     let selected_bg = ui.selected_bg();
-    let mut list = div().flex().flex_col().gap(px(2.)).w_full();
-    let mut last_group = String::new();
+    let mut rows = div().flex().flex_col().gap(px(2.)).w_full();
     for v in voices.iter() {
-        let group = if v.personal { "Personal Voice".to_string() } else {
-            match v.quality.as_str() { "premium" => "Premium", "enhanced" => "Enhanced", _ => "Default" }.to_string()
-        };
-        if group != last_group {
-            list = list.child(div().pt_2().pb_1().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint).child(group.clone()));
-            last_group = group;
-        }
-        let is_chosen = chosen.as_deref() == Some(v.id.as_str());
+        let is_chosen = chosen == v.id;
         let (pick, preview) = (model.clone(), model.clone());
-        let (id_pick, id_preview) = (v.id.clone(), v.id.clone());
-        list = list.child(
+        let (voice_pick, voice_preview) = (v.clone(), v.clone());
+        let detail = [v.author.clone(), v.languages.join(", ")].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
+        rows = rows.child(
             div()
                 .id(SharedString::from(format!("voice-{}", v.id)))
                 .flex()
                 .items_center()
                 .gap_2()
                 .px_2()
-                .h(px(32.))
+                .py(px(5.))
                 .rounded(px(8.))
                 .cursor_pointer()
                 .when(is_chosen, move |el| el.bg(selected_bg))
                 .when(!is_chosen, move |el| el.hover(move |s| s.bg(hover)))
-                .on_click(move |_, _, cx| pick.update(cx, |m, cx| m.set_voice(id_pick.clone(), cx)))
-                .child(div().size(px(14.)).text_color(ui.accent).when(is_chosen, |el| el.child(gpui_kit::component::Icon::from(gpui_kit::assets::IconName::Check))))
-                .child(div().flex_1().min_w_0().text_color(ui.text).child(v.name.clone()))
-                .child(div().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint).child(v.language.clone()))
-                .child(
-                    Button::new(SharedString::from(format!("voice-preview-{}", v.id))).ghost().small().icon(gpui_kit::assets::IconName::Play).tooltip("Preview")
-                        .on_click(move |_, _, cx| preview.update(cx, |m, cx| m.preview(&id_preview, cx))),
-                ),
+                .on_click(move |_, _, cx| pick.update(cx, |m, cx| m.set_voice(&voice_pick, cx)))
+                .child(div().size(px(14.)).flex_shrink_0().text_color(ui.accent).when(is_chosen, |el| el.child(gpui_kit::component::Icon::from(gpui_kit::assets::IconName::Check))))
+                .child(div().flex().flex_col().flex_1().min_w_0()
+                    .child(div().text_color(ui.text).overflow_hidden().text_ellipsis().whitespace_nowrap().child(v.name.clone()))
+                    .child(div().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint).overflow_hidden().text_ellipsis().whitespace_nowrap().child(detail)))
+                .child({
+                    let is_previewing = previewing.as_deref() == Some(v.id.as_str());
+                    Button::new(SharedString::from(format!("voice-preview-{}", v.id))).ghost().small()
+                        .icon(if is_previewing { gpui_kit::assets::IconName::Pause } else { gpui_kit::assets::IconName::Play })
+                        .tooltip(if is_previewing { "Stop preview" } else { "Preview" })
+                        .on_click(move |_, _, cx| preview.update(cx, |m, cx| m.toggle_preview(&voice_preview, cx)))
+                }),
         );
     }
-    let mut page = div().flex().flex_col().gap_3().w_full();
-    if needs_better {
-        page = page.child(
-            div().flex().flex_col().gap_2().p_3().rounded(px(10.)).border_1().border_color(ui.border)
-                .child(div().font_weight(FontWeight::MEDIUM).text_color(ui.text).child("Get a better voice"))
-                .child(caption("Only basic voices are installed for your language. Enhanced and Premium voices sound far more natural. On your Mac: System Settings → Accessibility → Spoken Content → System Voice → Manage Voices, then download one. It shows up here on its own.".into()))
-                .child(div().flex().child(Button::new("open-spoken-content").outline().small().label("Open Spoken Content settings").on_click(|_, _, cx| {
-                    cx.open_url("x-apple.systempreferences:com.apple.preference.universalaccess?SpokenContent");
-                }))),
-        );
+    let mut page = div().flex().flex_col().gap_3().w_full()
+        .child(div().text_color(ui.text).child(format!("Reading with {chosen_name}")))
+        .child(div().flex().items_center().gap_1()
+            .child(tab("voices-recommended", "Recommended", VoiceList::Recommended))
+            .child(tab("voices-popular", "Popular", VoiceList::Popular))
+            .child(tab("voices-mine", "My voices", VoiceList::Mine)))
+        .child(Input::new(&search));
+    if let Some(error) = error {
+        page = page.child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.danger).child(error));
+    } else if loading && voices.is_empty() {
+        page = page.child(caption("Looking for voices…".into()));
+    } else if voices.is_empty() {
+        page = page.child(caption(if list == VoiceList::Mine { "No voices of your own yet. Clone one at fish.audio and it shows up here.".into() } else { "No voices match.".into() }));
     }
-    let personal_model = model.clone();
-    page = page
-        .child(div().flex().items_center().gap_2()
-            .child(Button::new("personal-voice").outline().small().label("Use my Personal Voice").on_click(move |_, _, cx| {
-                personal_model.update(cx, |m, cx| m.request_personal_voice(cx));
-            }))
-            .when(personal == Some(false), |el| el.child(caption("Not allowed, or no Personal Voice on this Mac (macOS 14 and later).".into()))))
-        .child(list);
-    page.into_any_element()
+    page.child(rows).into_any_element()
 }
 
 // ── Phone ───────────────────────────────────────────────────────────────

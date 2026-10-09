@@ -1,105 +1,143 @@
 import AVFoundation
 import Foundation
 
-/// Reading replies aloud with Apple's on-device voices: free, offline, no network speech.
+/// Reading replies aloud with Fish Audio voices (fish.audio, with the person's own API key).
 ///
-/// `AVSpeechSynthesizer.speak` has no timeline, so this doesn't play through it. Sentences are
-/// rendered with `write(_:toBufferCallback:)` into a cached audio file (raw 32-bit float, mono),
-/// playback starts once the first sentence is in and rendering stays ahead of the playhead, and an
-/// `AVAudioEngine` with a time-pitch unit plays the file, so seeking is exact and speed keeps the
-/// voice's pitch. Shared with the Mac's helper (`tools/bomb-speak`); keep it free of app code.
+/// Speech arrives over the network as raw 16-bit audio, a few sentences per request, and is
+/// written into a cached audio file (raw 32-bit float, mono); playback starts once the first
+/// sentences are in and fetching stays ahead of the playhead, and an `AVAudioEngine` with a
+/// time-pitch unit plays the file, so seeking is exact and speed keeps the voice's pitch. Shared
+/// with the Mac's helper (`tools/bomb-speak`); keep it free of app code.
 
-/// A voice to read with.
+/// A Fish Audio voice to read with.
 struct SpeechVoiceInfo: Codable, Hashable {
     let id: String
     let name: String
-    let language: String
-    /// "premium", "enhanced" or "default".
-    let quality: String
-    let personal: Bool
+    let author: String
+    let languages: [String]
+    /// A recording of the voice, for a preview; none when the voice has no samples.
+    let sample: String?
+    let likes: Int
 }
 
-enum SpeechVoices {
-    /// Installed voices: the person's language first, then by quality and name; novelty voices left out.
-    static func all() -> [SpeechVoiceInfo] {
-        let language = Locale.preferredLanguages.first.map { String($0.prefix(2)) } ?? "en"
-        let voices = AVSpeechSynthesisVoice.speechVoices().filter { voice in
-            if #available(iOS 17.0, macOS 14.0, *), voice.voiceTraits.contains(.isNoveltyVoice) { return false }
-            return true
+enum FishAudio {
+    /// Free on Fish Audio's developer tier.
+    static let defaultModel = "s2.1-pro-free"
+    static let sampleRate: Double = 44100
+    private static let base = URL(string: "https://api.fish.audio")!
+
+    struct Failure: Error, LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+
+    /// Fish Audio's own voices: clean, made for reading.
+    static let officialAuthor = "d8b0991f96b44e489422ca2ddf0bd31d"
+    /// "Sarah" (Fish Official): read with until another voice is chosen.
+    static let defaultVoice = "933563129e564b19a115bedd57b7406a"
+
+    /// The person's language ("en"), for the voice lists.
+    static var language: String { Locale.preferredLanguages.first.map { String($0.prefix(2)) } ?? "en" }
+
+    /// Voices for the picker. `list` is "recommended" (Fish Audio's own, in the person's language),
+    /// "popular" (everyone's, most used first, matching `query`), or "mine" (the person's own).
+    static func voices(key: String, list: String, query: String = "") async throws -> [SpeechVoiceInfo] {
+        var url = URLComponents(url: base.appendingPathComponent("model"), resolvingAgainstBaseURL: false)!
+        var items = [URLQueryItem(name: "page_size", value: "60")]
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch list {
+        case "mine":
+            items.append(URLQueryItem(name: "self", value: "true"))
+        case "popular":
+            items.append(URLQueryItem(name: "sort_by", value: "score"))
+            if trimmed.isEmpty { items.append(URLQueryItem(name: "language", value: language)) }
+        default:
+            items.append(URLQueryItem(name: "author_id", value: officialAuthor))
+            items.append(URLQueryItem(name: "language", value: language))
         }
-        let rank = { (q: String) in q == "premium" ? 0 : q == "enhanced" ? 1 : 2 }
-        return voices.map(info).sorted { a, b in
-            let (la, lb) = (a.language.hasPrefix(language), b.language.hasPrefix(language))
-            if la != lb { return la }
-            if a.personal != b.personal { return a.personal }
-            if rank(a.quality) != rank(b.quality) { return rank(a.quality) < rank(b.quality) }
-            if legacy(a) != legacy(b) { return !legacy(a) }
-            return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+        if !trimmed.isEmpty { items.append(URLQueryItem(name: "title", value: trimmed)) }
+        url.queryItems = items
+        var request = URLRequest(url: url.url!)
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try check(response, body: data)
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rows = object["items"] as? [[String: Any]] else { throw Failure(message: "Fish Audio sent an unexpected answer.") }
+        return rows.compactMap { row in
+            guard let id = row["_id"] as? String, let title = row["title"] as? String else { return nil }
+            if let state = row["state"] as? String, state != "trained" { return nil }
+            if let type = row["type"] as? String, type != "tts" { return nil }
+            let samples = row["samples"] as? [[String: Any]] ?? []
+            let author = (row["author"] as? [String: Any])?["nickname"] as? String ?? ""
+            return SpeechVoiceInfo(id: id, name: title.trimmingCharacters(in: .whitespacesAndNewlines), author: author,
+                                   languages: row["languages"] as? [String] ?? [],
+                                   sample: samples.compactMap { $0["audio"] as? String }.first { !$0.isEmpty },
+                                   likes: row["like_count"] as? Int ?? 0)
         }
     }
 
-    /// The old MacinTalk voices (Fred, Junior, Kathy, Ralph…): installed everywhere, robotic. Last.
-    static func legacy(_ voice: SpeechVoiceInfo) -> Bool {
-        voice.id.hasPrefix("com.apple.speech.synthesis.voice")
-    }
-
-    static func info(_ voice: AVSpeechSynthesisVoice) -> SpeechVoiceInfo {
-        let quality: String
-        switch voice.quality {
-        case .premium: quality = "premium"
-        case .enhanced: quality = "enhanced"
-        default: quality = "default"
+    /// Speech for `text` as it's made: raw 16-bit little-endian mono at `sampleRate`, or `format`.
+    static func speech(_ text: String, voice: String?, key: String, model: String, format: String = "pcm") async throws -> URLSession.AsyncBytes {
+        var request = URLRequest(url: base.appendingPathComponent("v1/tts"))
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(model, forHTTPHeaderField: "model")
+        var body: [String: Any] = ["text": text, "format": format, "latency": "balanced"]
+        if format == "pcm" { body["sample_rate"] = Int(sampleRate) }
+        if let voice, !voice.isEmpty { body["reference_id"] = voice }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+            var data = Data()
+            for try await byte in bytes { data.append(byte); if data.count > 4096 { break } }
+            try check(response, body: data)
         }
-        var personal = false
-        if #available(iOS 17.0, macOS 14.0, *) { personal = voice.voiceTraits.contains(.isPersonalVoice) }
-        return SpeechVoiceInfo(id: voice.identifier, name: voice.name, language: voice.language, quality: quality, personal: personal)
+        return bytes
     }
 
-    /// The best installed voice for the person's language, their own region first ("en-US" before "en-GB").
-    static func best() -> SpeechVoiceInfo? {
-        let preferred = (Locale.preferredLanguages.first ?? "en-US").replacingOccurrences(of: "_", with: "-")
-        let language = String(preferred.prefix(2))
-        let voices = all().filter { !$0.personal }
-        let rank = { (q: String) in q == "premium" ? 0 : q == "enhanced" ? 1 : 2 }
-        let mine = voices.filter { $0.language.hasPrefix(language) }
-            .sorted { (rank($0.quality), legacy($0) ? 1 : 0, $0.language == preferred ? 0 : 1) < (rank($1.quality), legacy($1) ? 1 : 0, $1.language == preferred ? 0 : 1) }
-        return mine.first ?? voices.first
-    }
-
-    /// The chosen voice, or the best one when it's gone (deleted, or never chosen).
-    static func resolve(_ id: String?) -> AVSpeechSynthesisVoice? {
-        if let id, let voice = AVSpeechSynthesisVoice(identifier: id) { return voice }
-        return best().flatMap { AVSpeechSynthesisVoice(identifier: $0.id) }
-    }
-
-    /// Everything the voice picker needs from one scan of the installed voices (slow: call it off the
-    /// main thread): the voices in order, the best one, and whether a better one is worth getting.
-    static func scan() -> (voices: [SpeechVoiceInfo], best: String?, needsBetter: Bool) {
-        let voices = all()
-        let preferred = (Locale.preferredLanguages.first ?? "en-US").replacingOccurrences(of: "_", with: "-")
-        let language = String(preferred.prefix(2))
-        let rank = { (q: String) in q == "premium" ? 0 : q == "enhanced" ? 1 : 2 }
-        let mine = voices.filter { !$0.personal && $0.language.hasPrefix(language) }
-        let key = { (v: SpeechVoiceInfo) in (rank(v.quality), legacy(v) ? 1 : 0, v.language == preferred ? 0 : 1) }
-        let best = mine.min { key($0) < key($1) }
-        return (voices, (best ?? voices.first { !$0.personal })?.id, !mine.contains { $0.quality != "default" })
-    }
-
-    /// True when only default-quality voices are installed for the person's language.
-    static var needsBetterVoice: Bool {
-        let language = Locale.preferredLanguages.first.map { String($0.prefix(2)) } ?? "en"
-        return !all().contains { $0.language.hasPrefix(language) && $0.quality != "default" }
-    }
-
-    /// Ask to use the person's Personal Voice; `done(true)` once allowed.
-    static func requestPersonalVoice(_ done: @escaping (Bool) -> Void) {
-        if #available(iOS 17.0, macOS 14.0, *) {
-            AVSpeechSynthesizer.requestPersonalVoiceAuthorization { status in
-                DispatchQueue.main.async { done(status == .authorized) }
-            }
-        } else {
-            done(false)
+    /// Check a key with Fish Audio before it's saved: throws, in words, when it's not accepted.
+    static func validate(key: String) async throws {
+        var request = URLRequest(url: base.appendingPathComponent("wallet/self/api-credit"))
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 15
+        let data: Data, response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            throw Failure(message: "Couldn't reach Fish Audio to check the key: \(error.localizedDescription)")
         }
+        if let http = response as? HTTPURLResponse, http.statusCode == 401 || http.statusCode == 403 {
+            throw Failure(message: "Fish Audio didn't accept this API key. Copy it again from fish.audio → API Keys.")
+        }
+        try check(response, body: data)
+    }
+
+    /// Throws what went wrong, in words, for anything but a success.
+    static func check(_ response: URLResponse, body: Data) throws {
+        guard let http = response as? HTTPURLResponse, http.statusCode != 200 else { return }
+        let said = (try? JSONSerialization.jsonObject(with: body) as? [String: Any])
+            .flatMap { ($0["message"] as? String) ?? ($0["detail"] as? String) }
+        switch http.statusCode {
+        case 401, 403: throw Failure(message: "Fish Audio didn't accept the API key. Check it in Settings → Voice.")
+        case 402: throw Failure(message: "Your Fish Audio account is out of credit.")
+        case 429: throw Failure(message: "Fish Audio is busy (rate limited). Try again in a moment.")
+        default: throw Failure(message: "Fish Audio: \(said ?? "error \(http.statusCode)")")
+        }
+    }
+
+    /// Sentences gathered into requests: the first on its own, so reading starts quickly, then a
+    /// few hundred characters at a time, so the voice keeps its flow and requests stay few.
+    static func chunks(_ sentences: [String]) -> [String] {
+        var out: [String] = []
+        var current = ""
+        for (index, sentence) in sentences.enumerated() {
+            if index == 0 { out.append(sentence); continue }
+            if !current.isEmpty && current.count + sentence.count > 400 { out.append(current); current = "" }
+            current += (current.isEmpty ? "" : " ") + sentence
+        }
+        if !current.isEmpty { out.append(current) }
+        return out
     }
 }
 
@@ -126,23 +164,31 @@ struct SpeechStatus: Equatable {
     }
 }
 
-final class SpeechPlayer {
+/// Its state is only touched on `queue`, which makes it safe to use from any thread.
+final class SpeechPlayer: @unchecked Sendable {
     /// Called on the main queue whenever the status changes, and several times a second while playing.
     var onChange: ((SpeechStatus) -> Void)?
+    /// Called on the main queue with the voice being previewed, and nil once the preview ends.
+    var onPreview: ((String?) -> Void)?
 
     private let queue = DispatchQueue(label: "bomb.speech")
     private let engine = AVAudioEngine()
     private let node = AVAudioPlayerNode()
     private let pitch = AVAudioUnitTimePitch()
     private var connectedRate: Double = 0
-    private var synthesizer = AVSpeechSynthesizer()
-    private var previewer = AVSpeechSynthesizer()
+    /// Fetching the piece in play, and the preview playing.
+    private var fetch: Task<Void, Never>?
+    private var previewer: AVPlayer?
+    private var previewTask: Task<Void, Never>?
+    private var previewEnd: NSObjectProtocol?
+    /// The voice being previewed (touched on the main queue only).
+    private(set) var previewing: String?
     private var ticker: DispatchSourceTimer?
 
     // The piece in play.
     private var key = ""
     private var file: URL?
-    private var sampleRate: Double = 22050
+    private var sampleRate: Double = FishAudio.sampleRate
     private var renderedFrames: AVAudioFramePosition = 0
     private var complete = false
     private var offsets: [Double] = []
@@ -175,7 +221,8 @@ final class SpeechPlayer {
 
     /// Read `sentences` aloud from `from` seconds. `key` names the rendering in the cache (message,
     /// voice and text), so playing it again starts at once.
-    func play(key: String, sentences: [String], voiceId: String?, rate: Float, from: Double = 0) {
+    func play(key: String, sentences: [String], voiceId: String?, apiKey: String, model: String = FishAudio.defaultModel, rate: Float, from: Double = 0) {
+        stopPreview()
         queue.async { [self] in
             stopLocked()
             generation += 1
@@ -187,7 +234,8 @@ final class SpeechPlayer {
             let audio = dir.appendingPathComponent("\(key).f32")
             let sidecar = dir.appendingPathComponent("\(key).json")
             file = audio
-            totalSentences = sentences.count
+            let chunks = FishAudio.chunks(sentences)
+            totalSentences = chunks.count
             if let cached = Self.readSidecar(sidecar), cached.complete, let size = try? FileManager.default.attributesOfItem(atPath: audio.path)[.size] as? Int, size == Int(cached.frames) * 4 {
                 sampleRate = cached.sampleRate
                 renderedFrames = cached.frames
@@ -198,7 +246,8 @@ final class SpeechPlayer {
                 renderedFrames = 0
                 offsets = []
                 complete = false
-                render(sentences, voice: SpeechVoices.resolve(voiceId), to: audio, sidecar: sidecar, generation: generation)
+                sampleRate = FishAudio.sampleRate
+                render(chunks, voice: voiceId, apiKey: apiKey, model: model, to: audio, sidecar: sidecar, generation: generation)
             }
             startFrame = AVAudioFramePosition(max(0, from) * sampleRate)
             restartFrom = startFrame
@@ -271,12 +320,57 @@ final class SpeechPlayer {
         }
     }
 
-    /// A short sample in `voiceId`, spoken straight away.
-    func preview(voiceId: String, text: String = "Hi, this is how your replies will sound.") {
-        previewer.stopSpeaking(at: .immediate)
-        let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = AVSpeechSynthesisVoice(identifier: voiceId)
-        previewer.speak(utterance)
+    /// Hear a voice: its sample recording when it has one, else a short line made in it.
+    func preview(voiceId: String, sample: String?, apiKey: String, model: String = FishAudio.defaultModel,
+                 text: String = "Hi, this is how your replies will sound.") {
+        stopPreview()
+        if playing { pause() }
+        setPreviewing(voiceId)
+        if let sample, let url = URL(string: sample) {
+            startPreview(url)
+            return
+        }
+        previewTask = Task { [weak self] in
+            do {
+                var data = Data()
+                for try await byte in try await FishAudio.speech(text, voice: voiceId, key: apiKey, model: model, format: "mp3") { data.append(byte) }
+                guard !Task.isCancelled else { return }
+                let file = FileManager.default.temporaryDirectory.appendingPathComponent("bomb-preview-\(voiceId).mp3")
+                try data.write(to: file)
+                await MainActor.run { self?.startPreview(file) }
+            } catch {
+                guard let self, !Task.isCancelled else { return }
+                await MainActor.run { self.setPreviewing(nil) }
+                queue.async { self.failed = error.localizedDescription; self.publishLocked() }
+            }
+        }
+    }
+
+    /// Play a preview recording; it ends itself when done.
+    private func startPreview(_ url: URL) {
+        let player = AVPlayer(url: url)
+        previewer = player
+        previewEnd = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: player.currentItem, queue: .main) { [weak self] _ in
+            self?.stopPreview()
+        }
+        player.play()
+    }
+
+    /// Stop the preview, if one is playing. Call on the main queue.
+    func stopPreview() {
+        previewTask?.cancel()
+        previewTask = nil
+        previewer?.pause()
+        previewer = nil
+        if let previewEnd { NotificationCenter.default.removeObserver(previewEnd) }
+        previewEnd = nil
+        setPreviewing(nil)
+    }
+
+    private func setPreviewing(_ voice: String?) {
+        guard previewing != voice else { return }
+        previewing = voice
+        onPreview?(voice)
     }
 
     /// Each sentence's start, in seconds, as rendered so far.
@@ -284,59 +378,77 @@ final class SpeechPlayer {
 
     // MARK: Rendering
 
-    private func render(_ sentences: [String], voice: AVSpeechSynthesisVoice?, to audio: URL, sidecar: URL, generation: Int) {
-        synthesizer = AVSpeechSynthesizer()
-        let synthesizer = self.synthesizer
+    /// Fetch each chunk in turn, appending its audio to the file as it streams in.
+    private func render(_ chunks: [String], voice: String?, apiKey: String, model: String, to audio: URL, sidecar: URL, generation: Int) {
         let writer = try? FileHandle(forWritingTo: audio)
-        var index = 0
-        var settledRate = false
-        func next() {
-            guard generation == self.generation else { return }
-            guard index < sentences.count else {
-                complete = true
-                try? writer?.close()
-                Self.writeSidecar(sidecar, Sidecar(sampleRate: sampleRate, frames: renderedFrames, complete: true, offsets: offsets))
-                feedLocked()
-                publishLocked()
-                return
-            }
-            offsets.append(Double(renderedFrames) / sampleRate)
-            let utterance = AVSpeechUtterance(string: sentences[index])
-            utterance.voice = voice
-            index += 1
-            var ended = false
-            synthesizer.write(utterance) { [weak self] buffer in
-                guard let self, let pcm = buffer as? AVAudioPCMBuffer else { return }
-                self.queue.async {
-                    guard generation == self.generation, !ended else { return }
-                    if pcm.frameLength == 0 {
-                        // The sentence is done; a short breath, then the next.
-                        ended = true
-                        self.append(silence: 0.12, to: writer)
-                        next()
-                        return
+        fetch?.cancel()
+        fetch = Task { [weak self] in
+            for chunk in chunks {
+                guard let self, !Task.isCancelled else { return }
+                let current = queue.sync { generation == self.generation }
+                guard current else { return }
+                queue.sync { self.offsets.append(Double(self.renderedFrames) / self.sampleRate) }
+                do {
+                    let bytes = try await FishAudio.speech(chunk, voice: voice, key: apiKey, model: model)
+                    var pending = Data()
+                    pending.reserveCapacity(16384)
+                    for try await byte in bytes {
+                        pending.append(byte)
+                        if pending.count >= 16384 {
+                            let ready = pending
+                            pending = Data()
+                            queue.async { guard generation == self.generation else { return }; self.append(int16: ready, to: writer); self.feedLocked() }
+                        }
+                        if Task.isCancelled { return }
                     }
-                    if !settledRate {
-                        settledRate = true
-                        self.sampleRate = pcm.format.sampleRate
+                    let rest = pending
+                    queue.async {
+                        guard generation == self.generation else { return }
+                        self.append(int16: rest, to: writer)
+                        // A short breath between chunks.
+                        self.append(silence: 0.15, to: writer)
+                        self.feedLocked()
                     }
-                    self.append(pcm, to: writer)
-                    self.feedLocked()
+                } catch {
+                    if Task.isCancelled { return }
+                    queue.async {
+                        guard generation == self.generation else { return }
+                        self.failed = error.localizedDescription
+                        // Play what there is, and stop there.
+                        self.complete = true
+                        try? writer?.close()
+                        self.feedLocked()
+                        self.finishIfDrainedLocked()
+                        self.publishLocked()
+                    }
+                    return
                 }
             }
+            guard let self else { return }
+            queue.async {
+                guard generation == self.generation else { return }
+                self.complete = true
+                try? writer?.close()
+                Self.writeSidecar(sidecar, Sidecar(sampleRate: self.sampleRate, frames: self.renderedFrames, complete: true, offsets: self.offsets))
+                self.feedLocked()
+                self.finishIfDrainedLocked()
+                self.publishLocked()
+            }
         }
-        next()
     }
 
-    private func append(_ pcm: AVAudioPCMBuffer, to writer: FileHandle?) {
-        let frames = Int(pcm.frameLength)
+    /// Append 16-bit little-endian samples (an odd trailing byte is carried to the next call).
+    private var carry: UInt8?
+    private func append(int16 data: Data, to writer: FileHandle?) {
+        var bytes = [UInt8](data)
+        if let carry { bytes.insert(carry, at: 0); self.carry = nil }
+        if bytes.count % 2 == 1 { carry = bytes.removeLast() }
+        let frames = bytes.count / 2
+        guard frames > 0 else { return }
         var samples = [Float](repeating: 0, count: frames)
-        if let float = pcm.floatChannelData {
-            for i in 0..<frames { samples[i] = float[0][i] }
-        } else if let int16 = pcm.int16ChannelData {
-            for i in 0..<frames { samples[i] = Float(int16[0][i]) / 32768 }
-        } else if let int32 = pcm.int32ChannelData {
-            for i in 0..<frames { samples[i] = Float(int32[0][i]) / 2_147_483_648 }
+        for i in 0..<frames {
+            let value = Int16(bitPattern: UInt16(bytes[2 * i]) | (UInt16(bytes[2 * i + 1]) << 8))
+            samples[i] = Float(value) / 32768
         }
         samples.withUnsafeBufferPointer { writer?.write(Data(buffer: $0)) }
         renderedFrames += AVAudioFramePosition(frames)
@@ -432,6 +544,15 @@ final class SpeechPlayer {
         if !node.isPlaying && queued > 0 { node.play() }
     }
 
+    /// Everything is in and nothing is left queued (it was all played, or there was nothing): stop.
+    private func finishIfDrainedLocked() {
+        guard playing, complete, queued == 0, scheduledFrame >= renderedFrames else { return }
+        startFrame = renderedFrames
+        haltLocked()
+        playing = false
+        stopTicker()
+    }
+
     private func currentFrameLocked() -> AVAudioFramePosition {
         guard playing, node.isPlaying, let nodeTime = node.lastRenderTime, let playerTime = node.playerTime(forNodeTime: nodeTime) else { return startFrame }
         return min(startFrame + playerTime.sampleTime, renderedFrames)
@@ -446,7 +567,9 @@ final class SpeechPlayer {
 
     private func stopLocked() {
         generation += 1
-        synthesizer.stopSpeaking(at: .immediate)
+        fetch?.cancel()
+        fetch = nil
+        carry = nil
         haltLocked()
         restartFrom = nil
         playing = false

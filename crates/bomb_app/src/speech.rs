@@ -1,6 +1,6 @@
-//! Read-aloud on the Mac. Apple's speech is Swift-only, so `bomb-speak` (next to this binary, built
-//! by build.rs from the same engine the iPhone app uses) renders and plays; this module drives it
-//! as a `SpeechEngine`, the only thing the read-aloud model and views talk to.
+//! Read-aloud on the Mac, with Fish Audio voices. `bomb-speak` (next to this binary, built by
+//! build.rs from the same Swift engine the iPhone app uses) fetches the speech and plays it; this
+//! module drives it as a `SpeechEngine`, the only thing the read-aloud model and views talk to.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -37,37 +37,69 @@ impl SpeechStatus {
     }
 }
 
-/// An installed voice.
+/// A Fish Audio voice.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Voice {
     pub id: String,
     pub name: String,
-    pub language: String,
-    /// "premium", "enhanced" or "default".
-    pub quality: String,
-    pub personal: bool,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub languages: Vec<String>,
+    /// A recording of the voice, for a preview.
+    #[serde(default)]
+    pub sample: Option<String>,
+    #[serde(default)]
+    pub likes: u64,
 }
+
+/// Which voices the picker shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VoiceList {
+    /// Fish Audio's own, in the person's language.
+    #[default]
+    Recommended,
+    /// Everyone's, most used first.
+    Popular,
+    /// The person's own (cloned) voices.
+    Mine,
+}
+
+impl VoiceList {
+    pub fn key(self) -> &'static str {
+        match self { Self::Recommended => "recommended", Self::Popular => "popular", Self::Mine => "mine" }
+    }
+}
+
+/// "Sarah" (Fish Official): read with until another voice is chosen.
+pub const DEFAULT_VOICE: &str = "933563129e564b19a115bedd57b7406a";
+pub const DEFAULT_VOICE_NAME: &str = "Sarah";
 
 pub enum SpeechEvent {
     Status(SpeechStatus),
-    /// The installed voices, whether a better one is worth downloading, and the best one's id.
-    Voices { voices: Vec<Voice>, needs_better: bool, best: String },
-    PersonalVoice(bool),
+    /// A voice list, and the search it answers.
+    Voices { voices: Vec<Voice>, list: String, query: String },
+    VoicesFailed(String),
+    /// The voice being previewed; None once the preview ends.
+    Previewing(Option<String>),
+    /// Whether Fish Audio accepted the key sent with `check_key`, and why not.
+    KeyChecked(Result<(), String>),
 }
 
 /// Render, play, pause, seek, speed, and voices: everything read-aloud needs from the platform.
 pub trait SpeechEngine {
     /// Read `sentences` from `from` seconds; `key` names the cached rendering.
-    fn play(&mut self, key: &str, sentences: &[String], voice: Option<&str>, rate: f32, from: f64);
+    fn play(&mut self, key: &str, sentences: &[String], voice: &str, api_key: &str, rate: f32, from: f64);
     fn pause(&mut self);
     fn resume(&mut self);
     fn seek(&mut self, seconds: f64);
     fn skip(&mut self, seconds: f64);
     fn set_rate(&mut self, rate: f32);
     fn stop(&mut self);
-    fn request_voices(&mut self);
-    fn preview(&mut self, voice: &str);
-    fn request_personal_voice(&mut self);
+    fn request_voices(&mut self, api_key: &str, list: VoiceList, query: &str);
+    fn preview(&mut self, voice: &Voice, api_key: &str);
+    fn stop_preview(&mut self);
+    fn check_key(&mut self, api_key: &str);
 }
 
 fn helper() -> Option<PathBuf> {
@@ -75,7 +107,7 @@ fn helper() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-/// Whether this Mac can read aloud (the helper is here and voices are installed). The first call
+/// Whether this Mac can read aloud (the helper is part of this build and runs). The first call
 /// runs the helper, so make it off the main thread.
 pub fn available() -> bool {
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
@@ -112,11 +144,19 @@ impl HelperEngine {
                 } else if let Some(voices) = v.get("voices") {
                     Some(SpeechEvent::Voices {
                         voices: serde_json::from_value(voices.clone()).unwrap_or_default(),
-                        needs_better: v["needsBetterVoice"].as_bool().unwrap_or(false),
-                        best: v["best"].as_str().unwrap_or_default().to_string(),
+                        list: v["list"].as_str().unwrap_or_default().to_string(),
+                        query: v["query"].as_str().unwrap_or_default().to_string(),
                     })
+                } else if let Some(check) = v.get("keyCheck") {
+                    Some(SpeechEvent::KeyChecked(if check["ok"].as_bool() == Some(true) {
+                        Ok(())
+                    } else {
+                        Err(check["error"].as_str().unwrap_or("Fish Audio didn't accept this API key.").to_string())
+                    }))
+                } else if let Some(previewing) = v.get("previewing") {
+                    Some(SpeechEvent::Previewing(previewing.as_str().map(String::from)))
                 } else {
-                    v.get("personalVoice").and_then(Value::as_bool).map(SpeechEvent::PersonalVoice)
+                    v.get("voicesError").and_then(Value::as_str).map(|e| SpeechEvent::VoicesFailed(e.to_string()))
                 };
                 if let Some(event) = event {
                     if tx.send_blocking(event).is_err() {
@@ -142,8 +182,8 @@ impl Drop for HelperEngine {
 }
 
 impl SpeechEngine for HelperEngine {
-    fn play(&mut self, key: &str, sentences: &[String], voice: Option<&str>, rate: f32, from: f64) {
-        self.send(json!({ "cmd": "play", "key": key, "sentences": sentences, "voice": voice, "rate": rate, "from": from }));
+    fn play(&mut self, key: &str, sentences: &[String], voice: &str, api_key: &str, rate: f32, from: f64) {
+        self.send(json!({ "cmd": "play", "key": key, "sentences": sentences, "voice": voice, "apiKey": api_key, "rate": rate, "from": from }));
     }
     fn pause(&mut self) { self.send(json!({ "cmd": "pause" })); }
     fn resume(&mut self) { self.send(json!({ "cmd": "resume" })); }
@@ -151,9 +191,14 @@ impl SpeechEngine for HelperEngine {
     fn skip(&mut self, seconds: f64) { self.send(json!({ "cmd": "skip", "by": seconds })); }
     fn set_rate(&mut self, rate: f32) { self.send(json!({ "cmd": "rate", "rate": rate })); }
     fn stop(&mut self) { self.send(json!({ "cmd": "stop" })); }
-    fn request_voices(&mut self) { self.send(json!({ "cmd": "voices" })); }
-    fn preview(&mut self, voice: &str) { self.send(json!({ "cmd": "preview", "voice": voice })); }
-    fn request_personal_voice(&mut self) { self.send(json!({ "cmd": "personal_voice" })); }
+    fn request_voices(&mut self, api_key: &str, list: VoiceList, query: &str) {
+        self.send(json!({ "cmd": "voices", "apiKey": api_key, "list": list.key(), "query": query }));
+    }
+    fn preview(&mut self, voice: &Voice, api_key: &str) {
+        self.send(json!({ "cmd": "preview", "voice": voice.id, "sample": voice.sample, "apiKey": api_key }));
+    }
+    fn stop_preview(&mut self) { self.send(json!({ "cmd": "stop_preview" })); }
+    fn check_key(&mut self, api_key: &str) { self.send(json!({ "cmd": "check_key", "apiKey": api_key })); }
 }
 
 /// A cache name for a message read in a voice: stable across launches (FNV-1a of the text).

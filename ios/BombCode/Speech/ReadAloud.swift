@@ -2,9 +2,11 @@ import AVFoundation
 import Foundation
 import MediaPlayer
 import Observation
+import Security
 
-/// Reading replies aloud on the iPhone: which message plays, where, how fast, in which voice. One
-/// message at a time; starting another replaces it. The engine is `SpeechPlayer`, shared with the Mac.
+/// Reading replies aloud on the iPhone with Fish Audio voices: which message plays, where, how fast,
+/// in which voice. One message at a time; starting another replaces it. The engine is
+/// `SpeechPlayer`, shared with the Mac. The person's Fish Audio key lives in the Keychain.
 @MainActor @Observable
 final class ReadAloud {
     static let shared = ReadAloud()
@@ -24,18 +26,23 @@ final class ReadAloud {
 
     private(set) var playing: Playing?
     private(set) var status = SpeechStatus(key: "", playing: false, position: 0, duration: 0, complete: false, sentence: 0, rendered: 0, total: 0, failed: nil)
+    /// The voice picker: which list ("recommended", "popular", "mine"), the search, what came back.
     private(set) var voices: [SpeechVoiceInfo] = []
-    private(set) var needsBetterVoice = false
-    /// Voices have been looked up at least once.
-    private(set) var voicesLoaded = false
-    private var bestVoice: String?
-    var personalVoiceAllowed: Bool?
+    private(set) var voiceList = "recommended"
+    private(set) var query = ""
+    private(set) var voicesLoading = false
+    private(set) var voicesError: String?
+    private var search: Task<Void, Never>?
     /// Asked to show the message being read.
     var reveal: UInt64?
 
-    var voiceId: String? {
-        didSet { UserDefaults.standard.set(voiceId, forKey: "readAloud.voice") }
-    }
+    /// The Fish Audio key (Keychain), and whether one is saved.
+    private(set) var apiKey: String?
+    var hasKey: Bool { apiKey != nil }
+
+    /// The chosen Fish Audio voice, and its name for display.
+    private(set) var voiceId: String?
+    private(set) var voiceName: String?
     var rate: Float {
         didSet { UserDefaults.standard.set(rate, forKey: "readAloud.rate"); player.setRate(rate); updateNowPlaying() }
     }
@@ -43,46 +50,103 @@ final class ReadAloud {
     private let player = SpeechPlayer()
 
     private init() {
-        voiceId = UserDefaults.standard.string(forKey: "readAloud.voice")
-        let saved = UserDefaults.standard.float(forKey: "readAloud.rate")
-        rate = saved > 0 ? saved : 1
+        // An Apple voice id from before Fish Audio ("com.apple…") isn't a Fish voice: start over.
+        let saved = UserDefaults.standard.string(forKey: "readAloud.voice")
+        if let saved, !saved.contains(".") {
+            voiceId = saved
+            voiceName = UserDefaults.standard.string(forKey: "readAloud.voiceName")
+        }
+        let savedRate = UserDefaults.standard.float(forKey: "readAloud.rate")
+        rate = savedRate > 0 ? savedRate : 1
+        apiKey = FishKey.load()
         player.onChange = { [weak self] status in
             MainActor.assumeIsolated { self?.receive(status) }
         }
-        refreshVoices()
+        player.onPreview = { [weak self] voice in
+            MainActor.assumeIsolated { self?.previewing = voice }
+        }
         NotificationCenter.default.addObserver(forName: Self.dictationStarted, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { if self?.status.playing == true { self?.playPause() } }
-        }
-        if #available(iOS 17.0, *) {
-            NotificationCenter.default.addObserver(forName: AVSpeechSynthesizer.availableVoicesDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.refreshVoices() }
-            }
         }
         setUpRemoteCommands()
     }
 
-    /// Look the installed voices up again, off the main thread (it takes a while with many voices).
-    func refreshVoices() {
-        Task.detached(priority: .userInitiated) {
-            let scan = SpeechVoices.scan()
-            await MainActor.run {
-                let reader = ReadAloud.shared
-                reader.voices = scan.voices
-                reader.bestVoice = scan.best
-                reader.needsBetterVoice = scan.needsBetter
-                reader.voicesLoaded = true
-                #if DEBUG
-                if Smoke.enabled { print("smoke: voices", scan.voices.count) }
-                #endif
-            }
-        }
+    /// The voice to read with: the chosen one, else Fish Audio's "Sarah".
+    var chosenVoice: String { voiceId ?? FishAudio.defaultVoice }
+    var chosenVoiceName: String { voiceId == nil ? "Sarah" : (voiceName ?? "Your voice") }
+
+    func choose(_ voice: SpeechVoiceInfo) {
+        voiceId = voice.id
+        voiceName = voice.name
+        UserDefaults.standard.set(voice.id, forKey: "readAloud.voice")
+        UserDefaults.standard.set(voice.name, forKey: "readAloud.voiceName")
     }
 
-    /// The chosen voice while it's installed, else the best one. Until voices are looked up, the
-    /// saved choice stands (the engine falls back itself if it's gone).
-    var chosenVoice: String? {
-        if let voiceId, !voicesLoaded || voices.contains(where: { $0.id == voiceId }) { return voiceId }
-        return bestVoice
+    /// A key being checked with Fish Audio, and why the last one wasn't accepted.
+    private(set) var checkingKey = false
+    private(set) var keyError: String?
+
+    /// Check the key with Fish Audio and save it only once it's accepted. True when saved.
+    func saveKey(_ key: String) async -> Bool {
+        let key = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty, !checkingKey else { return false }
+        checkingKey = true
+        keyError = nil
+        defer { checkingKey = false }
+        do {
+            try await FishAudio.validate(key: key)
+        } catch {
+            keyError = error.localizedDescription
+            return false
+        }
+        FishKey.save(key)
+        apiKey = key
+        refreshVoices()
+        return true
+    }
+
+    func removeKey() {
+        FishKey.delete()
+        apiKey = nil
+    }
+
+    func showList(_ list: String) {
+        guard list != voiceList else { return }
+        voiceList = list
+        voices = []
+        refreshVoices()
+    }
+
+    func searchVoices(_ text: String) {
+        guard text != query else { return }
+        query = text
+        refreshVoices()
+    }
+
+    /// Look up the voices for the current list and search; a newer lookup replaces this one.
+    func refreshVoices() {
+        search?.cancel()
+        voicesLoading = true
+        voicesError = nil
+        let (key, list, query) = (apiKey ?? "", voiceList, query)
+        search = Task {
+            // Typing: wait for a pause before asking.
+            if !query.isEmpty { try? await Task.sleep(for: .milliseconds(350)) }
+            guard !Task.isCancelled else { return }
+            do {
+                let found = try await FishAudio.voices(key: key, list: list, query: query)
+                guard !Task.isCancelled else { return }
+                voices = found
+                voicesLoading = false
+                #if DEBUG
+                if Smoke.enabled { print("smoke: voices", found.count) }
+                #endif
+            } catch {
+                guard !Task.isCancelled else { return }
+                voicesError = error.localizedDescription
+                voicesLoading = false
+            }
+        }
     }
 
     func isReading(threadId: String, entry: UInt64) -> Bool {
@@ -94,12 +158,17 @@ final class ReadAloud {
         if isReading(threadId: threadId, entry: entry) { return close() }
         let sentences = speakableSentences(text: markdown)
         guard !sentences.isEmpty else { return }
-        let voice = chosenVoice ?? "default"
+        let voice = chosenVoice
+        playing = Playing(machineId: machineId, threadId: threadId, entry: entry, title: sentences[0])
+        guard let apiKey else {
+            status = SpeechStatus(key: "", playing: false, position: 0, duration: 0, complete: true, sentence: 0, rendered: 0, total: 0,
+                                  failed: "Add your Fish Audio API key in Settings → Voice to read replies aloud.")
+            return
+        }
         NotificationCenter.default.post(name: Self.playbackStarted, object: nil)
         activateSession()
-        playing = Playing(machineId: machineId, threadId: threadId, entry: entry, title: sentences[0])
         player.play(key: SpeechPlayer.cacheKey(message: "\(threadId)-\(entry)", voiceId: voice, sentences: sentences),
-                    sentences: sentences, voiceId: chosenVoice, rate: rate)
+                    sentences: sentences, voiceId: voice, apiKey: apiKey, rate: rate)
     }
 
     func playPause() {
@@ -122,16 +191,17 @@ final class ReadAloud {
         if playing?.threadId == threadId { close() }
     }
 
-    func preview(_ voice: String) { player.preview(voiceId: voice) }
+    /// The voice whose preview is playing.
+    private(set) var previewing: String?
 
-    func requestPersonalVoice() {
-        SpeechVoices.requestPersonalVoice { [weak self] granted in
-            MainActor.assumeIsolated {
-                self?.personalVoiceAllowed = granted
-                self?.refreshVoices()
-            }
-        }
+    /// Preview a voice, or stop it when it's the one previewing.
+    func togglePreview(_ voice: SpeechVoiceInfo) {
+        if previewing == voice.id { return stopPreview() }
+        activateSession()
+        player.preview(voiceId: voice.id, sample: voice.sample, apiKey: apiKey ?? "")
     }
+
+    func stopPreview() { player.stopPreview() }
 
     private func receive(_ status: SpeechStatus) {
         guard playing != nil || status.key.isEmpty else { return }
@@ -173,5 +243,36 @@ final class ReadAloud {
             MainActor.assumeIsolated { self?.seek(to: event.positionTime) }
             return .success
         }
+    }
+}
+
+/// The Fish Audio API key, in this iPhone's Keychain only.
+enum FishKey {
+    private static let service = "sh.bombcode.fish-audio"
+
+    static func load() -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecReturnData as String: true,
+        ]
+        var result: AnyObject?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data else { return nil }
+        return String(data: data, encoding: .utf8).flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    static func save(_ key: String) {
+        delete()
+        let item: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            kSecValueData as String: Data(key.utf8),
+        ]
+        SecItemAdd(item as CFDictionary, nil)
+    }
+
+    static func delete() {
+        SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service] as CFDictionary)
     }
 }

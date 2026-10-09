@@ -7,7 +7,7 @@ use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 #[path = "model_suggestion_keys.rs"]
-mod keys;
+pub(crate) mod keys;
 pub use keys::{migrate_legacy_key, remove_key, save_key};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

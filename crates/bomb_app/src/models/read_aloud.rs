@@ -6,7 +6,7 @@ use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 
 use crate::runtime::{services, spawn_service};
-use crate::speech::{self, HelperEngine, SpeechEngine, SpeechEvent, SpeechStatus, Voice};
+use crate::speech::{self, HelperEngine, SpeechEngine, SpeechEvent, SpeechStatus, Voice, VoiceList};
 
 const SETTINGS_KEY: &str = "read_aloud";
 /// The speeds the player offers.
@@ -19,16 +19,19 @@ pub fn read_aloud(cx: &App) -> Entity<ReadAloud> {
     cx.global::<ReadAloudHandle>().0.clone()
 }
 
-/// Saved choices: the voice (none → the best installed) and the speed.
+/// Saved choices: the Fish Audio voice (none → the default) and the speed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReadAloudSettings {
+    /// A Fish Audio voice id. Older settings held an Apple voice here; those aren't Fish ids.
     pub voice: Option<String>,
+    #[serde(default)]
+    pub voice_name: Option<String>,
     pub rate: f32,
 }
 
 impl Default for ReadAloudSettings {
     fn default() -> Self {
-        Self { voice: None, rate: 1.0 }
+        Self { voice: None, voice_name: None, rate: 1.0 }
     }
 }
 
@@ -46,10 +49,24 @@ pub struct ReadAloud {
     /// This Mac can read aloud (known once checked).
     pub available: bool,
     pub settings: ReadAloudSettings,
+    /// The Fish Audio key, once loaded (None: not set).
+    pub api_key: Option<String>,
+    /// The voice picker: which list, the search, what came back, and any trouble.
     pub voices: Vec<Voice>,
-    pub needs_better_voice: bool,
-    best_voice: String,
-    pub personal_voice: Option<bool>,
+    pub voice_list: VoiceList,
+    pub query: String,
+    pub voices_loading: bool,
+    pub voices_error: Option<String>,
+    /// A key being checked with Fish Audio before it's saved, and why the last one wasn't.
+    checking_key: Option<String>,
+    pub key_error: Option<String>,
+    /// A key was just saved: the settings page empties its field.
+    pub clear_key_input: bool,
+    /// The voice whose preview is playing.
+    pub previewing: Option<String>,
+    /// The settings page's text fields, made on first show (they need a window).
+    pub key_input: Option<Entity<gpui_kit::component::input::InputState>>,
+    pub search_input: Option<Entity<gpui_kit::component::input::InputState>>,
     pub playing: Option<Playing>,
     pub status: SpeechStatus,
     engine: Option<HelperEngine>,
@@ -64,13 +81,19 @@ impl ReadAloud {
         let this = cx.entity().downgrade();
         spawn_service(cx, async move {
             let saved = bomb_core::services::kv_get(&state, SETTINGS_KEY).await.ok().flatten();
+            let key = bomb_core::services::speech_key::load(state.persistence.clone()).await;
             let available = tokio::task::spawn_blocking(speech::available).await.unwrap_or(false);
-            Ok::<_, String>((saved, available))
+            Ok::<_, String>((saved, key, available))
         }, move |res, cx| {
-            let Ok((saved, available)) = res else { return };
+            let Ok((saved, key, available)) = res else { return };
             let _ = this.update(cx, |m, cx| {
                 m.available = available;
-                if let Some(settings) = saved.and_then(|raw| serde_json::from_str(&raw).ok()) { m.settings = settings; }
+                m.api_key = key;
+                if let Some(mut settings) = saved.and_then(|raw| serde_json::from_str::<ReadAloudSettings>(&raw).ok()) {
+                    // An Apple voice from before Fish Audio: start over with the default.
+                    if settings.voice.as_deref().is_some_and(|v| v.contains('.')) { settings.voice = None; settings.voice_name = None; }
+                    m.settings = settings;
+                }
                 cx.notify();
             });
         });
@@ -89,7 +112,7 @@ impl ReadAloud {
             self.engine = Some(engine);
             cx.spawn(async move |this, cx| {
                 while let Ok(event) = events.recv().await {
-                    if this.update(cx, |m, cx| { m.on_event(event); cx.notify(); }).is_err() { break; }
+                    if this.update(cx, |m, cx| { m.on_event(event, cx); cx.notify(); }).is_err() { break; }
                 }
             })
             .detach();
@@ -97,25 +120,38 @@ impl ReadAloud {
         self.engine.as_mut()
     }
 
-    fn on_event(&mut self, event: SpeechEvent) {
+    fn on_event(&mut self, event: SpeechEvent, cx: &mut Context<Self>) {
         match event {
             SpeechEvent::Status(status) => {
                 // A report about something no longer playing doesn't count.
                 if self.playing.is_some() || status.key.is_empty() { self.status = status; }
             }
-            SpeechEvent::Voices { voices, needs_better, best } => {
-                self.voices = voices;
-                self.needs_better_voice = needs_better;
-                self.best_voice = best;
+            SpeechEvent::Voices { voices, list, query } => {
+                // Only the answer to the latest search counts.
+                if list == self.voice_list.key() && query == self.query.trim() {
+                    self.voices = voices;
+                    self.voices_loading = false;
+                    self.voices_error = None;
+                }
             }
-            SpeechEvent::PersonalVoice(granted) => self.personal_voice = Some(granted),
+            SpeechEvent::Previewing(voice) => self.previewing = voice,
+            SpeechEvent::KeyChecked(result) => {
+                let Some(key) = self.checking_key.take() else { return };
+                match result {
+                    Ok(()) => self.store_api_key(key, cx),
+                    Err(error) => self.key_error = Some(error),
+                }
+            }
+            SpeechEvent::VoicesFailed(error) => {
+                self.voices_loading = false;
+                self.voices_error = Some(error);
+            }
         }
     }
 
-    /// The voice to read with: the chosen one while it's installed, else the best.
-    fn voice(&self) -> Option<String> {
-        self.settings.voice.clone().filter(|v| self.voices.is_empty() || self.voices.iter().any(|x| &x.id == v))
-            .or_else(|| Some(self.best_voice.clone()).filter(|b| !b.is_empty()))
+    /// The voice to read with: the chosen one, else Fish Audio's "Sarah".
+    fn voice(&self) -> String {
+        self.settings.voice.clone().unwrap_or_else(|| speech::DEFAULT_VOICE.to_string())
     }
 
     /// Read a reply, or stop it when it's the one playing.
@@ -128,12 +164,16 @@ impl ReadAloud {
         if sentences.is_empty() { return; }
         let voice = self.voice();
         let rate = self.settings.rate;
-        let key = speech::cache_key(&format!("{thread}-{entry}"), voice.as_deref().unwrap_or("default"), &sentences);
+        let key = speech::cache_key(&format!("{thread}-{entry}"), &voice, &sentences);
         self.playing = Some(Playing { thread, entry, title, sentences: sentences.clone() });
+        let Some(api_key) = self.api_key.clone() else {
+            self.status = SpeechStatus { key, failed: Some("Add your Fish Audio API key in Settings → Voice to read replies aloud.".into()), ..Default::default() };
+            cx.notify();
+            return;
+        };
         self.status = SpeechStatus { key: key.clone(), playing: true, ..Default::default() };
         if let Some(engine) = self.engine(cx) {
-            engine.request_voices();
-            engine.play(&key, &sentences, voice.as_deref(), rate, 0.0);
+            engine.play(&key, &sentences, &voice, &api_key, rate, 0.0);
         }
         cx.notify();
     }
@@ -179,26 +219,93 @@ impl ReadAloud {
 
     // ── settings ──
 
+    /// Look up the voices for the current list and search.
     pub fn refresh_voices(&mut self, cx: &mut Context<Self>) {
-        if let Some(engine) = self.engine(cx) { engine.request_voices(); }
+        let api_key = self.api_key.clone().unwrap_or_default();
+        let (list, query) = (self.voice_list, self.query.trim().to_string());
+        self.voices_loading = true;
+        self.voices_error = None;
+        if let Some(engine) = self.engine(cx) { engine.request_voices(&api_key, list, &query); }
+        cx.notify();
     }
 
-    pub fn set_voice(&mut self, voice: String, cx: &mut Context<Self>) {
-        self.settings.voice = Some(voice);
+    pub fn set_voice_list(&mut self, list: VoiceList, cx: &mut Context<Self>) {
+        if self.voice_list == list { return; }
+        self.voice_list = list;
+        self.voices.clear();
+        self.refresh_voices(cx);
+    }
+
+    pub fn set_query(&mut self, query: String, cx: &mut Context<Self>) {
+        if self.query == query { return; }
+        self.query = query;
+        self.refresh_voices(cx);
+    }
+
+    pub fn set_voice(&mut self, voice: &Voice, cx: &mut Context<Self>) {
+        self.settings.voice = Some(voice.id.clone());
+        self.settings.voice_name = Some(voice.name.clone());
         self.save(cx);
         cx.notify();
     }
 
-    pub fn chosen_voice(&self) -> Option<String> {
-        self.voice()
+    /// The chosen voice's id and name (the default until one is chosen).
+    pub fn chosen_voice(&self) -> (String, String) {
+        match (&self.settings.voice, &self.settings.voice_name) {
+            (Some(id), name) => (id.clone(), name.clone().unwrap_or_else(|| id.clone())),
+            (None, _) => (speech::DEFAULT_VOICE.into(), speech::DEFAULT_VOICE_NAME.into()),
+        }
     }
 
-    pub fn preview(&mut self, voice: &str, cx: &mut Context<Self>) {
-        if let Some(engine) = self.engine(cx) { engine.preview(voice); }
+    /// Preview a voice, or stop it when it's the one previewing.
+    pub fn toggle_preview(&mut self, voice: &Voice, cx: &mut Context<Self>) {
+        let api_key = self.api_key.clone().unwrap_or_default();
+        let stop = self.previewing.as_deref() == Some(voice.id.as_str());
+        // Show the change at once; the helper confirms it.
+        self.previewing = (!stop).then(|| voice.id.clone());
+        if let Some(engine) = self.engine(cx) {
+            if stop { engine.stop_preview() } else { engine.preview(voice, &api_key) }
+        }
+        cx.notify();
     }
 
-    pub fn request_personal_voice(&mut self, cx: &mut Context<Self>) {
-        if let Some(engine) = self.engine(cx) { engine.request_personal_voice(); }
+    /// Whether a key is being checked with Fish Audio.
+    pub fn checking_key(&self) -> bool {
+        self.checking_key.is_some()
+    }
+
+    /// Check the key with Fish Audio; it's saved only once Fish Audio accepts it.
+    pub fn save_api_key(&mut self, key: String, cx: &mut Context<Self>) {
+        let key = key.trim().to_string();
+        if key.is_empty() || self.checking_key.is_some() { return; }
+        self.key_error = None;
+        let Some(engine) = self.engine(cx) else {
+            self.key_error = Some("Read-aloud isn't part of this build.".into());
+            cx.notify();
+            return;
+        };
+        engine.check_key(&key);
+        self.checking_key = Some(key);
+        cx.notify();
+    }
+
+    fn store_api_key(&mut self, key: String, cx: &mut Context<Self>) {
+        let state = services(cx);
+        let this = cx.entity().downgrade();
+        let saved = key.trim().to_string();
+        spawn_service(cx, async move { bomb_core::services::speech_key::save(state.persistence.clone(), key).await }, move |res, cx| {
+            let _ = this.update(cx, |m, cx| match res {
+                Ok(()) => { m.api_key = Some(saved.clone()); m.clear_key_input = true; m.refresh_voices(cx); }
+                Err(e) => { m.key_error = Some(e); cx.notify(); }
+            });
+        });
+    }
+
+    pub fn remove_api_key(&mut self, cx: &mut Context<Self>) {
+        self.api_key = None;
+        let state = services(cx);
+        spawn_service(cx, async move { bomb_core::services::speech_key::remove(state.persistence.clone()).await }, |_, _| {});
+        cx.notify();
     }
 
     pub fn reveal_playing(&mut self, cx: &mut Context<Self>) {
