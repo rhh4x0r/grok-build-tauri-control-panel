@@ -91,6 +91,15 @@ struct PreviewBrowser: View {
                 if let url = URL(string: "http://localhost:\(local)\(target.path)") { page.view.load(URLRequest(url: url)) }
             } catch {
                 failed = describe(error)
+                return
+            }
+            // The page's backend (an API on another port) has to answer here too: open every server
+            // the Mac has running on its own port number, and any started while the page is open.
+            while !Task.isCancelled {
+                for server in (try? await machine.machine.localServers()) ?? [] where server.port != target.port {
+                    _ = try? await machine.machine.openPreview(port: server.port)
+                }
+                try? await Task.sleep(for: .seconds(5))
             }
         }
         .onChange(of: page.error) { _, error in if let error { failed = error } }

@@ -122,6 +122,20 @@ async fn a_paired_phone_starts_a_thread_watches_it_and_answers_an_approval() {
                 socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{line}", line.len()).as_bytes()).await.unwrap();
             }
         });
+        // A backend started anywhere (here, by this test) is listed, so it opens beside the page.
+        // (Another process: this one is the core, whose own ports are left out.)
+        let api_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let mut api = std::process::Command::new("python3")
+            .args(["-c", &format!("import socket,time; s=socket.socket(); s.bind(('127.0.0.1',{api_port})); s.listen(); time.sleep(30)")])
+            .spawn().unwrap();
+        let mut listed = false;
+        for _ in 0..40 {
+            if machine.local_servers().await.unwrap().iter().any(|s| s.port == api_port) { listed = true; break; }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        let _ = api.kill();
+        let _ = api.wait();
+        assert!(listed, "the backend's port is listed");
         let local = machine.open_preview(port).await.unwrap();
         // The machine's port is taken here (same computer), so the phone side picked another.
         assert_ne!(local, port);

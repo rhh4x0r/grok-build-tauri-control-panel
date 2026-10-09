@@ -286,6 +286,31 @@ pub struct Server {
     pub name: String,
 }
 
+/// Every server this account has listening on this machine (ports 1024 and up), whatever folder
+/// it runs from: a page opened on a phone also needs the backend it calls, which may have been
+/// started anywhere. This process's own ports are left out.
+pub async fn local_servers() -> Result<Vec<Server>, String> {
+    let listening = run("lsof", &["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcn"]).await;
+    let own = std::process::id();
+    let mut servers: Vec<Server> = Vec::new();
+    let (mut pid, mut name) = (0u32, String::new());
+    for line in listening?.lines() {
+        if let Some(p) = line.strip_prefix('p') {
+            pid = p.parse().unwrap_or(0);
+        } else if let Some(c) = line.strip_prefix('c') {
+            name = c.to_string();
+        } else if let Some(address) = line.strip_prefix('n') {
+            let Some(port) = address.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()) else { continue };
+            // macOS and Tailscale's own listeners (AirPlay, Continuity, the VPN) aren't anyone's app.
+            const SYSTEM: &[&str] = &["ControlCenter", "rapportd", "IPNExtension", "Tailscale", "sharingd", "identityservicesd", "launchd"];
+            if pid == own || port < 1024 || SYSTEM.contains(&name.as_str()) || servers.iter().any(|s| s.port == port) { continue; }
+            servers.push(Server { port, name: name.clone() });
+        }
+    }
+    servers.sort_by_key(|s| s.port);
+    Ok(servers)
+}
+
 /// The ports processes in a thread's folder (its worktree, and its project) are listening on.
 pub async fn servers_for_thread(state: &crate::AppState, id: &str) -> Result<Vec<Server>, String> {
     let id = uuid::Uuid::parse_str(id).map_err(|e| e.to_string())?;

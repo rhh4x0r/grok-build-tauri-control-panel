@@ -252,6 +252,12 @@ impl Machine {
         self.shared.previews.close_all();
     }
 
+    /// Every server listening on the machine (port and program), so a page's backend can be opened
+    /// on the same port beside it.
+    pub async fn local_servers(&self) -> Result<Vec<ThreadServer>> {
+        Ok(self.call("local_servers", Value::Null).await.unwrap_or_default())
+    }
+
     /// Web servers a thread's processes are listening on (port and program), to offer as previews.
     pub async fn thread_servers(&self, thread_id: String) -> Result<Vec<ThreadServer>> {
         Ok(self.call("thread_servers", json!({ "thread": thread_id })).await.unwrap_or_default())
