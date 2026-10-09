@@ -685,6 +685,16 @@ pub async fn kv_set(state: &AppState, key: &str, value: &str) -> Result<(), Stri
     state.persistence.set_kv(key, value).map_err(err)
 }
 
+/// Failed threads whose badge the user has already seen or dismissed.
+pub async fn dismissed_failures(state: &AppState) -> Result<crate::failures::DismissedFailures, String> {
+    crate::failures::DismissedFailures::load(&state.persistence).map_err(err)
+}
+
+/// Clear a thread's "Failed" badge for the failure it had at `failed_at` (its `updated_at`).
+pub async fn dismiss_failure(state: &AppState, id: Uuid, failed_at: String) -> Result<crate::failures::DismissedFailures, String> {
+    crate::failures::DismissedFailures::save_one(&state.persistence, id, &failed_at).map_err(err)
+}
+
 /// Account usage limits for every backend that exposes them.
 pub async fn account_usage() -> Vec<crate::usage::AccountUsage> {
     crate::usage::all().await

@@ -389,6 +389,13 @@ impl Thread {
         Vec::new()
     }
 
+    /// The user dismissed a failed turn: hide the status line. The error row stays in the transcript.
+    pub fn dismiss_failure(&mut self, now: Instant) -> Vec<Change> {
+        if self.presence.phase != Phase::Error { return Vec::new(); }
+        self.presence.signal(Phase::Idle, Patch::default(), now);
+        vec![Change::Presence]
+    }
+
     /// Periodic tick (1s) while a turn is active so stall detection and the
     /// elapsed clock refresh. Returns whether anything visible changed.
     pub fn tick(&mut self, _now: Instant) -> bool {
@@ -1275,6 +1282,25 @@ mod tests {
                 Some(Duration::from_secs(3))
             );
         }
+    }
+
+    #[test]
+    fn dismissing_a_failure_hides_the_status_line_but_keeps_the_error() {
+        let now = Instant::now();
+        let mut t = Thread::new();
+        t.note_prompt("hello", vec![], now);
+        // Only a failed turn can be dismissed.
+        assert!(t.dismiss_failure(now).is_empty());
+        assert!(t.presence.turn_active());
+        t.note_failure("connection failed", now);
+        assert!(t.presence.visible());
+        assert_eq!(t.dismiss_failure(now).len(), 1);
+        assert!(!t.presence.visible());
+        assert_eq!(t.entries.last().map(|e| e.role), Some(Role::Error));
+        assert_eq!(t.entries.last().and_then(|e| e.text()), Some("connection failed"));
+        // A new prompt after a dismissal starts a normal turn.
+        t.note_prompt("again", vec![], now);
+        assert!(t.presence.turn_active());
     }
 
     #[test]
