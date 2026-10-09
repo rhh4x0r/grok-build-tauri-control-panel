@@ -33,6 +33,15 @@ enum Smoke {
             let id = try await machine.machine.startThread(new: new)
             print("smoke: started", id)
             open(ThreadRef(machineId: machine.id, threadId: id))
+            // BOMB_SMOKE_READ: read the reply aloud once it's in, to check the player.
+            if env["BOMB_SMOKE_READ"] != nil {
+                try? await Task.sleep(for: .seconds(8))
+                let thread = machine.open(threadId: id)
+                if let reply = thread.entries.last(where: { $0.role == .agent && !$0.text.isEmpty }) {
+                    ReadAloud.shared.toggle(machineId: machine.id, threadId: id, entry: reply.id, markdown: reply.text)
+                    print("smoke: reading", reply.id)
+                }
+            }
         } catch {
             print("smoke: start failed", describe(error))
         }

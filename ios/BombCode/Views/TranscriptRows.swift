@@ -37,6 +37,7 @@ struct UserBubble: View {
                         .textSelection(.enabled)
                         .padding(.horizontal, 14).padding(.vertical, 10)
                         .background(Theme.bubble, in: RoundedRectangle(cornerRadius: Theme.corner))
+                    CopyIcon(text: entry.text)
                 }
             }
         }

@@ -990,3 +990,40 @@ All additive; `PROTOCOL_VERSION` stays 1 and a Mac that never calls the new meth
   - it starts a mock thread, and the Mac's local journal (what the window reads) gets `session_created` and the phone's `user_message`;
   - removing the phone takes it offline.
 - Checked: `bomb_app` 37/37 tests serially; `BOMB_SMOKE=1` passes; clippy shows only the five `bomb_app` lints that were already there. Not checked: the Settings → Phone page on screen (screen recording is blocked in this terminal), and a real iPhone over Tailscale.
+
+## 2026-10-08 — Subagents, cross-agent helpers, and read-aloud
+
+### Subagents
+- `grok_acp` advertises the draft ACP `clientCapabilities.subagents`. Claude's adapter (0.88) and Codex's (2.1) then send `subagent_spawned` and `subagent_state_update`, with each subagent's updates under its own session id. Grok sends its own `_x.ai/session_notification` (`subagent_spawned` with child session and model, then `subagent_progress` with tokens), and its `spawn_subagent` call is held back and used to end it.
+- Each subagent becomes a saved thread of its own (`subagent_thread_id`, a v5 uuid from parent + child session), with `parentThread` and `subagent {name, task, state, model, tokens}` in its metadata. It is kept out of `list_threads` and workspaces, takes no messages, and is listed by `list_subagents`. The parent shows it as a "Subagent · name" step.
+- Desktop: the right panel's Subagents tab (cards with status, model, tokens, task; opens the transcript with a parent banner). iPhone: a card in the parent's conversation, opening a read-only transcript.
+- Checked with real Claude Explore and Grok 1.0.50 subagents on a throwaway server (`BOMBCODE_HOME`), and in the loopback test.
+
+### Helpers (cross-agent subagents)
+- `bomb_core::helpers` + `helpers_mcp`: every top-level thread's agent gets a `bomb` MCP server (the app or `bombd` run with `--bomb-mcp`) with `list_agents`, `start_helper`, `wait_helpers`, `helper_status`, `message_helper`, `stop_helper`. Calls reach the app over a per-user socket (`~/.bombcode/helpers.sock`), tied to one thread by a token.
+- A helper is a thread on the agent and model asked for (display names resolve: "Astra", "Opus 5.5"). It runs in the parent's mode; in a parent that can edit it gets its own branch. Helpers can't start helpers; at most 4 at once and 8 per thread; stopping the parent stops them. The six tools run without an approval card (`*bomb*<tool>*` allow rules; deny rules still win).
+- Plan: `docs/plan/cross_agent_subagents_plan.md`. Checked with a real Claude thread starting a Codex/6 Astra helper and a Claude/Opus 5.5 helper in parallel, and with the mock agent in the loopback test.
+
+### Fixes
+- A thread with no model chosen starts on the agent's own default (it failed on the stale built-in `claude-fable-5-1`), and records the model in use.
+- Copy icons on prompts and replies; the reply footer now closes every turn's final reply.
+- Clippy `-D warnings` is clean for the whole workspace again (five older `bomb_app` lints fixed).
+
+### Read-aloud
+- `bomb_transcript::speech::speakable_sentences`: a reply as sentences (code blocks → "Code block omitted.", Markdown stripped, link text kept, bare links → "link", list items, headings and table rows as sentences, long sentences split at commas). Exposed to the iPhone through `bomb_mobile`.
+- `ios/BombCode/Speech/SpeechEngine.swift`, shared by the iPhone and the Mac:
+  - Rendering: sentences go through `AVSpeechSynthesizer.write(_:toBufferCallback:)` into a cached raw float file (`Caches/bomb-speech/<message>-<fnv>.f32` plus a JSON sidecar), keyed by message, voice and text.
+  - Playback starts once the first audio arrives and keeps rendering ahead of the playhead. It plays through `AVAudioEngine` → `AVAudioUnitTimePitch`, with exact seeks and pitch-true speed, recovering cleanly when it catches up with rendering.
+  - A sentence-to-time map is kept (no highlighting yet).
+  - Voices are sorted with your language first, then Personal, Premium, Enhanced, Default, with novelty voices hidden. There's a best-voice fallback, a needs-a-better-voice check, and Personal Voice authorization.
+- Mac: `bomb-speak` (built by `build.rs` beside `bomb-dictate`), driven through `speech::SpeechEngine`; `models::read_aloud` keeps playback state and settings (kv `read_aloud`).
+  - A speaker sits on every finished reply.
+  - A player is docked above the composer: play/pause, ±15 s, a click-or-drag timeline showing rendered vs still to come, elapsed and estimated total, speed 0.75–2× (remembered), close, and go-to-message.
+  - Reading stops when you leave the thread.
+  - Settings → Voice: voices grouped with previews, speed, a guide to downloading better voices plus a button that opens Spoken Content, and Personal Voice.
+- iPhone: `ReadAloud`.
+  - Same engine, with the `.playback`/`.spokenAudio` session, background audio, and lock-screen controls (`MPNowPlayingInfoCenter`, `MPRemoteCommandCenter`).
+  - Dictation and reading pause each other.
+  - Reply footer (time, copy, speaker), mini player above the composer, and a Voice settings sheet from a gear on the thread list.
+- Older systems: everything is gated (Personal Voice on iOS 17/macOS 14; the voices-changed notice on macOS 14). The Mac helper targets macOS 13, and read-aloud hides itself where the helper can't run.
+- Checked: the engine on this Mac, muted (render, play, seek, 2×, end, cache); the iPhone player in the simulator on a mock reply; 295 tests; workspace clippy clean. Not checked: hearing it, the Mac player and Voice page on screen, and the lock-screen controls on a real iPhone.

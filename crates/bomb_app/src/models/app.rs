@@ -47,6 +47,9 @@ struct ServerPreview {
     local_url: String,
 }
 
+/// A paired server's threads, workspaces and projects, as last fetched.
+type ServerLists = (Vec<ThreadDto>, Vec<grok_persistence::WorkspaceRecord>, Vec<String>);
+
 /// How the sidebar orders projects and the threads inside them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SidebarSort {
@@ -246,7 +249,7 @@ pub struct AppModel {
     threads_loaded: bool,
     local_workspaces: Vec<grok_persistence::WorkspaceRecord>,
     local_projects: Vec<String>,
-    server_lists: HashMap<String, (Vec<ThreadDto>, Vec<grok_persistence::WorkspaceRecord>, Vec<String>)>,
+    server_lists: HashMap<String, ServerLists>,
     /// Which folder on this Mac is a copy of which server project.
     pub project_links: Vec<crate::remote::sync::Link>,
     /// A dev server running on a paired server, reached through a forwarded local port.
@@ -2449,7 +2452,7 @@ impl AppModel {
 
     pub fn add_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         // The whole home folder (or the disk) as one project makes every thread copy everything.
-        if path.parent().is_none() || std::env::var_os("HOME").is_some_and(|home| PathBuf::from(home) == path) {
+        if path.parent().is_none() || std::env::var_os("HOME").is_some_and(|home| home == path.as_os_str()) {
             self.fail("Choose a project folder inside your home folder, not the home folder itself. New projects go in Documents/BombCode.".into(), cx);
             return;
         }

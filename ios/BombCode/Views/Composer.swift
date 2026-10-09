@@ -104,6 +104,8 @@ struct Composer: View {
         .overlay(RoundedRectangle(cornerRadius: Theme.composerCorner).stroke(Theme.hairline, lineWidth: 1))
         .onChange(of: picks) { _, items in Task { await attach(items) } }
         .onDisappear { Task { await stopDictation() } }
+        // Reading a reply aloud stops dictation.
+        .onReceive(NotificationCenter.default.publisher(for: ReadAloud.playbackStarted)) { _ in Task { await stopDictation() } }
     }
 
     /// Tap to record, tap to stop. The words are added after what's typed once recording stops,
@@ -112,6 +114,7 @@ struct Composer: View {
         guard #available(iOS 26.0, *) else { return }
         if dictation != nil { return await stopDictation() }
         dictationError = nil
+        NotificationCenter.default.post(name: ReadAloud.dictationStarted, object: nil)
         levels = []
         recordingSince = .now
         let recorder = Dictation()

@@ -68,6 +68,22 @@ final class ThreadModel {
     }
 
     var rows: [TranscriptRow] { TranscriptRow.build(entries) }
+
+    /// The reply that closes each turn (its last text before the next prompt): it gets the footer.
+    var finalReplyIds: Set<UInt64> {
+        var ids = Set<UInt64>()
+        var pending: UInt64?
+        for entry in entries {
+            if entry.role == .you {
+                if let id = pending { ids.insert(id) }
+                pending = nil
+            } else if entry.role == .agent, case .text = entry.body, entry.media.isEmpty {
+                pending = entry.id
+            }
+        }
+        if let id = pending { ids.insert(id) }
+        return ids
+    }
 }
 
 /// How the machine names a subagent's step in its parent: "Subagent · Explore".

@@ -72,6 +72,8 @@ struct ThreadScreen: View {
             Button("Cancel", role: .cancel) {}
         }
         .onAppear {
+            // Reading belongs to the thread it came from; opening another stops it (a subagent of it doesn't).
+            if subagent == nil, let playing = ReadAloud.shared.playing, playing.threadId != threadId { ReadAloud.shared.close() }
             let model = machine.open(threadId: threadId)
             thread = model
             if let summary = model.summary {
@@ -113,10 +115,19 @@ struct ThreadScreen: View {
             .scrollIndicators(.hidden)
             .scrollDismissesKeyboard(.interactively)
             .defaultScrollAnchor(.bottom)
-            .onChange(of: thread.revision) { proxy.scrollTo("bottom", anchor: .bottom) }
+            .onChange(of: thread.revision) { if ReadAloud.shared.reveal == nil { proxy.scrollTo("bottom", anchor: .bottom) } }
+            // The player asked to show the message it's reading.
+            .onChange(of: ReadAloud.shared.reveal) { _, entry in
+                guard let entry else { return }
+                withAnimation { proxy.scrollTo(entry, anchor: .top) }
+                ReadAloud.shared.reveal = nil
+            }
         }
         .safeAreaInset(edge: .bottom) {
             VStack(spacing: 8) {
+                if ReadAloud.shared.playing?.threadId == threadId {
+                    MiniPlayer()
+                }
                 StatusLine(thread: thread)
                 if let error { Text(error).font(Theme.caption).foregroundStyle(Theme.danger).frame(maxWidth: .infinity, alignment: .leading) }
                 if subagent != nil {

@@ -18,7 +18,61 @@ struct AgentReply: View {
                     PictureTile(media: media, thread: thread)
                 }
             }
+            if !entry.streaming && !entry.text.isEmpty && thread.finalReplyIds.contains(entry.id) {
+                ReplyFooter(entry: entry, thread: thread)
+            }
         }
+    }
+}
+
+/// Under a finished reply: when it came, copy, and read aloud.
+struct ReplyFooter: View {
+    let entry: EntryView
+    let thread: ThreadModel
+    private let reader = ReadAloud.shared
+
+    var body: some View {
+        let reading = reader.isReading(threadId: thread.id, entry: entry.id)
+        HStack(spacing: 14) {
+            Text(Date(timeIntervalSince1970: TimeInterval(entry.atMs) / 1000), style: .time)
+                .font(Theme.caption)
+                .foregroundStyle(Theme.textFaint)
+            CopyIcon(text: entry.text)
+            Button {
+                reader.toggle(machineId: thread.machine.id, threadId: thread.id, entry: entry.id, markdown: entry.text)
+            } label: {
+                Image(systemName: reading ? "waveform" : "speaker.wave.2")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(reading ? Theme.accent : Theme.textFaint)
+                    .symbolEffect(.variableColor.iterative, isActive: reading && reader.status.playing)
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(reading ? "Stop reading" : "Read aloud")
+            Spacer()
+        }
+        .padding(.horizontal, 2)
+    }
+}
+
+/// A copy icon that ticks once it has copied.
+struct CopyIcon: View {
+    let text: String
+    @State private var copied = false
+
+    var body: some View {
+        Button {
+            UIPasteboard.general.string = text
+            copied = true
+            Task { try? await Task.sleep(for: .seconds(1.5)); copied = false }
+        } label: {
+            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(copied ? Theme.success : Theme.textFaint)
+                .frame(width: 24, height: 24)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Copy")
     }
 }
 

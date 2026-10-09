@@ -55,6 +55,7 @@ struct ThreadList: View {
     @State private var search = ""
     @State private var showMachines = false
     @State private var showNew = false
+    @State private var showVoice = false
     @State private var expanded: Set<String> = []
     @AppStorage("list.sort") private var sort: ListSort = .recent
     @AppStorage("list.show") private var show: ListShow = .all
@@ -144,6 +145,9 @@ struct ThreadList: View {
         .background { BombBackground() }
         .toolbar(.hidden, for: .navigationBar)
         .sheet(isPresented: $showMachines) { MachinesView() }
+        .sheet(isPresented: $showVoice) { VoiceSettings() }
+        // Back at the list, the thread being read is closed.
+        .onAppear { if ReadAloud.shared.playing != nil { ReadAloud.shared.close() } }
         .sheet(isPresented: $showNew) {
             NewThreadSheet { ref in path.append(ref) }
         }
@@ -161,6 +165,14 @@ struct ThreadList: View {
         HStack(spacing: 10) {
             Wordmark()
             Spacer()
+            Button { showVoice = true } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(Theme.textMuted)
+                    .frame(width: 34, height: 34)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Voice settings")
             Button { showMachines = true } label: { MachinesPill() }
                 .buttonStyle(.plain)
             Button { showNew = true } label: {

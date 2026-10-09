@@ -1955,7 +1955,7 @@ impl Render for ComposerView {
                 cx.notify();
             }))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
-                if ev.keystroke.key == "escape" && this.foundry_setup {this.foundry_setup=false;cx.stop_propagation();cx.notify();return;}
+                if ev.keystroke.key == "escape" && this.foundry_setup {this.foundry_setup=false;cx.stop_propagation();cx.notify();}
             }))
             // ⌘V reaches the text box as its own Paste action before any key listener here runs, so
             // attachments are taken in the capture phase, on the way down. Plain text is left to the box.

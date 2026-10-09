@@ -287,7 +287,7 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
     let mut columns: [Vec<_>; 3] = Default::default();
     for b in features {
         let workspace = workspace_for(&b.name);
-        let working = workspace.is_some_and(|w| running(w));
+        let working = workspace.is_some_and(running);
         let column = if working || (workspace.is_some() && b.ahead == 0 && b.behind == 0) { 0 } else if b.ahead > 0 { 1 } else { 2 };
         columns[column].push((b, workspace, working));
     }

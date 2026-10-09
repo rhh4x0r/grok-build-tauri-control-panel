@@ -161,7 +161,7 @@ impl Remotes {
 
     pub fn all(&self) -> Vec<Arc<RemoteCore>> {
         let mut all: Vec<_> = self.servers.read().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
-        all.sort_by(|a, b| a.config.name.to_lowercase().cmp(&b.config.name.to_lowercase()));
+        all.sort_by_key(|a| a.config.name.to_lowercase());
         all
     }
 
