@@ -10,6 +10,7 @@ pub mod thread_setup;
 pub mod prompt_sources;
 pub mod workspaces;
 pub mod git_ui;
+pub mod media;
 
 use std::path::PathBuf;
 
@@ -745,6 +746,11 @@ pub async fn send_prompt(
     if state.foundry.for_thread(&id.to_string()).is_some_and(|r| !matches!(r.status, bomb_foundry::RunStatus::Completed | bomb_foundry::RunStatus::Stopped)) {
         return Err("This thread has a Foundry run. Stop the run before sending a separate prompt.".into());
     }
+    // Its agent may still be starting (woken when the thread was opened): wait for it rather than
+    // fail. A start that failed is retried below, like any failed connection.
+    if state.registry.get_snapshot(id).is_ok_and(|s| s.metadata.status == grok_events::SessionStatus::Starting) {
+        let _ = wait_until_idle(state, &id.to_string(), std::time::Duration::from_secs(90)).await;
+    }
     let _gate = state.workspace_gate.lock().await;
     let cwd = state.registry.get_snapshot(id).ok().map(|s|s.metadata.cwd)
         .or_else(||state.persistence.get_session(id).ok().map(|s|s.cwd));
@@ -766,6 +772,7 @@ pub async fn send_prompt(
 
     let requested_model = want_model.clone();
     let mut switch_notice = None;
+    let was_live = state.registry.is_live(id);
     // Switching backend/model mid-thread: restart the thread under the new
     // agent. Cross-agent session/load can't work, so the resume ladder lands
     // on history-only and injects the prior transcript as context.
@@ -813,6 +820,15 @@ pub async fn send_prompt(
             always_approve,
         )
         .await?;
+    } else if was_live && switch_notice.is_none() {
+        // A resume applies the mode sent with the prompt; an agent that was already running
+        // needs it applied here, or a mode picked on the phone would be ignored.
+        if let Some(mode) = approval_mode.as_deref().and_then(parse_approval_mode) {
+            let current = state.registry.get_snapshot(id).ok().map(|s| s.metadata.approval_mode);
+            if current != Some(mode) {
+                state.registry.set_approval_mode(id, mode).await.map_err(err)?;
+            }
+        }
     }
 
     // Smart thread naming on the FIRST prompt: instant word-slug, then an
@@ -1423,13 +1439,7 @@ pub async fn set_approval_mode(state: &AppState, id: String, mode: String) -> Re
     {
         return Err("Inline is read-only. Create a thread to make changes.".into());
     }
-    let mode = match mode.to_lowercase().as_str() {
-        "plan" => grok_control_core::ApprovalMode::Plan,
-        "auto" => grok_control_core::ApprovalMode::Auto,
-        "yolo" | "always_approve" => grok_control_core::ApprovalMode::Yolo,
-        "ask" | "default" => grok_control_core::ApprovalMode::Ask,
-        other => return Err(format!("unknown approval mode: {other}")),
-    };
+    let Some(mode) = parse_approval_mode(&mode) else { return Err(format!("unknown approval mode: {mode}")) };
     if state.registry.is_live(id) {
         state
             .registry
@@ -2364,6 +2374,35 @@ fn extract_approved_mcp_from_meta(json: &str) -> Vec<String> {
         })
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default()
+}
+
+/// "plan", "ask", "auto" or "yolo", as clients send them.
+fn parse_approval_mode(mode: &str) -> Option<grok_control_core::ApprovalMode> {
+    match mode.to_lowercase().as_str() {
+        "plan" => Some(grok_control_core::ApprovalMode::Plan),
+        "auto" => Some(grok_control_core::ApprovalMode::Auto),
+        "yolo" | "always_approve" => Some(grok_control_core::ApprovalMode::Yolo),
+        "ask" | "default" => Some(grok_control_core::ApprovalMode::Ask),
+        _ => None,
+    }
+}
+
+/// Start a sleeping thread's agent ahead of its next prompt (a phone opened the thread), in the
+/// mode it was saved with, so that prompt doesn't wait for the agent to launch and load.
+pub async fn wake_thread(state: &AppState, id: String) -> Result<(), String> {
+    let id = Uuid::parse_str(&id).map_err(err)?;
+    if state.registry.is_live(id) {
+        return Ok(());
+    }
+    let rec = state.persistence.get_session(id).map_err(err)?;
+    let busy_elsewhere = state.foundry.for_thread(&id.to_string()).is_some_and(|r| !matches!(r.status, bomb_foundry::RunStatus::Completed | bomb_foundry::RunStatus::Stopped));
+    let archived = state.persistence.workspace_for_session(id).map_err(err)?.is_some_and(|w| w.archived_at.is_some());
+    if rec.model.eq_ignore_ascii_case("mock") || busy_elsewhere || archived {
+        return Ok(());
+    }
+    let mode = extract_meta_string(&rec.metadata_json, "approvalMode")
+        .or_else(|| extract_meta_string(&rec.metadata_json, "approval_mode"));
+    resume_saved_session(state, id, None, None, mode, None, None).await.map(|_| ())
 }
 
 fn extract_meta_string(json: &str, key: &str) -> Option<String> {

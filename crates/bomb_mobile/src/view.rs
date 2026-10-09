@@ -70,6 +70,16 @@ pub struct EntryImage {
     pub name: Option<String>,
 }
 
+/// A picture or video on the machine that an entry shows; fetch it with `Machine::fetch_media`.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct MediaRef {
+    /// Absolute path on the machine.
+    pub path: String,
+    pub is_video: bool,
+    /// The link text it was given, else the file's name.
+    pub title: String,
+}
+
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct EntryView {
     /// Stable within one load of a thread; use it as the row identity.
@@ -80,7 +90,10 @@ pub struct EntryView {
     pub body: EntryBody,
     /// Still receiving text.
     pub streaming: bool,
+    /// Images that came with the entry (data inline).
     pub images: Vec<EntryImage>,
+    /// Pictures and videos the entry points at on the machine: saved images, and files a reply links to.
+    pub media: Vec<MediaRef>,
 }
 
 impl From<&Entry> for EntryView {
@@ -106,7 +119,8 @@ impl From<&Entry> for EntryView {
             role: entry.role.into(),
             body,
             streaming: entry.streaming,
-            images: entry.images.iter().map(|i| EntryImage { mime_type: i.mime_type.clone(), data: i.data.clone(), name: i.name.clone() }).collect(),
+            images: entry.images.iter().filter(|i| !i.data.is_empty()).map(|i| EntryImage { mime_type: i.mime_type.clone(), data: i.data.clone(), name: i.name.clone() }).collect(),
+            media: media_refs(entry),
         }
     }
 }
@@ -150,6 +164,8 @@ impl PresenceView {
 }
 
 /// How to bring Swift's copy of an open thread up to date.
+// Crossing into Swift copies each patch anyway; boxing the entry wouldn't save anything.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, uniffi::Enum)]
 pub enum ThreadPatch {
     /// Replace everything (first load, a reload, or a rebuild after reconnecting).
@@ -348,4 +364,68 @@ pub fn activity_label(thoughts: u32, steps: Vec<ToolStep>) -> String {
 #[uniffi::export]
 pub fn running_label(step: ToolStep) -> String {
     bomb_transcript::summary::running_label(&tool_row(&step))
+}
+
+const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "heic"];
+/// What the iPhone can play; `.webm` can't be.
+const VIDEO_EXTS: &[&str] = &["mp4", "m4v", "mov"];
+
+fn media_kind(path: &str) -> Option<bool> {
+    let ext = path.rsplit_once('.')?.1.to_ascii_lowercase();
+    if VIDEO_EXTS.contains(&ext.as_str()) { Some(true) } else if IMAGE_EXTS.contains(&ext.as_str()) { Some(false) } else { None }
+}
+
+/// Saved images without their data, then pictures and videos a reply links to: Markdown targets
+/// (`![t](p)`, `[t](p)`) and bare absolute paths, as the desktop finds them. Web links are left out.
+pub(crate) fn media_refs(entry: &Entry) -> Vec<MediaRef> {
+    let mut out: Vec<MediaRef> = Vec::new();
+    let mut add = |title: Option<&str>, target: &str| {
+        let target = target.trim().trim_start_matches("file://").trim_matches(|c| matches!(c, '<' | '>' | '`' | '"' | '\''));
+        let target = target.replace("%20", " ");
+        if !target.starts_with('/') || out.iter().any(|m| m.path == target) { return; }
+        let Some(is_video) = media_kind(&target) else { return };
+        let name = target.rsplit('/').next().unwrap_or(&target).to_string();
+        let title = title.map(str::trim).filter(|t| !t.is_empty()).map(String::from).unwrap_or(name);
+        out.push(MediaRef { path: target, is_video, title });
+    };
+    for image in entry.images.iter().filter(|i| i.data.is_empty()) {
+        if let Some(path) = &image.name { add(None, path); }
+    }
+    if entry.role != Role::Agent { return out; }
+    let Body::Text(text) = &entry.body else { return out };
+    let mut rest = text.as_str();
+    while let Some(i) = rest.find("](") {
+        let title_start = rest[..i].rfind('[').map(|s| s + 1).unwrap_or(i);
+        let title = &rest[title_start..i];
+        let after = &rest[i + 2..];
+        let Some(j) = after.find(')') else { break };
+        add(Some(title), &after[..j]);
+        rest = &after[j + 1..];
+    }
+    for token in text.split_whitespace() {
+        let token = token.trim_matches(|c| matches!(c, '`' | '"' | '\'' | '(' | '<'));
+        if token.starts_with('/') || token.starts_with("file://") {
+            add(None, token.trim_end_matches(['.', ',', ')', ';', ':', '>']));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod media_tests {
+    use super::*;
+
+
+    fn agent(text: &str) -> Entry {
+        Entry { id: 1, at: chrono::Utc::now(), role: Role::Agent, body: Body::Text(text.into()), streaming: false, images: vec![] }
+    }
+
+    #[test]
+    fn a_reply_shows_the_pictures_and_videos_it_links_to() {
+        let refs = media_refs(&agent("Done: ![the still](/Users/max/out/still.png) and the video is at `/Users/max/out/loop.mp4`. See https://x.com/a.png too."));
+        assert_eq!(refs.len(), 2);
+        assert_eq!((refs[0].path.as_str(), refs[0].is_video, refs[0].title.as_str()), ("/Users/max/out/still.png", false, "the still"));
+        assert_eq!((refs[1].path.as_str(), refs[1].is_video, refs[1].title.as_str()), ("/Users/max/out/loop.mp4", true, "loop.mp4"));
+        assert!(media_refs(&agent("Edited /Users/max/src/main.rs and clip.webm")).is_empty());
+    }
 }

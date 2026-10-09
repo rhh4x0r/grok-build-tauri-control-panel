@@ -200,6 +200,75 @@ struct PendingPermission {
     options: Vec<PermissionOptionInfo>,
 }
 
+impl AcpClient {
+    /// Agent activity with no prompt open is a turn the agent started itself: say it's working,
+    /// and watch for it to finish (see `UnpromptedTurn`).
+    async fn note_unprompted(&self, bus: &EventBus, sid: Uuid, params: &Value) {
+        if self.prompts_open.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            return;
+        }
+        let update = params.get("update").unwrap_or(params);
+        let kind = update.get("sessionUpdate").and_then(Value::as_str).unwrap_or_default();
+        if !matches!(kind, "agent_message_chunk" | "agent_thought_chunk" | "tool_call" | "tool_call_update" | "plan") {
+            return;
+        }
+        let starting = {
+            let mut guard = self.unprompted.lock().unwrap_or_else(|e| e.into_inner());
+            let starting = guard.is_none();
+            let turn = guard.get_or_insert_with(UnpromptedTurn::default);
+            turn.last = Some(tokio::time::Instant::now());
+            if let Some(id) = update.get("toolCallId").and_then(Value::as_str) {
+                match update.get("status").and_then(Value::as_str) {
+                    Some("completed" | "failed") => { turn.open_tools.remove(id); }
+                    _ => { turn.open_tools.insert(id.to_string()); }
+                }
+            }
+            starting
+        };
+        if !starting {
+            return;
+        }
+        info!("agent started a turn on its own");
+        bus.emit_status(sid, SessionStatus::Running).await;
+        let (unprompted, prompts_open, bus) = (self.unprompted.clone(), self.prompts_open.clone(), self.event_bus.clone());
+        tokio::spawn(async move {
+            let began = tokio::time::Instant::now();
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                // A prompt took over; its answer ends the turn.
+                if prompts_open.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                    return;
+                }
+                let finished = {
+                    let mut guard = unprompted.lock().unwrap_or_else(|e| e.into_inner());
+                    let Some(turn) = guard.as_ref() else { return };
+                    let quiet = turn.last.is_none_or(|at| at.elapsed() >= UNPROMPTED_QUIET);
+                    let finished = quiet && (turn.open_tools.is_empty() || began.elapsed() >= UNPROMPTED_MAX);
+                    if finished { *guard = None; }
+                    finished
+                };
+                if finished {
+                    info!("agent finished its own turn");
+                    if let Some(bus) = &bus {
+                        bus.emit(ControlEvent::Raw {
+                            session_id: Some(sid),
+                            payload: json!({
+                                "channel": "term",
+                                "stream": "acp",
+                                "line": "← agent finished a turn it started itself",
+                                "turn_complete": true,
+                                "stop_reason": "end_turn",
+                            }),
+                        });
+                        bus.emit_status(sid, SessionStatus::Idle).await;
+                    }
+                    return;
+                }
+            }
+        });
+    }
+}
+
 /// The longest prefix of `s` within `max` bytes that ends on a character boundary. Slicing at
 /// a raw byte index panics inside a multi-byte character (e.g. '─'), and a panic in the event
 /// loop silently stops a thread's updates while its agent keeps working.
@@ -289,7 +358,25 @@ pub struct AcpClient {
     current_mode: RwLock<Option<String>>,
     /// Host-side terminals for ACP terminal/* (required for run_terminal_command).
     terminals: TerminalRegistry,
+    /// `session/prompt` requests not yet answered.
+    prompts_open: Arc<std::sync::atomic::AtomicUsize>,
+    /// A turn the agent started on its own, which no prompt's answer will end.
+    unprompted: Arc<std::sync::Mutex<Option<UnpromptedTurn>>>,
 }
+
+/// Claude Code starts a turn by itself when a background job it launched finishes. With no
+/// prompt to answer there's no stop reason either, so it ends when the agent goes quiet.
+#[derive(Default)]
+struct UnpromptedTurn {
+    last: Option<tokio::time::Instant>,
+    /// Tool calls started and not yet finished: a long one is quiet, not done.
+    open_tools: std::collections::HashSet<String>,
+}
+
+/// How long an unprompted turn stays quiet, with no tool running, before it counts as finished.
+const UNPROMPTED_QUIET: Duration = Duration::from_secs(8);
+/// An unprompted turn ends by this age even if a tool call never reported back.
+const UNPROMPTED_MAX: Duration = Duration::from_secs(30 * 60);
 
 impl AcpClient {
     pub async fn connect(
@@ -505,6 +592,8 @@ impl AcpClient {
             model_catalog: RwLock::new(crate::ModelCatalog::default()),
             current_mode: RwLock::new(None),
             terminals: TerminalRegistry::new(default_cwd),
+            prompts_open: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            unprompted: Arc::new(std::sync::Mutex::new(None)),
         });
 
         client.initialize().await?;
@@ -584,6 +673,8 @@ impl AcpClient {
             model_catalog: RwLock::new(crate::ModelCatalog::default()),
             current_mode: RwLock::new(None),
             terminals: TerminalRegistry::new(PathBuf::from("/tmp")),
+            prompts_open: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            unprompted: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -1556,6 +1647,10 @@ impl AcpClient {
         let rx = transport
             .send_request("session/prompt", Some(params_val))
             .await?;
+        // A prompt's answer ends whatever the agent was doing on its own, too.
+        self.prompts_open.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *self.unprompted.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let prompts_open = self.prompts_open.clone();
 
         let bus = self.event_bus.clone();
         let control_id = self.control_session_id;
@@ -1565,6 +1660,7 @@ impl AcpClient {
 
         tokio::spawn(async move {
             let response = tokio::time::timeout(prompt_timeout, rx).await;
+            prompts_open.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             if generation.load(std::sync::atomic::Ordering::SeqCst) != turn {
                 return;
             }
@@ -2530,6 +2626,7 @@ impl AcpClient {
                     return;
                 }
                 self.map_session_update(bus, sid, &params).await;
+                self.note_unprompted(bus, sid, &params).await;
             }
             m if m.contains("tool") => {
                 let tool = params
@@ -3510,6 +3607,49 @@ impl AcpClient {
 
     pub fn cwd(&self) -> &Path {
         &self.config.cwd
+    }
+}
+
+#[cfg(test)]
+mod unprompted_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_turn_the_agent_starts_itself_finishes_once_it_goes_quiet() {
+        let bus = Arc::new(EventBus::new());
+        let mut events = bus.subscribe();
+        let client = AcpClient::mock_for_tests("self-started", Some(bus.clone()));
+        let sid = client.control_session_id;
+        let update = |u: Value| json!({ "update": u });
+        client.note_unprompted(&bus, sid, &update(json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "status": "pending" }))).await;
+        // A long tool is quiet, not finished.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert!(client.unprompted.lock().unwrap().is_some());
+        client.note_unprompted(&bus, sid, &update(json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed" }))).await;
+        client.note_unprompted(&bus, sid, &update(json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Done." } }))).await;
+        tokio::time::sleep(UNPROMPTED_QUIET + Duration::from_secs(2)).await;
+        assert!(client.unprompted.lock().unwrap().is_none());
+
+        let mut statuses = Vec::new();
+        let mut completed = false;
+        while let Ok(event) = events.try_recv() {
+            match event {
+                ControlEvent::SessionStatusChanged { status, .. } => statuses.push(status),
+                ControlEvent::Raw { payload, .. } if payload["turn_complete"] == true => completed = true,
+                _ => {}
+            }
+        }
+        assert_eq!(statuses, vec![SessionStatus::Running, SessionStatus::Idle]);
+        assert!(completed, "the turn says it finished");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn activity_during_a_prompt_is_that_prompt_s_turn() {
+        let bus = Arc::new(EventBus::new());
+        let client = AcpClient::mock_for_tests("prompted", Some(bus.clone()));
+        client.prompts_open.store(1, std::sync::atomic::Ordering::SeqCst);
+        client.note_unprompted(&bus, client.control_session_id, &json!({ "update": { "sessionUpdate": "agent_message_chunk" } })).await;
+        assert!(client.unprompted.lock().unwrap().is_none());
     }
 }
 

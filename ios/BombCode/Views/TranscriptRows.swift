@@ -7,7 +7,7 @@ struct TranscriptRowView: View {
     var body: some View {
         switch row {
         case let .user(entry): UserBubble(entry: entry)
-        case let .agent(entry): MarkdownText(source: entry.text).padding(.horizontal, 2)
+        case let .agent(entry): AgentReply(entry: entry, thread: thread)
         case let .activity(_, items): ActivityLine(items: items)
         case let .plan(entry): PlanCard(entry: entry)
         case let .approval(entry): ApprovalCard(entry: entry, thread: thread)

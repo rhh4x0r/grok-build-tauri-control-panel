@@ -170,6 +170,9 @@ pub struct Thread {
     pub protocol_log: VecDeque<String>,
     pub explanations: Vec<Explanation>,
     pub explain_pending: bool,
+    /// Keep a saved image this device can't read (a phone loading a Mac's thread) as a reference:
+    /// an attachment with no data, named by its path, for the client to fetch.
+    pub keep_unreadable_images: bool,
     open_tools: HashSet<String>,
     next_id: u64,
 }
@@ -305,16 +308,20 @@ impl Thread {
                     ) else {
                         continue;
                     };
-                    if let Ok(bytes) = std::fs::read(&path) {
-                        use base64::Engine;
-                        let data = base64::engine::general_purpose::STANDARD.encode(bytes);
-                        let e = self.push(Role::Agent, Body::Text(String::new()), at);
-                        e.images.push(ImageAttachment {
-                            mime_type: mime,
-                            data,
-                            name: Some(path),
-                        });
-                    }
+                    let data = match std::fs::read(&path) {
+                        Ok(bytes) => {
+                            use base64::Engine;
+                            base64::engine::general_purpose::STANDARD.encode(bytes)
+                        }
+                        Err(_) if self.keep_unreadable_images => String::new(),
+                        Err(_) => continue,
+                    };
+                    let e = self.push(Role::Agent, Body::Text(String::new()), at);
+                    e.images.push(ImageAttachment {
+                        mime_type: mime,
+                        data,
+                        name: Some(path),
+                    });
                 }
                 _ => {
                     // Breadcrumbs the old UI needed so the column never looked
@@ -717,9 +724,18 @@ impl Thread {
                 }
             }
             // note_prompt starts the meter. Late Running/approval acknowledgments
-            // must not reopen a completed turn.
-            SessionStatus::Running => {}
-            SessionStatus::Starting | SessionStatus::Recovering => {}
+            // must not reopen a completed turn; a sent prompt reaching the agent reads as thinking.
+            SessionStatus::Running => {
+                if self.presence.phase == Phase::Send {
+                    self.presence.signal(Phase::Think, Patch::default(), now);
+                }
+            }
+            // A sent prompt is waiting for its thread's agent to start.
+            SessionStatus::Starting | SessionStatus::Recovering => {
+                if self.presence.phase == Phase::Send {
+                    self.presence.waking = true;
+                }
+            }
         }
         ch.push(Change::Presence);
         ch
@@ -1484,6 +1500,20 @@ mod tests {
         // an idle status with no turn activity is silent
         let ch = t.apply(&status(SessionStatus::Idle), now);
         assert!(!ch.contains(&Change::Boom));
+    }
+
+    #[test]
+    fn a_prompt_says_when_it_waits_for_the_agent_to_start_then_thinks() {
+        let now = Instant::now();
+        let mut t = Thread::new();
+        t.note_prompt("keep going", vec![], now);
+        assert_eq!(t.presence.label(now), "Sent");
+        t.apply(&status(SessionStatus::Starting), now);
+        assert_eq!(t.presence.label(now), "Starting the agent");
+        t.apply(&status(SessionStatus::Running), now);
+        assert_eq!(t.presence.phase, Phase::Think);
+        assert_eq!(t.presence.label(now), "Thinking");
+        assert!(!t.presence.waking);
     }
 
     #[test]

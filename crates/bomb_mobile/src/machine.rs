@@ -199,6 +199,53 @@ impl Machine {
         Ok(self.call("sidebar_prefs", Value::Null).await.unwrap_or_default())
     }
 
+    /// Download a picture or video a thread shows (see `EntryView::media`) into this app's temporary
+    /// files, and return the local path. A copy fetched before is reused while its size matches.
+    pub async fn fetch_media(&self, thread_id: String, path: String) -> Result<String> {
+        use base64::Engine;
+        use std::hash::{Hash, Hasher};
+        parse_id(&thread_id)?;
+        let shared = self.shared.clone();
+        on_runtime(async move {
+            let ask = |offset: u64| {
+                let shared = shared.clone();
+                let (thread_id, path) = (thread_id.clone(), path.clone());
+                async move { shared.request("read_media", json!({ "thread": thread_id, "path": path, "offset": offset })).await }
+            };
+            let first = ask(0).await?;
+            let size = first["size"].as_u64().unwrap_or(0);
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (&shared.machine.id, &path, size).hash(&mut hasher);
+            let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+            let dir = std::env::temp_dir().join("bomb-media");
+            let local = dir.join(format!("{:016x}.{ext}", hasher.finish()));
+            if std::fs::metadata(&local).is_ok_and(|m| m.len() == size) {
+                return Ok(local.display().to_string());
+            }
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let part = local.with_extension(format!("{ext}.part"));
+            let mut file = std::fs::File::create(&part).map_err(|e| e.to_string())?;
+            let mut got: u64 = 0;
+            let mut chunk = first;
+            loop {
+                let data = base64::engine::general_purpose::STANDARD.decode(chunk["data"].as_str().unwrap_or_default()).map_err(|e| e.to_string())?;
+                if data.is_empty() { break; }
+                std::io::Write::write_all(&mut file, &data).map_err(|e| e.to_string())?;
+                got += data.len() as u64;
+                if got >= size { break; }
+                chunk = ask(got).await?;
+            }
+            drop(file);
+            if got < size {
+                let _ = std::fs::remove_file(&part);
+                return Err("The file stopped arriving partway.".into());
+            }
+            std::fs::rename(&part, &local).map_err(|e| e.to_string())?;
+            Ok(local.display().to_string())
+        })
+        .await
+    }
+
     pub async fn account_usage(&self) -> Result<Vec<UsageView>> {
         self.call("account_usage", Value::Null).await
     }
@@ -212,6 +259,10 @@ impl Machine {
             // Offline, it loads when the connection comes back.
             if shared.client().is_err() { return Ok(()); }
             shared.watch().await?;
+            // Start its agent now if it's asleep, so the next message doesn't wait for it.
+            // A machine too old to know `wake_thread` just says so; nothing to do then.
+            let waker = shared.clone();
+            runtime().spawn(async move { let _ = waker.request("wake_thread", json!({ "id": id.to_string() })).await; });
             shared.load(id).await
         })
         .await
@@ -449,6 +500,8 @@ impl Shared {
             let Some(entry) = open.get_mut(&id) else { return Ok(()) };
             let held = entry.held.take().unwrap_or_default();
             let mut thread = Thread::new();
+            // Saved images live on the machine; keep them as paths for the app to fetch.
+            thread.keep_unreadable_images = true;
             thread.hydrate(&rows);
             // Saved rows drop an approval's id and choices; the machine still has them.
             for approval in &pending { thread.apply(approval, now); }
@@ -543,6 +596,18 @@ impl Shared {
                 (Some(row), ControlEvent::ApprovalResolved { .. }) => {
                     row.needs_approval = false;
                     true
+                }
+                // Named after its first prompt, then renamed by the title model or a person.
+                (Some(row), ControlEvent::Raw { payload, .. })
+                    if payload["channel"] == "thread" && payload["kind"] == "label" =>
+                {
+                    match payload["label"].as_str().map(str::trim).filter(|l| !l.is_empty()) {
+                        Some(label) if row.label.as_deref() != Some(label) => {
+                            row.label = Some(label.to_string());
+                            true
+                        }
+                        _ => false,
+                    }
                 }
                 (Some(row), ControlEvent::UserMessage { at, .. }) => {
                     row.updated_at = at.to_rfc3339();

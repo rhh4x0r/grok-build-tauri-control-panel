@@ -28,6 +28,8 @@ pub async fn dispatch(state: &AppState, origin: &str, method: &str, p: Value) ->
         // Threads
         "list_threads" => out(services::list_threads(state).await?),
         "sidebar_prefs" => out(services::sidebar_prefs(state).await?),
+        "wake_thread" => { services::wake_thread(state, arg(&p, "id")?).await?; Ok(Value::Null) }
+        "read_media" => out(services::media::read_media(state, arg(&p, "thread")?, arg(&p, "path")?, arg::<Option<u64>>(&p, "offset")?.unwrap_or(0), arg(&p, "length")?).await?),
         "snapshot" => {
             let id: String = arg(&p, "id")?;
             let mut snap = state.journal.snapshot(Uuid::parse_str(&id).map_err(|e| e.to_string())?)?;

@@ -140,6 +140,23 @@ async fn a_paired_phone_starts_a_thread_watches_it_and_answers_an_approval() {
     until(&screen, "the follow-up", |s| texts(s, EntryRole::You).contains(&"now add scoring".to_string())).await;
     assert!(machine.send_prompt(id.clone(), "x".into(), PromptOptions { approval_mode: Some("yolo".into()), ..Default::default() }).await.is_err());
 
+    // A picture in the thread's project arrives whole, in several pieces; files outside the
+    // thread, or that aren't pictures or videos, don't.
+    let picture = std::path::Path::new(&root).join("out").join("still.png");
+    std::fs::create_dir_all(picture.parent().unwrap()).unwrap();
+    let bytes: Vec<u8> = (0..5 * 1024 * 1024 + 123).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&picture, &bytes).unwrap();
+    let local = machine.fetch_media(id.clone(), picture.display().to_string()).await.unwrap();
+    assert_eq!(std::fs::read(&local).unwrap(), bytes);
+    assert_eq!(machine.fetch_media(id.clone(), picture.display().to_string()).await.unwrap(), local, "a fetched file is reused");
+    let elsewhere = tempfile::tempdir().unwrap();
+    let outside = elsewhere.path().join("other.png");
+    std::fs::write(&outside, b"not yours").unwrap();
+    assert!(machine.fetch_media(id.clone(), outside.display().to_string()).await.is_err());
+    let notes = std::path::Path::new(&root).join("notes.txt");
+    std::fs::write(&notes, b"secret").unwrap();
+    assert!(machine.fetch_media(id.clone(), notes.display().to_string()).await.is_err());
+
     // Backgrounding pauses; coming back reconnects.
     machine.set_active(false);
     until(&screen, "paused", |s| s.link == Some(LinkState::Paused)).await;

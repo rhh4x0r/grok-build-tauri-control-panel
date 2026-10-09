@@ -888,6 +888,7 @@ dependencies = [
 name = "bomb_mobile"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bomb_core",
  "bomb_link",
  "bomb_proto",

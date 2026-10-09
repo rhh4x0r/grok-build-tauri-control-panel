@@ -186,7 +186,9 @@ impl Journal {
 /// Lifecycle, approvals, prompts and errors reach every client, so a phone's thread list stays current;
 /// streamed text, tool calls and plans go only to clients that have the thread open.
 pub fn reaches(event: &ControlEvent, watching: Option<&HashSet<Uuid>>) -> bool {
-    let streamed = matches!(event, ControlEvent::AgentMessage { .. } | ControlEvent::ToolCall { .. } | ControlEvent::PlanUpdate { .. } | ControlEvent::Raw { .. });
+    // A thread's new name belongs to the thread list, which every client shows.
+    let renamed = matches!(event, ControlEvent::Raw { payload, .. } if payload["channel"] == "thread" && payload["kind"] == "label");
+    let streamed = !renamed && matches!(event, ControlEvent::AgentMessage { .. } | ControlEvent::ToolCall { .. } | ControlEvent::PlanUpdate { .. } | ControlEvent::Raw { .. });
     match (watching, session_of(event)) {
         (Some(threads), Some(session)) if streamed => threads.contains(&session),
         _ => true,
@@ -211,6 +213,8 @@ mod tests {
         let watching: HashSet<Uuid> = [open].into();
         assert!(reaches(&text(open), Some(&watching)));
         assert!(!reaches(&text(other), Some(&watching)));
+        let renamed = ControlEvent::Raw { session_id: Some(other), payload: serde_json::json!({ "channel": "thread", "kind": "label", "label": "Fix the login page" }) };
+        assert!(reaches(&renamed, Some(&watching)));
         assert!(reaches(&done(other), Some(&watching)), "lifecycle reaches everyone");
         assert!(reaches(&text(other), None), "no watch list means everything");
         assert!(reaches(&ControlEvent::Raw { session_id: None, payload: serde_json::Value::Null }, Some(&watching)));
