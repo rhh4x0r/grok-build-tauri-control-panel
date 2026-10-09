@@ -108,6 +108,37 @@ async fn a_paired_phone_starts_a_thread_watches_it_and_answers_an_approval() {
     assert!(machine.clone_project(made.clone(), Some("pocket-copy".into())).await.is_err(), "no local paths");
     assert!(machine.list_backends().await.unwrap().iter().any(|b| b.id == "grok"));
 
+    // A web server on the machine opens in the phone's browser: through a phone-side port, over the link.
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let site = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = site.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = site.accept().await.unwrap();
+                let mut request = [0u8; 256];
+                let n = socket.read(&mut request).await.unwrap();
+                let line = String::from_utf8_lossy(&request[..n]).lines().next().unwrap_or_default().to_string();
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{line}", line.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let local = machine.open_preview(port).await.unwrap();
+        // The machine's port is taken here (same computer), so the phone side picked another.
+        assert_ne!(local, port);
+        assert_eq!(machine.open_preview(port).await.unwrap(), local, "opening again reuses it");
+        for _ in 0..2 {
+            let mut browser = tokio::net::TcpStream::connect(("127.0.0.1", local)).await.unwrap();
+            browser.write_all(b"GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n").await.unwrap();
+            let mut page = String::new();
+            let _ = tokio::time::timeout(Duration::from_secs(5), browser.read_to_string(&mut page)).await;
+            assert!(page.ends_with("GET /hello HTTP/1.1"), "{page}");
+        }
+        machine.close_previews();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(tokio::net::TcpStream::connect(("127.0.0.1", local)).await.is_err(), "closed previews stop listening");
+        assert!(machine.thread_servers("not-a-thread".into()).await.unwrap().is_empty());
+    }
+
     // Read-aloud settings are shared: what the phone sets, the machine keeps, and every device hears of it.
     assert_eq!(machine.speech_settings().await.unwrap(), Some(Default::default()));
     machine.set_speech_settings(Some("fish-key".into()), Some("v123".into()), Some("Sarah".into()), Some(1.25)).await.unwrap();

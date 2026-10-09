@@ -30,6 +30,8 @@ pub async fn dispatch(state: &AppState, origin: &str, method: &str, p: Value) ->
         // Threads
         "list_threads" => out(services::list_threads(state).await?),
         "sidebar_prefs" => out(services::sidebar_prefs(state).await?),
+        // Web servers a thread's processes listen on, to open from a phone (read-only).
+        "thread_servers" => out(services::processes::servers_for_thread(state, &arg::<String>(&p, "thread")?).await?),
         "speech_settings" => out(services::speech_key::settings(state).await),
         "set_speech_settings" => {
             let voice: Option<String> = arg(&p, "voice")?;

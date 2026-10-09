@@ -35,7 +35,10 @@ struct MarkdownText: View {
     }
 
     private func inline(_ text: String) -> AttributedString {
-        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
+        var out = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
+        // `localhost:3000` addresses open the Mac's dev server on the phone (see ThreadScreen).
+        LocalLinks.mark(&out)
+        return out
     }
 
     enum Block {

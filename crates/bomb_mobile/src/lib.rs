@@ -12,6 +12,7 @@
 
 pub mod machine;
 pub mod pairing;
+mod preview;
 pub mod view;
 
 use std::future::Future;

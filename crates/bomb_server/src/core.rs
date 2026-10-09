@@ -294,10 +294,20 @@ async fn open_live(state: &Arc<AppState>, method: &str, params: &serde_json::Val
         }
         "forward_open" => {
             let port = number("port").filter(|p| (1..=65535).contains(p)).ok_or("name a port")? as u16;
-            // Only this machine's own loopback, where a project's dev server listens.
-            let socket = tokio::time::timeout(std::time::Duration::from_secs(3), tokio::net::TcpStream::connect(("127.0.0.1", port))).await
-                .map_err(|_| "Nothing answered on that port.".to_string())?
-                .map_err(|e| format!("Nothing is listening on that port: {e}"))?;
+            // Only this machine's own loopback, where a project's dev server listens: IPv4 first, then
+            // IPv6 (some dev servers bind "localhost" to ::1 only).
+            let connect = |host: &'static str| tokio::time::timeout(std::time::Duration::from_secs(3), tokio::net::TcpStream::connect((host, port)));
+            let socket = match connect("127.0.0.1").await {
+                Ok(Ok(socket)) => socket,
+                first => match connect("::1").await {
+                    Ok(Ok(socket)) => socket,
+                    _ => return Err(match first {
+                        Err(_) => "Nothing answered on that port.".to_string(),
+                        Ok(Err(e)) => format!("Nothing is listening on that port: {e}"),
+                        Ok(Ok(_)) => unreachable!(),
+                    }),
+                },
+            };
             let (mut from_socket, mut to_socket) = socket.into_split();
             let (tx, mut rx) = mpsc::channel::<bytes::Bytes>(64);
             tokio::spawn(async move {

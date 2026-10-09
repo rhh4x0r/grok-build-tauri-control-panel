@@ -277,3 +277,36 @@ mod tests {
     }
 }
 
+
+/// A web server a thread started, for a phone to open: the port and what's listening.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Server {
+    pub port: u16,
+    pub name: String,
+}
+
+/// The ports processes in a thread's folder (its worktree, and its project) are listening on.
+pub async fn servers_for_thread(state: &crate::AppState, id: &str) -> Result<Vec<Server>, String> {
+    let id = uuid::Uuid::parse_str(id).map_err(|e| e.to_string())?;
+    let (cwd, root) = match state.registry.get_snapshot(id) {
+        Ok(snap) => (snap.metadata.cwd, snap.metadata.project_root),
+        Err(_) => {
+            let rec = state.persistence.get_session(id).map_err(|e| e.to_string())?;
+            let root = serde_json::from_str::<serde_json::Value>(&rec.metadata_json).ok()
+                .and_then(|v| v.pointer("/metadata/projectRoot").and_then(|r| r.as_str()).map(String::from));
+            (rec.cwd, root)
+        }
+    };
+    let folders: Vec<String> = std::iter::once(cwd).chain(root).collect();
+    let mut servers: Vec<Server> = Vec::new();
+    for list in list_for_folders(&folders).await?.into_values() {
+        for process in list {
+            for port in process.ports {
+                if !servers.iter().any(|s| s.port == port) { servers.push(Server { port, name: process.name.clone() }); }
+            }
+        }
+    }
+    servers.sort_by_key(|s| s.port);
+    Ok(servers)
+}

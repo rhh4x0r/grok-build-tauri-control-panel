@@ -11,6 +11,9 @@ struct ThreadScreen: View {
     @State private var error: String?
     @State private var renaming = false
     @State private var newName = ""
+    /// Web servers the thread has running, and the one open in the browser.
+    @State private var servers: [ThreadServer] = []
+    @State private var preview: PreviewTarget?
 
     var body: some View {
         ZStack {
@@ -49,6 +52,11 @@ struct ThreadScreen: View {
                     }
                 }
             }
+            if !servers.isEmpty {
+                ToolbarItem(placement: .topBarTrailing) {
+                    ServersMenu(servers: servers) { preview = $0 }
+                }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     if subagent == nil {
@@ -64,6 +72,20 @@ struct ThreadScreen: View {
                         .frame(width: 32, height: 32)
                         .background(Circle().fill(Theme.bubble))
                 }
+            }
+        }
+        // A `localhost` link in a reply opens the Mac's server here, not the phone's own localhost.
+        .environment(\.openURL, OpenURLAction { url in
+            guard let target = LocalLinks.target(url) else { return .systemAction }
+            preview = target
+            return .handled
+        })
+        .fullScreenCover(item: $preview) { target in PreviewBrowser(machine: machine, target: target) }
+        // Keep the globe button current while the thread is on screen.
+        .task(id: threadId) {
+            while !Task.isCancelled {
+                if let found = try? await machine.machine.threadServers(threadId: threadId), found != servers { servers = found }
+                try? await Task.sleep(for: .seconds(5))
             }
         }
         .alert("Rename thread", isPresented: $renaming) {

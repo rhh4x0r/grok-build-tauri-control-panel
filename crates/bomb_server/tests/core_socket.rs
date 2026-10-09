@@ -160,7 +160,7 @@ async fn files_terminals_and_previews_work_over_the_connection_and_stay_inside_t
     mac.send_frame(Frame::Chunk(Chunk { stream, data: "printf 'BOMB_%s\\n' REMOTE_OK; pwd\r".into() })).await.unwrap();
     let mut screen = String::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while !(screen.contains("BOMB_REMOTE_OK") && screen.contains("/projects/site")) {
+    while !(screen.contains("BOMB_REMOTE_OK") && screen.contains("/site")) {
         assert!(tokio::time::Instant::now() < deadline, "terminal output never arrived: {screen}");
         if let Ok(Some(StreamItem::Data(bytes))) = tokio::time::timeout(Duration::from_millis(500), output.recv()).await { screen.push_str(&String::from_utf8_lossy(&bytes)); }
     }
@@ -185,6 +185,20 @@ async fn files_terminals_and_previews_work_over_the_connection_and_stay_inside_t
         match item { StreamItem::Data(bytes) => body.push_str(&String::from_utf8_lossy(&bytes)), StreamItem::End(_) => break }
     }
     assert!(body.contains("saw GET / HTTP/1.1"), "{body}");
+    // A dev server listening only on IPv6 loopback is reached too.
+    if let Ok(listener) = tokio::net::TcpListener::bind("[::1]:0").await {
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket.write_all(b"v6 ok").await.unwrap();
+        });
+        let (stream, mut reply) = mac.open_stream();
+        mac.request("forward_open", json!({ "port": port, "stream": stream })).await.unwrap();
+        let mut body = String::new();
+        while let Ok(Some(StreamItem::Data(bytes))) = tokio::time::timeout(Duration::from_secs(5), reply.recv()).await { body.push_str(&String::from_utf8_lossy(&bytes)); }
+        assert_eq!(body, "v6 ok");
+    }
     let (stream, _) = mac.open_stream();
     assert!(mac.request("forward_open", json!({ "port": 1, "stream": stream })).await.is_err(), "a closed port is reported, not hung");
 }

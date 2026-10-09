@@ -52,6 +52,14 @@ pub trait MachineListener: Send + Sync {
     fn on_settings_changed(&self);
 }
 
+/// A web server one of a thread's processes is listening on.
+#[derive(Debug, Clone, PartialEq, uniffi::Record, serde::Deserialize)]
+pub struct ThreadServer {
+    pub port: u16,
+    /// The program ("node", "vite").
+    pub name: String,
+}
+
 /// Read-aloud settings the machine shares with the person's devices.
 #[derive(Debug, Clone, Default, PartialEq, uniffi::Record, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -127,6 +135,8 @@ struct Shared {
     closed: AtomicBool,
     refresh_pending: AtomicBool,
     wake: Notify,
+    /// The machine's web servers open in the phone's browser.
+    previews: crate::preview::Previews,
 }
 
 /// A paired Mac or server. Connects as soon as it is made and keeps reconnecting until dropped.
@@ -158,6 +168,7 @@ impl Machine {
             closed: AtomicBool::new(false),
             refresh_pending: AtomicBool::new(false),
             wake: Notify::new(),
+            previews: Default::default(),
         });
         runtime().spawn(run(shared.clone()));
         Arc::new(Self { shared })
@@ -223,6 +234,27 @@ impl Machine {
     pub async fn set_speech_settings(&self, api_key: Option<String>, voice: Option<String>, voice_name: Option<String>, rate: Option<f32>) -> Result<()> {
         self.request("set_speech_settings", json!({ "apiKey": api_key, "voice": voice, "voiceName": voice_name, "rate": rate })).await?;
         Ok(())
+    }
+
+    /// Open `port` on the machine (its own loopback, where dev servers listen) for the phone's
+    /// browser: returns the phone's port to load, the same one where it's free. Stays open until
+    /// `close_previews`.
+    pub async fn open_preview(&self, port: u16) -> Result<u16> {
+        let shared = self.shared.clone();
+        on_runtime(async move {
+            let link = Arc::downgrade(&shared);
+            shared.previews.open(port, move || link.upgrade().and_then(|s| s.client().ok())).await.map_err(MobileError::from)
+        }).await
+    }
+
+    /// Stop every preview this machine has open.
+    pub fn close_previews(&self) {
+        self.shared.previews.close_all();
+    }
+
+    /// Web servers a thread's processes are listening on (port and program), to offer as previews.
+    pub async fn thread_servers(&self, thread_id: String) -> Result<Vec<ThreadServer>> {
+        Ok(self.call("thread_servers", json!({ "thread": thread_id })).await.unwrap_or_default())
     }
 
     /// Archived threads and pinned projects from the machine's sidebar. Empty from a machine too old to say.

@@ -89,6 +89,8 @@ struct ThreadList: View {
     @State private var showMachines = false
     @State private var showNew = false
     @State private var showVoice = false
+    /// Test mode: a preview opened straight away (BOMB_SMOKE_PREVIEW=port).
+    @State private var smokePreview: PreviewTarget?
     @State private var expanded: Set<String> = []
     @AppStorage("list.sort") private var sort: ListSort = .recent
     @AppStorage("list.show") private var show: ListShow = .all
@@ -180,6 +182,9 @@ struct ThreadList: View {
         .toolbar(.hidden, for: .navigationBar)
         .sheet(isPresented: $showMachines) { MachinesView() }
         .sheet(isPresented: $showVoice) { VoiceSettings() }
+        .fullScreenCover(item: $smokePreview) { target in
+            if let machine = app.machines.first(where: \.connected) { PreviewBrowser(machine: machine, target: target) }
+        }
         // Back at the list, the thread being read is closed.
         .onAppear { if ReadAloud.shared.playing != nil { ReadAloud.shared.close() } }
         .sheet(isPresented: $showNew) {
@@ -191,6 +196,7 @@ struct ThreadList: View {
             guard Smoke.enabled, let sheet = ProcessInfo.processInfo.environment["BOMB_SMOKE_SHEET"] else { return }
             try? await Task.sleep(for: .seconds(4))
             if sheet == "machines" { showMachines = true } else if sheet == "new" { showNew = true } else if sheet == "voice" { showVoice = true }
+            if sheet.hasPrefix("preview:"), let port = UInt16(sheet.dropFirst(8)) { smokePreview = PreviewTarget(port: port, path: "/") }
         }
         #endif
     }
