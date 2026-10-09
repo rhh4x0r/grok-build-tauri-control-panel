@@ -103,6 +103,8 @@ struct PreviewBrowser: View {
             }
         }
         .onChange(of: page.error) { _, error in if let error { failed = error } }
+        // Tunnels exist only while a page is open.
+        .onDisappear { machine.machine.closePreviews() }
     }
 }
 

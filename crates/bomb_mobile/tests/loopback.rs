@@ -150,6 +150,14 @@ async fn a_paired_phone_starts_a_thread_watches_it_and_answers_an_approval() {
         machine.close_previews();
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(tokio::net::TcpStream::connect(("127.0.0.1", local)).await.is_err(), "closed previews stop listening");
+        // Opening it again (the browser reopened, or the app came back from the background) works.
+        let again = machine.open_preview(port).await.unwrap();
+        let mut browser = tokio::net::TcpStream::connect(("127.0.0.1", again)).await.unwrap();
+        browser.write_all(b"GET /again HTTP/1.1\r\n\r\n").await.unwrap();
+        let mut page = String::new();
+        let _ = tokio::time::timeout(Duration::from_secs(5), browser.read_to_string(&mut page)).await;
+        assert!(page.ends_with("GET /again HTTP/1.1"), "{page}");
+        machine.close_previews();
         assert!(machine.thread_servers("not-a-thread".into()).await.unwrap().is_empty());
     }
 

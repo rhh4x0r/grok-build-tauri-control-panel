@@ -20,6 +20,12 @@ pub(crate) struct Previews(Mutex<HashMap<u16, (u16, Listening)>>);
 /// Listening tasks, stopped when dropped.
 pub(crate) struct Listening(Vec<tokio::task::AbortHandle>);
 
+impl Listening {
+    fn alive(&self) -> bool {
+        self.0.iter().any(|task| !task.is_finished())
+    }
+}
+
 impl Drop for Listening {
     fn drop(&mut self) {
         for task in &self.0 { task.abort(); }
@@ -30,7 +36,15 @@ impl Previews {
     /// The phone's port for `port` on the machine, starting to listen if it isn't yet. `client`
     /// gives the machine's current connection for each new browser connection.
     pub(crate) async fn open(&self, port: u16, client: impl Fn() -> Option<Client> + Send + Sync + 'static) -> Result<u16, String> {
-        if let Some((local, _)) = self.0.lock().unwrap_or_else(|e| e.into_inner()).get(&port) { return Ok(*local); }
+        // Reuse a tunnel only while it still listens: iOS closes a suspended app's listening sockets,
+        // so one opened before the app went to the background is dead when it comes back.
+        let open = self.0.lock().unwrap_or_else(|e| e.into_inner()).get(&port).map(|(local, listening)| (*local, listening.alive()));
+        if let Some((local, true)) = open {
+            if tokio::time::timeout(std::time::Duration::from_millis(300), tokio::net::TcpStream::connect(("127.0.0.1", local))).await.is_ok_and(|c| c.is_ok()) {
+                return Ok(local);
+            }
+        }
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).remove(&port);
         // The same port, so pages that name it (and their live reload) keep working; else any free one.
         let v4 = match TcpListener::bind(("127.0.0.1", port)).await {
             Ok(listener) => listener,
@@ -53,8 +67,9 @@ impl Previews {
 
 fn serve(listener: TcpListener, port: u16, client: Arc<dyn Fn() -> Option<Client> + Send + Sync>) -> tokio::task::AbortHandle {
     tokio::spawn(async move {
-        loop {
-            let Ok((socket, _)) = listener.accept().await else { continue };
+        // A listener that errors (its socket closed while the app was suspended) stops, rather
+        // than spinning; the next `open` starts a fresh one.
+        while let Ok((socket, _)) = listener.accept().await {
             let Some(link) = client() else { continue };
             tokio::spawn(carry(link, port, socket));
         }
