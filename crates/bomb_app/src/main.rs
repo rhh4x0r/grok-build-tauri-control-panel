@@ -2,6 +2,7 @@
 
 mod actions;
 mod core_router;
+mod dictation;
 mod models;
 mod remote;
 mod runtime;

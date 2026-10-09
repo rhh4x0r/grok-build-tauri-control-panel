@@ -130,6 +130,12 @@ pub struct ComposerView {
     foundry_undo: Option<(String, String, Option<uuid::Uuid>)>,
     foundry_message: Option<String>,
     placeholder: &'static str,
+    /// Listening for dictation, and the text it adds to (`base`, plus a space if needed).
+    dictation: Option<(crate::dictation::Listening, String)>,
+    dictation_ok: bool,
+    dictation_error: Option<String>,
+    /// Which dictation is current, so a finished one's late words never reach the next.
+    dictation_serial: u64,
 }
 
 impl ComposerView {
@@ -159,6 +165,12 @@ impl ComposerView {
         cx.observe(&memory_search,|_,_,cx|cx.notify()).detach();
         let speed = cx.new(|cx| super::speed::SpeedSelector::new(model.clone(), cx));
         let location=cx.new(|cx|super::work_location::WorkLocation::new(model.clone(),cx));
+        // The mic shows only where dictation works; finding out runs the helper once.
+        cx.spawn(async move |this, cx| {
+            let ok = cx.background_executor().spawn(async { crate::dictation::available() }).await;
+            let _ = this.update(cx, |v, cx| { v.dictation_ok = ok; cx.notify(); });
+        })
+        .detach();
         Self {
             routing_serial: 0,
             routing_pending: None,
@@ -206,6 +218,61 @@ impl ComposerView {
             foundry_undo: None,
             foundry_message: None,
             placeholder: "Do anything…",
+            dictation: None,
+            dictation_ok: false,
+            dictation_error: None,
+            dictation_serial: 0,
+        }
+    }
+
+    /// Click to listen, click to stop. Words land after what's typed and are never sent on their
+    /// own, so a prompt can be dictated in parts and edited in between.
+    fn toggle_dictation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dictation.is_some() {
+            self.stop_dictation(cx);
+            return;
+        }
+        self.dictation_error = None;
+        let (listening, heard) = match crate::dictation::Listening::start() {
+            Ok(started) => started,
+            Err(error) => { self.dictation_error = Some(error); cx.notify(); return; }
+        };
+        let current = self.input.read(cx).value().to_string();
+        let base = if current.is_empty() || current.ends_with(char::is_whitespace) { current } else { format!("{current} ") };
+        self.dictation = Some((listening, base));
+        self.dictation_serial += 1;
+        let serial = self.dictation_serial;
+        cx.spawn_in(window, async move |this, cx| {
+            while let Ok(heard) = heard.recv().await {
+                let finished = !matches!(heard, crate::dictation::Heard::Words { .. });
+                let _ = this.update_in(cx, |v, window, cx| {
+                    if v.dictation_serial != serial { return; }
+                    match heard {
+                        crate::dictation::Heard::Words { settled, volatile } => {
+                            let Some((_, base)) = &v.dictation else { return };
+                            let words = format!("{settled}{volatile}");
+                            let words = words.trim_start();
+                            let text = if words.is_empty() { base.trim_end().to_string() } else { format!("{base}{words}") };
+                            v.input.update(cx, |s, cx| s.set_value(text, window, cx));
+                        }
+                        crate::dictation::Heard::Failed(error) => v.dictation_error = Some(error),
+                        crate::dictation::Heard::Done => {}
+                    }
+                    if finished { v.dictation = None; }
+                    cx.notify();
+                });
+                if finished { break; }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Stop listening; the last words still land, then the mic turns off.
+    fn stop_dictation(&mut self, cx: &mut Context<Self>) {
+        if let Some((listening, _)) = &mut self.dictation {
+            listening.stop();
+            cx.notify();
         }
     }
 
@@ -647,6 +714,8 @@ impl ComposerView {
     }
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Sending ends dictation; what it had heard is already in the text.
+        self.dictation = None;
         let text = self.input.read(cx).value().to_string();
         let text = text.trim().to_string();
         if text.is_empty() && self.attachments.is_empty() {
@@ -1994,6 +2063,25 @@ impl Render for ComposerView {
                                                             .child(Icon::from(Lucide::Paperclip)),
                                                     ),
                                             )
+                                            .when(self.dictation_ok, |row| {
+                                                let listening = self.dictation.is_some();
+                                                row.child(
+                                                    div()
+                                                        .id("dictate")
+                                                        .size(px(28.))
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .rounded_full()
+                                                        .text_color(if listening { ui.danger } else { ui.text_muted })
+                                                        .when(listening, |el| el.bg(ui.danger.opacity(0.14)))
+                                                        .cursor_pointer()
+                                                        .hover(move |s| s.bg(attach_hover))
+                                                        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(if listening { "Stop dictation" } else { "Dictate" }).build(window, cx))
+                                                        .on_click(cx.listener(|this, _, window, cx| this.toggle_dictation(window, cx)))
+                                                        .child(div().size(px(16.)).child(Icon::from(if listening { Lucide::MicOff } else { Lucide::Mic }))),
+                                                )
+                                            })
                                             .child(mode_picker)
                                             .children(mcp_picker)
                 .child(Button::new("run-foundry").ghost().small().icon(Lucide::Sparkles).rounded_full().selected(self.foundry_setup)
