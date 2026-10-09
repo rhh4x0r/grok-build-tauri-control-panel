@@ -388,6 +388,8 @@ impl SidebarView {
                 let count = w.threads.len();
                 let expanded = self.expanded.contains(&wid);
                 let mut status = "idle".to_string();
+                // The failed threads behind a "Failed" on this row, so it can be cleared from here.
+                let mut failed: Vec<Uuid> = Vec::new();
                 let mut current = grok_persistence::ModelUsage { backend: "grok".into(), model: String::new() };
                 let mut history: Vec<grok_persistence::ModelUsage> = Vec::new();
                 let mut models: Vec<String> = Vec::new();
@@ -407,6 +409,7 @@ impl SidebarView {
                         if tm.thread.presence.turn_active() || s == "running" { status = "running".into(); }
                         else if status == "idle" && (s.contains("wait") || s.contains("approv")) { status = "waiting".into(); }
                         else if status == "idle" && s == "failed" && self.model.read(cx).shows_failed(id, cx) { status = "failed".into(); }
+                        if s == "failed" && self.model.read(cx).shows_failed(id, cx) { failed.push(id); }
                     }
                 }
                 if status == "idle" && w.threads.iter().filter_map(|t| Uuid::parse_str(t).ok()).any(|id| self.model.read(cx).is_unseen(id, cx)) {
@@ -415,6 +418,25 @@ impl SidebarView {
                 let model_label = models.join(" · ");
                 let corner = status_corner(&status, &latest, ui);
                 let selected_bg = ui.selected_bg();
+                let clear_failed = (status == "failed").then(|| {
+                    let (app, failed) = (self.model.clone(), failed.clone());
+                    div()
+                        .id(SharedString::from(format!("clear-failed-{wid}")))
+                        .size(px(16.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.))
+                        .text_color(ui.text_faint)
+                        .hover(move |s| s.bg(hover))
+                        .tooltip(|window, cx| Tooltip::new("Clear Failed").build(window, cx))
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            app.update(cx, |m, cx| for id in &failed { m.dismiss_failure(*id, cx); });
+                        })
+                        .child(div().size(px(10.)).child(Icon::from(Lucide::X)))
+                });
+                let menu_failed = failed.clone();
                 group = group.child(
                     div()
                         .id(SharedString::from(format!("workspace-{wid}")))
@@ -442,6 +464,12 @@ impl SidebarView {
                                     crate::views::workspaces::text_action(app.clone(), wid.clone(), "rename", "Thread name", name.clone(), window, cx);
                                 }
                             }));
+                            let menu = if menu_failed.is_empty() { menu } else {
+                                let (app, failed) = (menu_model.clone(), menu_failed.clone());
+                                menu.item(PopupMenuItem::new("Clear Failed").on_click(move |_, _, cx| {
+                                    app.update(cx, |m, cx| for id in &failed { m.dismiss_failure(*id, cx); });
+                                }))
+                            };
                             if let Some(id) = single_thread { thread_lifecycle_menu(menu, menu_model.clone(), id, false) } else { menu }
                         })
                         .child(
@@ -461,7 +489,8 @@ impl SidebarView {
                                         .whitespace_nowrap()
                                         .child(row_title),
                                 )
-                                .child(corner),
+                                .child(corner)
+                                .children(clear_failed),
                         )
                         .child(
                             div()
