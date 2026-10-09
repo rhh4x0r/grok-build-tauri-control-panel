@@ -221,6 +221,13 @@ impl AcpClient {
             .and_then(|s| self.subagents.lock().unwrap_or_else(|e| e.into_inner()).get(s).copied())
             .unwrap_or(parent);
         let text = |key: &str| update.get(key).and_then(Value::as_str).unwrap_or_default().trim().to_string();
+        if self.replaying_subagents() {
+            // An old subagent re-announced after a reload: remember where its updates go, show nothing.
+            if kind == "subagent_spawned" {
+                self.subagents.lock().unwrap_or_else(|e| e.into_inner()).insert(child_session.to_string(), subagent_thread_id(parent, child_session));
+            }
+            return true;
+        }
         if kind == "subagent_spawned" {
             let model = update.pointer("/_meta/model").and_then(Value::as_str).map(String::from);
             self.subagent_started(bus, parent, owner, child_session, &text("name"), &text("task"), update.get("prompt").and_then(Value::as_str), model.as_deref()).await;
@@ -228,6 +235,13 @@ impl AcpClient {
             self.subagent_ended(bus, parent, owner, child_session, &text("state")).await;
         }
         true
+    }
+
+    /// Subagent notices with no prompt open, in the first seconds after a reload, are the adapter
+    /// replaying the conversation's old subagents.
+    fn replaying_subagents(&self) -> bool {
+        *self.open_prompts.borrow() == 0
+            && self.reloaded_at.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|at| at.elapsed() < Duration::from_secs(10))
     }
 
     /// A subagent became a thread of its own; its parent shows it as a running "Subagent" step.
@@ -282,6 +296,12 @@ impl AcpClient {
         let update = params.get("update").unwrap_or(params);
         let kind = update.get("sessionUpdate").and_then(Value::as_str).unwrap_or_default();
         let Some(child_session) = update.get("child_session_id").or_else(|| update.get("subagent_id")).and_then(Value::as_str) else { return };
+        if self.replaying_subagents() {
+            if kind == "subagent_spawned" {
+                self.subagents.lock().unwrap_or_else(|e| e.into_inner()).insert(child_session.to_string(), subagent_thread_id(parent, child_session));
+            }
+            return;
+        }
         match kind {
             "subagent_spawned" => {
                 let description = update.get("description").and_then(Value::as_str).unwrap_or_default().trim().to_string();
@@ -505,6 +525,9 @@ pub struct AcpClient {
     terminals: TerminalRegistry,
     /// A turn the agent started on its own, which no prompt's answer will end.
     unprompted: Arc<std::sync::Mutex<Option<UnpromptedTurn>>>,
+    /// When the saved conversation was last reloaded: the adapter re-announces its old subagents
+    /// right after, and those aren't new work.
+    reloaded_at: std::sync::Mutex<Option<std::time::Instant>>,
     /// Subagent sessions this agent spawned: the child's ACP session id → its thread id here.
     subagents: std::sync::Mutex<HashMap<String, Uuid>>,
     /// Grok: `spawn_subagent` calls waiting for their `subagent_spawned` (tool call id, prompt),
@@ -750,6 +773,7 @@ impl AcpClient {
             current_mode: RwLock::new(None),
             terminals: TerminalRegistry::new(default_cwd),
             unprompted: Arc::new(std::sync::Mutex::new(None)),
+            reloaded_at: std::sync::Mutex::new(None),
             subagents: std::sync::Mutex::new(HashMap::new()),
             grok_spawns: std::sync::Mutex::new(Default::default()),
         });
@@ -833,6 +857,7 @@ impl AcpClient {
             current_mode: RwLock::new(None),
             terminals: TerminalRegistry::new(PathBuf::from("/tmp")),
             unprompted: Arc::new(std::sync::Mutex::new(None)),
+            reloaded_at: std::sync::Mutex::new(None),
             subagents: std::sync::Mutex::new(HashMap::new()),
             grok_spawns: std::sync::Mutex::new(Default::default()),
         })
@@ -1031,6 +1056,7 @@ impl AcpClient {
                         // Full brain — don't inject transcript context.
                         *self.pending_context.lock().await = None;
                         info!(%sid, prior, "ACP session/load complete (full brain)");
+                        *self.reloaded_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
                         self.apply_model_after_session(opts).await?;
                         self.apply_mode_after_session(opts).await;
                         if let Some(bus) = &self.event_bus {
@@ -1057,6 +1083,7 @@ impl AcpClient {
                         *self.brain_mode.write().await = BrainMode::FullBrain;
                         *self.pending_context.lock().await = None;
                         info!(%sid, prior, "ACP session/resume complete (full brain)");
+                        *self.reloaded_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
                         self.apply_model_after_session(opts).await?;
                         self.apply_mode_after_session(opts).await;
                         if let Some(bus) = &self.event_bus {
@@ -2809,6 +2836,9 @@ impl AcpClient {
                 let child = params.get("sessionId").and_then(Value::as_str)
                     .and_then(|s| self.subagents.lock().unwrap_or_else(|e| e.into_inner()).get(s).copied());
                 if let Some(child) = child {
+                    if self.replaying_subagents() {
+                        return;
+                    }
                     let update = params.get("update").unwrap_or(&params);
                     if update.get("sessionUpdate").and_then(Value::as_str) == Some("usage_update") {
                         if let Some(used) = update.get("used").and_then(Value::as_u64) {
@@ -3841,6 +3871,28 @@ mod subagent_tests {
         assert!(seen.iter().any(|e| matches!(e, ControlEvent::AgentMessage { session_id, text, .. } if *session_id == child && text.contains("index.html"))), "the child's words go to the child");
         assert!(!seen.iter().any(|e| matches!(e, ControlEvent::AgentMessage { session_id, .. } if *session_id == parent)), "not to the parent");
         assert!(seen.iter().any(|e| matches!(e, ControlEvent::SessionStatusChanged { session_id, status: SessionStatus::Completed, .. } if *session_id == child)));
+    }
+
+    /// Right after a reload the adapter re-announces the conversation's old subagents: they aren't
+    /// new work, so no step and no turn; a subagent started by a prompt still shows.
+    #[tokio::test]
+    async fn subagents_replayed_after_a_reload_add_nothing() {
+        let bus = Arc::new(EventBus::new());
+        let mut events = bus.subscribe();
+        let client = AcpClient::mock_for_tests("parent-acp", Some(bus.clone()));
+        *client.reloaded_at.lock().unwrap() = Some(std::time::Instant::now());
+        let spawned = |child: &str| update("parent-acp", json!({ "sessionUpdate": "subagent_spawned", "subagentSessionId": child, "name": "Old", "task": "Earlier work" }));
+        client.handle_notification(spawned("old-1")).await;
+        client.handle_notification(update("parent-acp", json!({ "sessionUpdate": "subagent_state_update", "subagentSessionId": "old-1", "state": "completed" }))).await;
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() { seen.push(event); }
+        assert!(!seen.iter().any(|e| matches!(e, ControlEvent::ToolCall { .. } | ControlEvent::SessionStatusChanged { .. })), "{seen:?}");
+        // A prompt is open: that's new work, even soon after the reload.
+        client.open_prompts.send_replace(1);
+        client.handle_notification(spawned("new-1")).await;
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() { seen.push(event); }
+        assert!(seen.iter().any(|e| matches!(e, ControlEvent::ToolCall { event, .. } if event.tool == "Subagent · Old")));
     }
 }
 
