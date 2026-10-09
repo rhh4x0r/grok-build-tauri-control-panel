@@ -393,7 +393,7 @@ impl SidebarView {
                 let mut models: Vec<String> = Vec::new();
                 let mut latest = String::new();
                 for tid in &w.threads {
-                    if let Some(t) = Uuid::parse_str(tid).ok().and_then(|id| self.model.read(cx).threads.get(&id)) {
+                    if let Some((id, t)) = Uuid::parse_str(tid).ok().and_then(|id| self.model.read(cx).threads.get(&id).map(|t| (id, t))) {
                         let tm = t.read(cx);
                         let meta = &tm.meta;
                         let used = grok_persistence::ModelUsage { backend: meta.backend.clone(), model: meta.model.clone() };
@@ -406,7 +406,7 @@ impl SidebarView {
                         let s = meta.status.as_str();
                         if tm.thread.presence.turn_active() || s == "running" { status = "running".into(); }
                         else if status == "idle" && (s.contains("wait") || s.contains("approv")) { status = "waiting".into(); }
-                        else if status == "idle" && s == "failed" { status = "failed".into(); }
+                        else if status == "idle" && s == "failed" && self.model.read(cx).shows_failed(id, cx) { status = "failed".into(); }
                     }
                 }
                 if status == "idle" && w.threads.iter().filter_map(|t| Uuid::parse_str(t).ok()).any(|id| self.model.read(cx).is_unseen(id, cx)) {
@@ -603,7 +603,7 @@ impl SidebarView {
             "waiting"
         } else if turn_active || status == "running" {
             "running"
-        } else if status == "failed" {
+        } else if self.model.read(cx).shows_failed(id, cx) {
             "failed"
         } else if self.model.read(cx).is_unseen(id, cx) {
             "unseen"

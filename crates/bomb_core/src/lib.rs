@@ -8,6 +8,7 @@
 
 pub mod devserver;
 pub mod explainer;
+pub mod failures;
 pub mod journal;
 pub mod presence;
 pub mod rpc;

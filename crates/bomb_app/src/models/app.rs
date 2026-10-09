@@ -177,6 +177,15 @@ pub fn sort_rows<T>(rows: &mut [(SortKey, T)], sort: SidebarSort) {
     });
 }
 
+/// How the user dealt with a failed turn; see [`AppModel::on_failure_cleared`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureCleared {
+    /// The × next to "Retry last prompt".
+    Dismissed,
+    /// "Retry last prompt" resent it.
+    Retried,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToastKind {
     Info,
@@ -272,6 +281,8 @@ pub struct AppModel {
     seen: HashMap<Uuid, chrono::DateTime<chrono::Utc>>,
     /// Unset until loaded, and nothing is unseen until then.
     seen_since: Option<chrono::DateTime<chrono::Utc>>,
+    /// Failures already opened or dismissed; their "Failed" badge is cleared (kv "failed_dismissed").
+    dismissed_failures: bomb_core::failures::DismissedFailures,
     /// Project roots shown in the sidebar's Pinned section, in the order they were pinned.
     pub pinned_projects: Vec<String>,
     /// Workspaces to close once their agent finishes merging.
@@ -361,6 +372,7 @@ impl AppModel {
             recent_window: RecentWindow::default(),
             seen: HashMap::new(),
             seen_since: None,
+            dismissed_failures: Default::default(),
             pinned_projects: Vec::new(),
             close_after_merge: HashSet::new(),
             active_workspace: None,
@@ -583,6 +595,7 @@ impl AppModel {
         self.refresh_services(cx);
         self.refresh_usage(cx);
         self.load_archived(cx);
+        self.load_dismissed_failures(cx);
         self.load_sidebar_prefs(cx);
         self.refresh_backends(cx);
         self.refresh_dev_server(cx);
@@ -1185,7 +1198,7 @@ impl AppModel {
         for id in &self.just_started { order.insert(0, *id); }
         self.threads.retain(|id, _| order.contains(id));
         self.thread_order = order;
-        if let Some(open) = self.selected { self.seen.insert(open, chrono::Utc::now()); }
+        if let Some(open) = self.selected { self.seen.insert(open, chrono::Utc::now()); self.see_failure(open, cx); }
         if let Some(sel) = self.selected {
             if !self.threads.contains_key(&sel) {
                 self.selected = None;
@@ -2120,8 +2133,65 @@ impl AppModel {
         updated > self.seen.get(&id).copied().unwrap_or(since).max(since)
     }
 
+    /// The thread's last turn failed and nobody has opened or dismissed it since.
+    pub fn shows_failed(&self, id: Uuid, cx: &App) -> bool {
+        if self.selected == Some(id) { return false; }
+        let Some(t) = self.threads.get(&id) else { return false };
+        let meta = &t.read(cx).meta;
+        self.dismissed_failures.shows_failed(id, &meta.status, &meta.updated_at)
+    }
+
+    fn load_dismissed_failures(&mut self, cx: &mut Context<Self>) {
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move { services::dismissed_failures(&state).await }, move |res, cx| {
+            let Ok(saved) = res else { return };
+            let _ = this.update(cx, |m, cx| { m.dismissed_failures.merge(&saved); cx.notify(); });
+        });
+    }
+
+    /// Opening a failed thread counts as seeing the failure: clear its badge until it fails again.
+    fn see_failure(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        let Some(t) = self.threads.get(&id) else { return };
+        let meta = &t.read(cx).meta;
+        if meta.status != "failed" { return; }
+        let failed_at = meta.updated_at.clone();
+        if !self.dismissed_failures.dismiss(id, &failed_at) { return; }
+        let state = svc(cx);
+        spawn_service(cx, async move { services::dismiss_failure(&state, id, failed_at).await }, |_, _| {});
+    }
+
+    /// The × on a failed turn: hide the status line and the sidebar badge. The error stays in the transcript.
+    pub fn dismiss_failure(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if let Some(t) = self.threads.get(&id).cloned() {
+            t.update(cx, |t, cx| {
+                let ch = t.thread.dismiss_failure(std::time::Instant::now());
+                t.absorb(&ch, cx);
+                cx.notify();
+            });
+        }
+        self.see_failure(id, cx);
+        self.on_failure_cleared(id, FailureCleared::Dismissed, cx);
+        cx.notify();
+    }
+
+    /// "Retry last prompt" was sent; the new turn replaces the failed one's status line.
+    pub fn retried_failure(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.see_failure(id, cx);
+        self.on_failure_cleared(id, FailureCleared::Retried, cx);
+        cx.notify();
+    }
+
+    /// Hook: the user dismissed or retried a failed turn in thread `id`. Fires once per
+    /// click, after the status line and badge are cleared. Nothing listens yet; resume
+    /// the thread's paused message queue from here. Sending a fresh prompt does not fire it.
+    pub fn on_failure_cleared(&mut self, id: Uuid, how: FailureCleared, cx: &mut Context<Self>) {
+        let _ = (id, how, cx);
+    }
+
     /// Record that a thread was looked at, and save it so a restart agrees.
     fn mark_seen(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.see_failure(id, cx);
         self.seen.insert(id, chrono::Utc::now());
         let raw = serde_json::to_string(&self.seen).unwrap_or_default();
         let state = svc(cx);

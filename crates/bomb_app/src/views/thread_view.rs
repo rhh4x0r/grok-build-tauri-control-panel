@@ -670,7 +670,9 @@ impl Render for ThreadView {
                 !t.thread.explanations.is_empty(),
             )
         };
-        let retry_prompt = if presence.phase == bomb_core::presence::Phase::Error {
+        let failed = presence.phase == bomb_core::presence::Phase::Error;
+        let failed_id = Uuid::parse_str(&tid).ok().filter(|_| failed);
+        let retry_prompt = if failed {
             thread
                 .read(cx)
                 .thread
@@ -756,11 +758,22 @@ impl Render for ThreadView {
                                     },
                                     &ui,
                                 ))
-                                .when_some(retry_prompt, |el, prompt| {
-                                    el.child(Button::new("retry-failed-turn").ghost().small().icon(Lucide::RotateCcw).label("Retry last prompt")
-                                        .disabled(!self.composer.read(cx).can_retry(&prompt, cx))
-                                        .tooltip("Resend the last failed prompt with your selected model. Reconnects if startup failed. Clear a different draft first.")
-                                        .on_click({let composer=self.composer.clone();move|_,window,cx|composer.update(cx,|v,cx|v.retry_prompt(&prompt,window,cx))}))
+                                .when_some(failed_id, |el, id| {
+                                    el.child(div().flex().items_center().gap_1()
+                                        .when_some(retry_prompt, |row, prompt| {
+                                            row.child(Button::new("retry-failed-turn").ghost().small().icon(Lucide::RotateCcw).label("Retry last prompt")
+                                                .disabled(!self.composer.read(cx).can_retry(&prompt, cx))
+                                                .tooltip("Resend the last failed prompt with your selected model. Reconnects if startup failed. Clear a different draft first.")
+                                                .on_click({let composer=self.composer.clone();let model=self.model.clone();move|_,window,cx|{
+                                                    let sent=composer.read(cx).can_retry(&prompt,cx);
+                                                    composer.update(cx,|v,cx|v.retry_prompt(&prompt,window,cx));
+                                                    if sent { model.update(cx,|m,cx|m.retried_failure(id,cx)); }
+                                                }}))
+                                        })
+                                        // Hides the status line and the sidebar badge; the error stays in the transcript.
+                                        .child(Button::new("dismiss-failed-turn").ghost().small().icon(Lucide::X)
+                                            .tooltip("Dismiss. The error stays in the conversation.")
+                                            .on_click({let model=self.model.clone();move|_,_,cx|model.update(cx,|m,cx|m.dismiss_failure(id,cx))})))
                                 })
                                 .child(div().pb_2().child(meter_bar("meter", meter, &ui)))
                             })
