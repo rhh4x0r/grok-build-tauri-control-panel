@@ -19,10 +19,11 @@ func emit(_ object: [String: Any]) {
 }
 
 func voicesMessage() -> [String: Any] {
-    let voices = SpeechVoices.all().map { v in
+    let scan = SpeechVoices.scan()
+    let voices = scan.voices.map { v in
         ["id": v.id, "name": v.name, "language": v.language, "quality": v.quality, "personal": v.personal] as [String: Any]
     }
-    return ["voices": voices, "needsBetterVoice": SpeechVoices.needsBetterVoice, "best": SpeechVoices.best()?.id ?? ""]
+    return ["voices": voices, "needsBetterVoice": scan.needsBetter, "best": scan.best ?? ""]
 }
 
 if CommandLine.arguments.contains("--check") {

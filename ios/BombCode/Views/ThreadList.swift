@@ -156,7 +156,7 @@ struct ThreadList: View {
             // Test mode can open a sheet for a screenshot: BOMB_SMOKE_SHEET=machines|new.
             guard Smoke.enabled, let sheet = ProcessInfo.processInfo.environment["BOMB_SMOKE_SHEET"] else { return }
             try? await Task.sleep(for: .seconds(4))
-            if sheet == "machines" { showMachines = true } else if sheet == "new" { showNew = true }
+            if sheet == "machines" { showMachines = true } else if sheet == "new" { showNew = true } else if sheet == "voice" { showVoice = true }
         }
         #endif
     }

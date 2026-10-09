@@ -26,6 +26,9 @@ final class ReadAloud {
     private(set) var status = SpeechStatus(key: "", playing: false, position: 0, duration: 0, complete: false, sentence: 0, rendered: 0, total: 0, failed: nil)
     private(set) var voices: [SpeechVoiceInfo] = []
     private(set) var needsBetterVoice = false
+    /// Voices have been looked up at least once.
+    private(set) var voicesLoaded = false
+    private var bestVoice: String?
     var personalVoiceAllowed: Bool?
     /// Asked to show the message being read.
     var reveal: UInt64?
@@ -58,15 +61,28 @@ final class ReadAloud {
         setUpRemoteCommands()
     }
 
+    /// Look the installed voices up again, off the main thread (it takes a while with many voices).
     func refreshVoices() {
-        voices = SpeechVoices.all()
-        needsBetterVoice = SpeechVoices.needsBetterVoice
+        Task.detached(priority: .userInitiated) {
+            let scan = SpeechVoices.scan()
+            await MainActor.run {
+                let reader = ReadAloud.shared
+                reader.voices = scan.voices
+                reader.bestVoice = scan.best
+                reader.needsBetterVoice = scan.needsBetter
+                reader.voicesLoaded = true
+                #if DEBUG
+                if Smoke.enabled { print("smoke: voices", scan.voices.count) }
+                #endif
+            }
+        }
     }
 
-    /// The chosen voice while it's installed, else the best one.
+    /// The chosen voice while it's installed, else the best one. Until voices are looked up, the
+    /// saved choice stands (the engine falls back itself if it's gone).
     var chosenVoice: String? {
-        if let voiceId, voices.contains(where: { $0.id == voiceId }) { return voiceId }
-        return SpeechVoices.best()?.id
+        if let voiceId, !voicesLoaded || voices.contains(where: { $0.id == voiceId }) { return voiceId }
+        return bestVoice
     }
 
     func isReading(threadId: String, entry: UInt64) -> Bool {

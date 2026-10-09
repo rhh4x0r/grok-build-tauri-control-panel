@@ -132,19 +132,6 @@ struct VoiceSettings: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
                     Footnote("Replies are read with your iPhone's own voices: on the phone, offline, free. Tap the speaker under a reply.")
-                    SectionLabel("Speed")
-                    HStack(spacing: 6) {
-                        ForEach(ReadAloud.rates, id: \.self) { rate in
-                            Button { ReadAloud.shared.rate = rate } label: {
-                                Text(rate == rate.rounded() ? "\(Int(rate))×" : "\(rate)×")
-                                    .font(Theme.mono(13, .medium))
-                                    .foregroundStyle(rate == reader.rate ? Theme.onSolid : Theme.text)
-                                    .frame(maxWidth: .infinity, minHeight: 34)
-                                    .background(Capsule().fill(rate == reader.rate ? Theme.solid : Theme.bubble))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
                     if reader.needsBetterVoice {
                         GlassCard {
                             Text("Get a better voice").font(Theme.sans(15, .semibold)).foregroundStyle(Theme.text)
@@ -157,12 +144,20 @@ struct VoiceSettings: View {
                     if reader.personalVoiceAllowed == false {
                         Footnote("Not allowed, or no Personal Voice set up. Create one in Settings → Accessibility → Personal Voice.")
                     }
+                    if !reader.voicesLoaded {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small).tint(Theme.textMuted)
+                            Text("Looking for voices…").font(Theme.small).foregroundStyle(Theme.textMuted)
+                        }
+                        .padding(.top, 8)
+                    }
+                    let chosen = reader.chosenVoice
                     ForEach(groups, id: \.0) { group, voices in
                         SectionLabel(group).padding(.top, 6)
-                        VStack(spacing: 0) {
+                        LazyVStack(spacing: 0) {
                             ForEach(Array(voices.enumerated()), id: \.element.id) { index, voice in
                                 if index > 0 { Rectangle().fill(Theme.hairline).frame(height: 1).padding(.leading, 40) }
-                                VoiceRow(voice: voice, chosen: reader.chosenVoice == voice.id)
+                                VoiceRow(voice: voice, chosen: chosen == voice.id)
                             }
                         }
                         .background(RoundedRectangle(cornerRadius: Theme.panelCorner).fill(Theme.glass))
@@ -171,13 +166,22 @@ struct VoiceSettings: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.bottom, 24)
+                .frame(maxWidth: .infinity)
             }
             .scrollIndicators(.hidden)
+            // Up and down only: nothing here is wider than the screen.
+            .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background { BombBackground(strength: 0.5) }
+        .clipped()
         .presentationDragIndicator(.visible)
-        .onAppear { reader.refreshVoices() }
+        .onAppear {
+            reader.refreshVoices()
+            #if DEBUG
+            if Smoke.enabled { print("smoke: voice sheet shown") }
+            #endif
+        }
     }
 
     /// Personal, then Premium, Enhanced, Default; the person's language first within each.

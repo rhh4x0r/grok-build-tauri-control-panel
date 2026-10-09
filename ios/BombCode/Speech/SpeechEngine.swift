@@ -33,8 +33,14 @@ enum SpeechVoices {
             if la != lb { return la }
             if a.personal != b.personal { return a.personal }
             if rank(a.quality) != rank(b.quality) { return rank(a.quality) < rank(b.quality) }
+            if legacy(a) != legacy(b) { return !legacy(a) }
             return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
         }
+    }
+
+    /// The old MacinTalk voices (Fred, Junior, Kathy, Ralph…): installed everywhere, robotic. Last.
+    static func legacy(_ voice: SpeechVoiceInfo) -> Bool {
+        voice.id.hasPrefix("com.apple.speech.synthesis.voice")
     }
 
     static func info(_ voice: AVSpeechSynthesisVoice) -> SpeechVoiceInfo {
@@ -56,7 +62,7 @@ enum SpeechVoices {
         let voices = all().filter { !$0.personal }
         let rank = { (q: String) in q == "premium" ? 0 : q == "enhanced" ? 1 : 2 }
         let mine = voices.filter { $0.language.hasPrefix(language) }
-            .sorted { (rank($0.quality), $0.language == preferred ? 0 : 1) < (rank($1.quality), $1.language == preferred ? 0 : 1) }
+            .sorted { (rank($0.quality), legacy($0) ? 1 : 0, $0.language == preferred ? 0 : 1) < (rank($1.quality), legacy($1) ? 1 : 0, $1.language == preferred ? 0 : 1) }
         return mine.first ?? voices.first
     }
 
@@ -64,6 +70,19 @@ enum SpeechVoices {
     static func resolve(_ id: String?) -> AVSpeechSynthesisVoice? {
         if let id, let voice = AVSpeechSynthesisVoice(identifier: id) { return voice }
         return best().flatMap { AVSpeechSynthesisVoice(identifier: $0.id) }
+    }
+
+    /// Everything the voice picker needs from one scan of the installed voices (slow: call it off the
+    /// main thread): the voices in order, the best one, and whether a better one is worth getting.
+    static func scan() -> (voices: [SpeechVoiceInfo], best: String?, needsBetter: Bool) {
+        let voices = all()
+        let preferred = (Locale.preferredLanguages.first ?? "en-US").replacingOccurrences(of: "_", with: "-")
+        let language = String(preferred.prefix(2))
+        let rank = { (q: String) in q == "premium" ? 0 : q == "enhanced" ? 1 : 2 }
+        let mine = voices.filter { !$0.personal && $0.language.hasPrefix(language) }
+        let key = { (v: SpeechVoiceInfo) in (rank(v.quality), legacy(v) ? 1 : 0, v.language == preferred ? 0 : 1) }
+        let best = mine.min { key($0) < key($1) }
+        return (voices, (best ?? voices.first { !$0.personal })?.id, !mine.contains { $0.quality != "default" })
     }
 
     /// True when only default-quality voices are installed for the person's language.
