@@ -243,6 +243,11 @@ pub struct AppModel {
     local_threads: Vec<ThreadDto>,
     /// This Mac's thread list has arrived at least once.
     threads_loaded: bool,
+    /// Threads started here that no list has reported yet: a list read before they existed mustn't drop them.
+    just_started: HashSet<Uuid>,
+    /// Thread-list fetches started, and the newest one applied; a slower, older fetch is ignored.
+    list_fetches: u64,
+    list_applied: u64,
     local_workspaces: Vec<grok_persistence::WorkspaceRecord>,
     local_projects: Vec<String>,
     server_lists: HashMap<String, (Vec<ThreadDto>, Vec<grok_persistence::WorkspaceRecord>, Vec<String>)>,
@@ -339,6 +344,9 @@ impl AppModel {
             show_all_merged: HashSet::new(),
             local_threads: Vec::new(),
             threads_loaded: false,
+            just_started: HashSet::new(),
+            list_fetches: 0,
+            list_applied: 0,
             local_workspaces: Vec::new(),
             local_projects: Vec::new(),
             server_lists: HashMap::new(),
@@ -602,12 +610,15 @@ impl AppModel {
         self.refresh_workspaces(cx);
         let state = svc(cx);
         let this = cx.entity().downgrade();
+        self.list_fetches += 1;
+        let fetch = self.list_fetches;
         spawn_service(
             cx,
             async move { services::list_threads(&state).await },
             move |res, cx| {
                 let _ = this.update(cx, |m, cx| match res {
-                    Ok(list) => { m.local_threads = list; m.threads_loaded = true; m.combine_lists(cx); }
+                    Ok(_) if fetch < m.list_applied => {}
+                    Ok(list) => { m.list_applied = fetch; m.local_threads = list; m.threads_loaded = true; m.combine_lists(cx); }
                     Err(e) => m.fail(e, cx),
                 });
             },
@@ -1169,6 +1180,9 @@ impl AppModel {
                 }
             }
         }
+        // Keep a just-started thread until a list reports it; it's the newest, so it goes first.
+        self.just_started.retain(|id| !order.contains(id) && self.threads.contains_key(id));
+        for id in &self.just_started { order.insert(0, *id); }
         self.threads.retain(|id, _| order.contains(id));
         self.thread_order = order;
         if let Some(open) = self.selected { self.seen.insert(open, chrono::Utc::now()); }
@@ -1668,7 +1682,6 @@ impl AppModel {
                         let _ = this.update(cx, |m, cx| match res {
                             Ok(started) => {
                                 if let Ok(id) = Uuid::parse_str(&started.id) {
-                                    m.selected = Some(id);
                                     // Started on another thread's branch: say what that means once, up front.
                                     if let Some(parent) = prefs2.base_branch.as_deref().and_then(|b| m.workspaces.iter().find(|w| w.branch == b && w.archived_at.is_none() && !w.inline)) {
                                         m.toast(ToastKind::Info, format!("This thread builds on “{}”. Merge that one first; this one is brought up to date automatically and merges after it.", parent.name));
@@ -1697,7 +1710,13 @@ impl AppModel {
                                         entity.update(cx, |t, _| { t.hydrated = true; });
                                         m.threads.insert(id, entity);
                                         m.thread_order.insert(0, id);
+                                        m.just_started.insert(id);
                                     }
+                                    // Open it the way a click would. Its workspace isn't listed yet, so keep
+                                    // the location it was started with rather than select()'s guess.
+                                    let (temporary, worktree) = (m.prefs.temporary, m.prefs.worktree);
+                                    m.select(Some(id), cx);
+                                    (m.prefs.temporary, m.prefs.worktree) = (temporary, worktree);
                                     if let Some(t) = m.threads.get(&id) {
                                         let atts: Vec<ImageAttachment> = images2
                                             .iter()
@@ -2158,6 +2177,7 @@ impl AppModel {
                             }
                             m.threads.remove(&id);
                             m.thread_order.retain(|x| *x != id);
+                            m.just_started.remove(&id);
                         }
                         Err(e) => m.fail(e, cx),
                     }
