@@ -4,6 +4,8 @@ import SwiftUI
 struct ThreadRef: Hashable {
     let machineId: String
     let threadId: String
+    /// Set for a subagent's transcript: its name. Subagents are read-only.
+    var subagent: String? = nil
 }
 
 /// How the list orders projects and threads, as in the desktop sidebar.

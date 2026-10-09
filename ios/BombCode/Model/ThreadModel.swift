@@ -70,6 +70,9 @@ final class ThreadModel {
     var rows: [TranscriptRow] { TranscriptRow.build(entries) }
 }
 
+/// How the machine names a subagent's step in its parent: "Subagent · Explore".
+let subagentPrefix = "Subagent · "
+
 /// What the transcript draws: entries, with runs of thinking and tool steps folded into one line.
 enum TranscriptRow: Identifiable {
     case user(EntryView)
@@ -78,10 +81,12 @@ enum TranscriptRow: Identifiable {
     case plan(EntryView)
     case approval(EntryView)
     case line(EntryView)
+    /// A subagent this thread started; it opens its own transcript.
+    case subagent(EntryView)
 
     var id: UInt64 {
         switch self {
-        case let .user(e), let .agent(e), let .plan(e), let .approval(e), let .line(e): e.id
+        case let .user(e), let .agent(e), let .plan(e), let .approval(e), let .line(e), let .subagent(e): e.id
         case let .activity(first, _): first
         }
     }
@@ -94,6 +99,11 @@ enum TranscriptRow: Identifiable {
             run = []
         }
         for entry in entries {
+            if case let .tool(_, name, _, _, _) = entry.body, name.hasPrefix(subagentPrefix) {
+                flush()
+                rows.append(.subagent(entry))
+                continue
+            }
             switch (entry.role, entry.body) {
             case (.tool, .tool), (.thought, .text):
                 run.append(entry)

@@ -31,7 +31,7 @@ struct RootView: View {
             ThreadList(path: $path)
                 .navigationDestination(for: ThreadRef.self) { ref in
                     if let machine = app.machine(id: ref.machineId) {
-                        ThreadScreen(machine: machine, threadId: ref.threadId)
+                        ThreadScreen(machine: machine, threadId: ref.threadId, subagent: ref.subagent)
                     } else {
                         VStack(spacing: 10) {
                             Image(systemName: "laptopcomputer.slash").font(.system(size: 30)).foregroundStyle(Theme.textFaint)

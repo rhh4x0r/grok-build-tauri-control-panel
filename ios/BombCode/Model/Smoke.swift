@@ -25,8 +25,10 @@ enum Smoke {
         var projects = (try? await machine.machine.listProjects()) ?? []
         if projects.isEmpty, let made = try? await machine.machine.createProject(name: "smoke") { projects = [made] }
         guard let project = projects.first else { return print("smoke: no project") }
-        let new = NewThread(projectRoot: project, backend: "grok", model: "mock", effort: nil, approvalMode: "plan",
-                            prompt: "Hello from the phone. What can you do?", ownWorktree: true, images: [])
+        // BOMB_SMOKE_BACKEND / _MODEL / _PROMPT run a real agent instead of the mock.
+        let new = NewThread(projectRoot: project, backend: env["BOMB_SMOKE_BACKEND"] ?? "grok", model: env["BOMB_SMOKE_MODEL"] ?? (env["BOMB_SMOKE_BACKEND"] == nil ? "mock" : nil),
+                            effort: nil, approvalMode: env["BOMB_SMOKE_MODE"] ?? "plan",
+                            prompt: env["BOMB_SMOKE_PROMPT"] ?? "Hello from the phone. What can you do?", ownWorktree: true, images: [])
         do {
             let id = try await machine.machine.startThread(new: new)
             print("smoke: started", id)

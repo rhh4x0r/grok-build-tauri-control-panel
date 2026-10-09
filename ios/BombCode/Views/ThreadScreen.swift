@@ -4,6 +4,8 @@ import SwiftUI
 struct ThreadScreen: View {
     let machine: MachineModel
     let threadId: String
+    /// A subagent's name when this is a subagent's transcript, which is read-only.
+    var subagent: String? = nil
     @State private var thread: ThreadModel?
     @State private var choices = ComposerChoices()
     @State private var error: String?
@@ -30,7 +32,7 @@ struct ThreadScreen: View {
         .toolbar {
             ToolbarItem(placement: .principal) {
                 VStack(spacing: 1) {
-                    Text(thread?.title ?? "Thread")
+                    Text(subagent ?? thread?.title ?? "Thread")
                         .font(Theme.sans(15, .semibold))
                         .foregroundStyle(Theme.text)
                         .lineLimit(1)
@@ -42,13 +44,17 @@ struct ThreadScreen: View {
                                 .foregroundStyle(Theme.textFaint)
                                 .lineLimit(1)
                         }
+                    } else if subagent != nil {
+                        Text("Subagent").font(Theme.mono(11)).foregroundStyle(Theme.textFaint)
                     }
                 }
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
-                    Button("Rename", systemImage: "pencil") { newName = thread?.summary?.label ?? ""; renaming = true }
-                    if thread?.turnActive == true {
+                    if subagent == nil {
+                        Button("Rename", systemImage: "pencil") { newName = thread?.summary?.label ?? ""; renaming = true }
+                    }
+                    if thread?.turnActive == true && subagent == nil {
                         Button("Stop", systemImage: "stop.circle", role: .destructive) { Task { await thread?.stop() } }
                     }
                 } label: {
@@ -113,9 +119,17 @@ struct ThreadScreen: View {
             VStack(spacing: 8) {
                 StatusLine(thread: thread)
                 if let error { Text(error).font(Theme.caption).foregroundStyle(Theme.danger).frame(maxWidth: .infinity, alignment: .leading) }
-                Composer(machine: machine, busy: thread.turnActive, choices: $choices, send: { text, images in
-                    await send(thread, text, images)
-                }, stop: { await thread.stop() })
+                if subagent != nil {
+                    Label("A subagent's work, read-only. Write to the thread that started it.", systemImage: "arrow.turn.up.left")
+                        .font(Theme.caption)
+                        .foregroundStyle(Theme.textFaint)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 6)
+                } else {
+                    Composer(machine: machine, busy: thread.turnActive, choices: $choices, send: { text, images in
+                        await send(thread, text, images)
+                    }, stop: { await thread.stop() })
+                }
             }
             .padding(.horizontal, 12)
             .padding(.bottom, 8)

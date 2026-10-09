@@ -282,6 +282,10 @@ pub struct AppModel {
     pub thread_order: Vec<Uuid>,
     pub threads: HashMap<Uuid, Entity<ThreadModel>>,
     pub selected: Option<Uuid>,
+    /// Each thread's subagents, oldest first.
+    pub subagents: HashMap<Uuid, Vec<services::SubagentInfo>>,
+    /// A subagent's parent thread.
+    pub subagent_of: HashMap<Uuid, Uuid>,
     pub new_thread_open: bool,
     pub foundry_request: Option<String>,
     pub foundry_insert: Option<String>,
@@ -365,6 +369,8 @@ impl AppModel {
             active_project: None,
             thread_order: Vec::new(),
             threads: HashMap::new(),
+            subagents: HashMap::new(),
+            subagent_of: HashMap::new(),
             selected: None,
             new_thread_open: false,
             foundry_request: None,
@@ -600,6 +606,7 @@ impl AppModel {
 
     pub fn refresh_threads(&mut self, cx: &mut Context<Self>) {
         self.refresh_workspaces(cx);
+        self.load_subagents(cx);
         let state = svc(cx);
         let this = cx.entity().downgrade();
         spawn_service(
@@ -613,6 +620,69 @@ impl AppModel {
             },
         );
         self.refresh_servers(cx);
+    }
+
+    /// Every thread's subagents on this Mac, for the sidebar.
+    fn load_subagents(&mut self, cx: &mut Context<Self>) {
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move { services::list_subagents(&state, None).await }, move |res, cx| {
+            let Ok(list) = res else { return };
+            let _ = this.update(cx, |m, cx| {
+                m.subagents.clear();
+                for info in list {
+                    let (Ok(id), Ok(parent)) = (Uuid::parse_str(&info.id), Uuid::parse_str(&info.parent)) else { continue };
+                    m.subagent_of.insert(id, parent);
+                    m.subagents.entry(parent).or_default().push(info);
+                }
+                cx.notify();
+            });
+        });
+    }
+
+    /// A subagent started or ended (see `grok_acp`'s `note_subagent`).
+    fn note_subagent(&mut self, parent: Uuid, payload: &serde_json::Value, cx: &mut Context<Self>) {
+        let Some(child) = payload["child"].as_str().and_then(|c| Uuid::parse_str(c).ok()) else { return };
+        let text = |k: &str| payload[k].as_str().unwrap_or_default().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        match payload["kind"].as_str() {
+            Some("spawned") => {
+                self.subagent_of.insert(child, parent);
+                let list = self.subagents.entry(parent).or_default();
+                if !list.iter().any(|s| s.id == child.to_string()) {
+                    list.push(services::SubagentInfo {
+                        id: child.to_string(), parent: parent.to_string(), name: text("name"), task: text("task"),
+                        state: "running".into(), started_at: now, ended_at: None, message_count: 0,
+                    });
+                }
+            }
+            Some("state") => {
+                if let Some(info) = self.subagents.get_mut(&parent).and_then(|l| l.iter_mut().find(|s| s.id == child.to_string())) {
+                    info.state = text("state");
+                    info.ended_at = Some(now);
+                }
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    /// Open a subagent's own transcript (read-only), in place of the thread view.
+    pub fn open_subagent(&mut self, child: Uuid, cx: &mut Context<Self>) {
+        let Some(parent) = self.subagent_of.get(&child).copied() else { return };
+        if !self.threads.contains_key(&child) {
+            let Some(parent_meta) = self.threads.get(&parent).map(|t| t.read(cx).meta.clone()) else { return };
+            let info = self.subagents.get(&parent).and_then(|l| l.iter().find(|s| s.id == child.to_string())).cloned();
+            let mut dto = parent_meta;
+            dto.id = child.to_string();
+            dto.label = info.as_ref().map(|i| i.name.clone());
+            dto.status = info.as_ref().map(|i| i.state.clone()).unwrap_or_else(|| "completed".into());
+            dto.live = false;
+            dto.message_count = info.as_ref().map(|i| i.message_count).unwrap_or(0);
+            let entity = cx.new(|_| ThreadModel::new(dto));
+            self.threads.insert(child, entity);
+        }
+        self.select(Some(child), cx);
     }
 
     /// Ask every paired server for its projects, threads and workspaces.
@@ -1169,7 +1239,9 @@ impl AppModel {
                 }
             }
         }
-        self.threads.retain(|id, _| order.contains(id));
+        // Open subagents aren't in the list; keep them.
+        let subagents = &self.subagent_of;
+        self.threads.retain(|id, _| order.contains(id) || subagents.contains_key(id));
         self.thread_order = order;
         if let Some(open) = self.selected { self.seen.insert(open, chrono::Utc::now()); }
         if let Some(sel) = self.selected {
@@ -1455,6 +1527,17 @@ impl AppModel {
         let mut need_refresh = false;
         let mut ended = Vec::new();
         for ev in batch {
+            // A subagent's own events reach its transcript if it's open, and nothing else.
+            if let Some(sid) = session_of(&ev).filter(|sid| self.subagent_of.contains_key(sid)) {
+                if let Some(t) = self.threads.get(&sid) { t.update(cx, |t, cx| { t.apply(&ev, cx); }); }
+                if matches!(ev, ControlEvent::SessionStatusChanged { .. }) { cx.notify(); }
+                continue;
+            }
+            if let ControlEvent::Raw { session_id: Some(parent), payload } = &ev {
+                if payload.get("channel").and_then(|c| c.as_str()) == Some("subagent") {
+                    self.note_subagent(*parent, payload, cx);
+                }
+            }
             match &ev {
                 ControlEvent::SessionCreated { session_id, .. } => {
                     if !self.threads.contains_key(session_id) {

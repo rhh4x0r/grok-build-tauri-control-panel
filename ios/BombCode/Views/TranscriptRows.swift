@@ -12,6 +12,7 @@ struct TranscriptRowView: View {
         case let .plan(entry): PlanCard(entry: entry)
         case let .approval(entry): ApprovalCard(entry: entry, thread: thread)
         case let .line(entry): SystemLine(entry: entry)
+        case let .subagent(entry): SubagentCard(entry: entry, thread: thread)
         }
     }
 }
@@ -205,5 +206,53 @@ struct SystemLine: View {
             .font(Theme.sans(12))
             .foregroundStyle(entry.role == .error ? Theme.danger : Theme.textFaint)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// A subagent the thread started: what it's doing, and a way into its own transcript.
+struct SubagentCard: View {
+    let entry: EntryView
+    let thread: ThreadModel
+
+    var body: some View {
+        if case let .tool(childId, name, status, task, _) = entry.body {
+            let title = String(name.dropFirst(subagentPrefix.count))
+            NavigationLink(value: ThreadRef(machineId: thread.machine.id, threadId: childId, subagent: title)) {
+                HStack(spacing: 10) {
+                    SubagentStatusIcon(status: status)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(title).font(Theme.sans(14, .medium)).foregroundStyle(Theme.text)
+                            Text("Subagent").font(Theme.mono(10, .medium)).foregroundStyle(Theme.textFaint)
+                        }
+                        if !task.isEmpty {
+                            Text(task).font(Theme.caption).foregroundStyle(Theme.textMuted).lineLimit(2)
+                        }
+                    }
+                    Spacer(minLength: 4)
+                    Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.textFaint)
+                }
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: Theme.panelCorner).fill(Theme.glass))
+                .overlay(RoundedRectangle(cornerRadius: Theme.panelCorner).stroke(Theme.hairline, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+        }
+    }
+}
+
+/// Working, finished, or failed.
+struct SubagentStatusIcon: View {
+    let status: String
+
+    var body: some View {
+        switch status {
+        case "running", "pending":
+            ProgressView().controlSize(.small).tint(Theme.accent).frame(width: 18)
+        case "completed":
+            Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.success).frame(width: 18)
+        default:
+            Image(systemName: "xmark.circle.fill").foregroundStyle(Theme.danger).frame(width: 18)
+        }
     }
 }
