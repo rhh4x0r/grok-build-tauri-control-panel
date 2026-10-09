@@ -159,10 +159,17 @@ impl TranscriptView {
             let entries: Vec<Entry> = t.thread.entries.clone();
             let cwd = std::path::PathBuf::from(&t.meta.cwd);
             let project_root = t.meta.project_root.clone().map(std::path::PathBuf::from);
-            let last_agent = entries
-                .iter()
-                .rposition(|e| e.role == Role::Agent && e.images.is_empty())
-                .map(|i| entries[i].id);
+            // The reply that closes each turn (its last text before the next prompt) gets the footer.
+            let mut turn_final: std::collections::HashSet<u64> = std::collections::HashSet::new();
+            let mut pending = None;
+            for e in entries.iter() {
+                if e.role == Role::You {
+                    turn_final.extend(pending.take());
+                } else if e.role == Role::Agent && e.images.is_empty() && matches!(&e.body, Body::Text(_)) {
+                    pending = Some(e.id);
+                }
+            }
+            turn_final.extend(pending);
             let mut rows: Vec<Row> = Vec::with_capacity(entries.len());
             let turn_start = entries
                 .iter()
@@ -265,7 +272,7 @@ impl TranscriptView {
                             streaming: e.streaming,
                             images,
                             attached,
-                            last: last_agent == Some(e.id),
+                            last: turn_final.contains(&e.id),
                             at: e
                                 .at
                                 .with_timezone(&chrono::Local)
@@ -441,6 +448,14 @@ impl TranscriptView {
                         .whitespace_normal()
                         .child(text.to_string()),
                 )
+                .child(
+                    // Copy your own prompt, like a reply.
+                    div().text_color(ui.text_faint).child(
+                        gpui_kit::component::clipboard::Clipboard::new(("copy-prompt", id))
+                            .value(SharedString::from(text.to_string()))
+                            .tooltip("Copy"),
+                    ),
+                )
             });
         self.enter("user", id, bubble)
     }
@@ -569,11 +584,11 @@ impl TranscriptView {
                         .text_size(px(crate::theme::Type::SMALL))
                         .text_color(ui.text_faint)
                         .child(at.to_string())
-                        .child(action("copy-reply", "Copy").on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                text_for_copy.to_string(),
-                            ));
-                        }))
+                        .child(
+                            gpui_kit::component::clipboard::Clipboard::new(("copy-reply", id))
+                                .value(text_for_copy.clone())
+                                .tooltip("Copy"),
+                        )
                         .child(
                             action("remember-reply", "Remember").on_click(move |_, _, cx| {
                                 let app = cx.global::<AppModelHandle>().0.clone();
