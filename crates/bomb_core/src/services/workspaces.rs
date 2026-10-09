@@ -90,7 +90,9 @@ pub async fn list_workspaces(state: &AppState) -> Result<Vec<WorkspaceRecord>, S
     let _gate = state.workspace_gate.lock().await;
     let mut workspaces = state.persistence.list_workspaces().map_err(err)?;
     for rec in state.persistence.list_sessions().map_err(err)? {
+        // A subagent lives under its parent thread, not in a workspace of its own.
         if rec.cwd.is_empty()
+            || super::subagent_parent(&rec.metadata_json).is_some()
             || workspaces
                 .iter()
                 .any(|w| w.threads.contains(&rec.id.to_string()))

@@ -746,6 +746,9 @@ pub async fn send_prompt(
     if state.foundry.for_thread(&id.to_string()).is_some_and(|r| !matches!(r.status, bomb_foundry::RunStatus::Completed | bomb_foundry::RunStatus::Stopped)) {
         return Err("This thread has a Foundry run. Stop the run before sending a separate prompt.".into());
     }
+    if state.persistence.get_session(id).is_ok_and(|r| subagent_parent(&r.metadata_json).is_some()) {
+        return Err("A subagent can't take messages. Write to the thread that started it.".into());
+    }
     // Its agent may still be starting (woken when the thread was opened): wait for it rather than
     // fail. A start that failed is retried below, like any failed connection.
     if state.registry.get_snapshot(id).is_ok_and(|s| s.metadata.status == grok_events::SessionStatus::Starting) {
@@ -2312,7 +2315,8 @@ fn build_thread_list_all(state: &AppState) -> Vec<ThreadDto> {
 
     if let Ok(saved) = state.persistence.list_sessions() {
         for rec in saved {
-            if live_ids.contains(&rec.id) {
+            // Subagents are listed under their parent thread (`list_subagents`), not as threads.
+            if live_ids.contains(&rec.id) || subagent_parent(&rec.metadata_json).is_some() {
                 continue;
             }
             // After reboot ACP is gone — never show stale "running".
@@ -2395,6 +2399,9 @@ pub async fn wake_thread(state: &AppState, id: String) -> Result<(), String> {
         return Ok(());
     }
     let rec = state.persistence.get_session(id).map_err(err)?;
+    if subagent_parent(&rec.metadata_json).is_some() {
+        return Ok(());
+    }
     let busy_elsewhere = state.foundry.for_thread(&id.to_string()).is_some_and(|r| !matches!(r.status, bomb_foundry::RunStatus::Completed | bomb_foundry::RunStatus::Stopped));
     let archived = state.persistence.workspace_for_session(id).map_err(err)?.is_some_and(|w| w.archived_at.is_some());
     if rec.model.eq_ignore_ascii_case("mock") || busy_elsewhere || archived {
@@ -2429,6 +2436,107 @@ fn extract_mcp_from_meta(json: &str) -> Vec<String> {
 }
 
 /// Called from the event-bus persistence task (best-effort, never panics).
+/// A subagent is saved as a thread of its own, linked to its parent (`parentThread`) and described
+/// by `subagent` in its metadata; its transcript starts with the task it was given.
+fn persist_subagent(db: &grok_persistence::Persistence, parent: Uuid, payload: &serde_json::Value) -> Result<(), grok_persistence::PersistenceError> {
+    let Some(child) = payload["child"].as_str().and_then(|c| Uuid::parse_str(c).ok()) else { return Ok(()) };
+    let now = Utc::now();
+    match payload["kind"].as_str() {
+        Some("spawned") => {
+            let Ok(parent_rec) = db.get_session(parent) else { return Ok(()) };
+            let mut snapshot: serde_json::Value = serde_json::from_str(&parent_rec.metadata_json).unwrap_or_else(|_| serde_json::json!({}));
+            let mut meta = snapshot.get("metadata").cloned().filter(|m| m.is_object()).unwrap_or_else(|| serde_json::json!({}));
+            let name = payload["name"].as_str().unwrap_or("Subagent");
+            let task = payload["task"].as_str().unwrap_or_default();
+            meta["id"] = child.to_string().into();
+            meta["label"] = name.into();
+            meta["parentThread"] = parent.to_string().into();
+            meta["subagent"] = serde_json::json!({ "name": name, "task": task, "state": "running", "startedAt": now.to_rfc3339() });
+            meta["acpSessionId"] = serde_json::Value::Null;
+            snapshot["metadata"] = meta;
+            db.upsert_session(&SessionRecord {
+                id: child,
+                cwd: parent_rec.cwd,
+                mode: "acp".into(),
+                model: parent_rec.model,
+                status: "running".into(),
+                worktree: parent_rec.worktree,
+                acp_session_id: None,
+                metadata_json: snapshot.to_string(),
+                created_at: now,
+                updated_at: now,
+                message_count: 0,
+            })?;
+            let prompt = payload["prompt"].as_str().filter(|p| !p.trim().is_empty()).unwrap_or(task);
+            if !prompt.trim().is_empty() {
+                db.append_message(child, "prompt", prompt, now)?;
+            }
+            Ok(())
+        }
+        Some("state") => {
+            let Ok(mut rec) = db.get_session(child) else { return Ok(()) };
+            let state = payload["state"].as_str().unwrap_or("completed");
+            let mut snapshot: serde_json::Value = serde_json::from_str(&rec.metadata_json).unwrap_or_else(|_| serde_json::json!({}));
+            if let Some(sub) = snapshot.pointer_mut("/metadata/subagent").filter(|s| s.is_object()) {
+                sub["state"] = state.into();
+                sub["endedAt"] = now.to_rfc3339().into();
+            }
+            rec.metadata_json = snapshot.to_string();
+            rec.status = if state == "completed" { "completed".into() } else if state == "cancelled" { "cancelled".into() } else { "failed".into() };
+            rec.updated_at = now;
+            db.upsert_session(&rec)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The parent of a subagent's thread, from its saved metadata.
+pub fn subagent_parent(metadata_json: &str) -> Option<Uuid> {
+    extract_meta_string(metadata_json, "parentThread").and_then(|p| Uuid::parse_str(&p).ok())
+}
+
+/// One subagent of a thread, for the sidebar and the phone.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentInfo {
+    pub id: String,
+    pub parent: String,
+    pub name: String,
+    pub task: String,
+    /// running | completed | failed | cancelled
+    pub state: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub message_count: u64,
+}
+
+/// Every thread's subagents (or one thread's), oldest first.
+pub async fn list_subagents(state: &AppState, parent: Option<String>) -> Result<Vec<SubagentInfo>, String> {
+    let parent = parent.map(|p| Uuid::parse_str(&p).map_err(err)).transpose()?;
+    let mut out: Vec<SubagentInfo> = state.persistence.list_sessions().map_err(err)?.into_iter().filter_map(|rec| {
+        let of = subagent_parent(&rec.metadata_json)?;
+        if parent.is_some_and(|p| p != of) { return None; }
+        let v: serde_json::Value = serde_json::from_str(&rec.metadata_json).ok()?;
+        let sub = v.pointer("/metadata/subagent")?;
+        let text = |k: &str| sub.get(k).and_then(|x| x.as_str()).map(String::from);
+        // A subagent still "running" after a restart was cut off with its agent.
+        let mut state = text("state").unwrap_or_else(|| "completed".into());
+        if state == "running" && !rec.status.eq_ignore_ascii_case("running") { state = rec.status.to_lowercase(); }
+        Some(SubagentInfo {
+            id: rec.id.to_string(),
+            parent: of.to_string(),
+            name: text("name").unwrap_or_else(|| "Subagent".into()),
+            task: text("task").unwrap_or_default(),
+            state,
+            started_at: text("startedAt").unwrap_or_else(|| rec.created_at.to_rfc3339()),
+            ended_at: text("endedAt"),
+            message_count: rec.message_count,
+        })
+    }).collect();
+    out.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+    Ok(out)
+}
+
 pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEvent) {
     use ControlEvent::*;
     let res: Result<(), grok_persistence::PersistenceError> = (|| match ev {
@@ -2537,6 +2645,9 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
             };
             db.append_message(*session_id, "system", body, *at)
                 .map(|_| ())
+        }
+        Raw { session_id: Some(parent), payload } if payload["channel"] == "subagent" => {
+            persist_subagent(db, *parent, payload)
         }
         Raw { session_id:Some(session_id), payload } if payload["channel"]=="policy_blocked" => {
             db.append_message(*session_id,"system",payload["message"].as_str().unwrap_or("Access was blocked by read-only policy."),Utc::now()).map(|_|())

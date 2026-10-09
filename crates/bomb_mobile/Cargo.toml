@@ -33,6 +33,7 @@ uniffi = "0.32"
 uuid.workspace = true
 
 [dev-dependencies]
+grok_acp = { path = "../grok_acp" }
 bomb_core = { path = "../bomb_core" }
 bomb_server = { path = "../bomb_server" }
 grok_config = { path = "../grok_config" }

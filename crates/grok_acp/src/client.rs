@@ -200,7 +200,74 @@ struct PendingPermission {
     options: Vec<PermissionOptionInfo>,
 }
 
+/// The thread id of a subagent: the same child session always maps to the same thread.
+pub fn subagent_thread_id(parent: Uuid, child_session: &str) -> Uuid {
+    Uuid::new_v5(&parent, child_session.as_bytes())
+}
+
 impl AcpClient {
+    /// `subagent_spawned` and `subagent_state_update` (draft ACP). A subagent becomes a thread of
+    /// its own, linked to its parent; the parent shows it as a "Subagent" step that runs until the
+    /// subagent ends. Returns true when the update was one of these.
+    async fn note_subagent(&self, bus: &EventBus, parent: Uuid, params: &Value) -> bool {
+        let update = params.get("update").unwrap_or(params);
+        let kind = update.get("sessionUpdate").and_then(Value::as_str).unwrap_or_default();
+        if !matches!(kind, "subagent_spawned" | "subagent_state_update") {
+            return false;
+        }
+        let Some(child_session) = update.get("subagentSessionId").and_then(Value::as_str) else { return true };
+        // A nested subagent is announced on its parent subagent's session.
+        let owner = params.get("sessionId").and_then(Value::as_str)
+            .and_then(|s| self.subagents.lock().unwrap_or_else(|e| e.into_inner()).get(s).copied())
+            .unwrap_or(parent);
+        let child = subagent_thread_id(parent, child_session);
+        let text = |key: &str| update.get(key).and_then(Value::as_str).unwrap_or_default().trim().to_string();
+        if kind == "subagent_spawned" {
+            self.subagents.lock().unwrap_or_else(|e| e.into_inner()).insert(child_session.to_string(), child);
+            let name = Some(text("name")).filter(|n| !n.is_empty()).unwrap_or_else(|| "Subagent".into());
+            let task = text("task");
+            info!(%child, name, "subagent started");
+            bus.emit(ControlEvent::Raw {
+                session_id: Some(owner),
+                payload: json!({
+                    "channel": "subagent", "kind": "spawned", "child": child, "name": name, "task": task,
+                    "prompt": update.get("prompt").and_then(Value::as_str),
+                }),
+            });
+            bus.emit_tool_call(owner, ToolCallEvent {
+                id: child.to_string(),
+                tool: format!("Subagent · {name}"),
+                args_summary: task,
+                status: ToolCallStatus::Running,
+                result_summary: None,
+                at: Utc::now(),
+            });
+            bus.emit_status(child, SessionStatus::Running).await;
+        } else {
+            let state = text("state");
+            info!(%child, state, "subagent ended");
+            let (tool_status, status) = match state.as_str() {
+                "completed" => (ToolCallStatus::Completed, SessionStatus::Completed),
+                "cancelled" => (ToolCallStatus::Failed, SessionStatus::Cancelled),
+                _ => (ToolCallStatus::Failed, SessionStatus::Failed),
+            };
+            bus.emit(ControlEvent::Raw {
+                session_id: Some(owner),
+                payload: json!({ "channel": "subagent", "kind": "state", "child": child, "state": state }),
+            });
+            bus.emit_tool_call(owner, ToolCallEvent {
+                id: child.to_string(),
+                tool: "tool".into(),
+                args_summary: String::new(),
+                status: tool_status,
+                result_summary: Some(state),
+                at: Utc::now(),
+            });
+            bus.emit_status(child, status).await;
+        }
+        true
+    }
+
     /// Agent activity with no prompt open is a turn the agent started itself: say it's working,
     /// and watch for it to finish (see `UnpromptedTurn`).
     async fn note_unprompted(&self, bus: &EventBus, sid: Uuid, params: &Value) {
@@ -362,6 +429,8 @@ pub struct AcpClient {
     prompts_open: Arc<std::sync::atomic::AtomicUsize>,
     /// A turn the agent started on its own, which no prompt's answer will end.
     unprompted: Arc<std::sync::Mutex<Option<UnpromptedTurn>>>,
+    /// Subagent sessions this agent spawned: the child's ACP session id → its thread id here.
+    subagents: std::sync::Mutex<HashMap<String, Uuid>>,
 }
 
 /// Claude Code starts a turn by itself when a background job it launched finishes. With no
@@ -594,6 +663,7 @@ impl AcpClient {
             terminals: TerminalRegistry::new(default_cwd),
             prompts_open: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             unprompted: Arc::new(std::sync::Mutex::new(None)),
+            subagents: std::sync::Mutex::new(HashMap::new()),
         });
 
         client.initialize().await?;
@@ -675,6 +745,7 @@ impl AcpClient {
             terminals: TerminalRegistry::new(PathBuf::from("/tmp")),
             prompts_open: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             unprompted: Arc::new(std::sync::Mutex::new(None)),
+            subagents: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -717,6 +788,7 @@ impl AcpClient {
                     write_text_file: !self.config.read_only,
                 },
                 terminal: true,
+                subagents: Some(json!({})),
             },
         );
         let result = self
@@ -2625,6 +2697,16 @@ impl AcpClient {
                 {
                     return;
                 }
+                if self.note_subagent(bus, sid, &params).await {
+                    return;
+                }
+                // A subagent's own updates go to its thread.
+                let child = params.get("sessionId").and_then(Value::as_str)
+                    .and_then(|s| self.subagents.lock().unwrap_or_else(|e| e.into_inner()).get(s).copied());
+                if let Some(child) = child {
+                    self.map_session_update(bus, child, &params).await;
+                    return;
+                }
                 self.map_session_update(bus, sid, &params).await;
                 self.note_unprompted(bus, sid, &params).await;
             }
@@ -3607,6 +3689,44 @@ impl AcpClient {
 
     pub fn cwd(&self) -> &Path {
         &self.config.cwd
+    }
+}
+
+#[cfg(test)]
+mod subagent_tests {
+    use super::*;
+
+    fn update(session: &str, update: Value) -> JsonRpcNotification {
+        JsonRpcNotification { jsonrpc: "2.0".into(), method: "session/update".into(), params: Some(json!({ "sessionId": session, "update": update })) }
+    }
+
+    #[tokio::test]
+    async fn a_subagent_gets_its_own_thread_and_a_step_in_its_parent() {
+        let bus = Arc::new(EventBus::new());
+        let mut events = bus.subscribe();
+        let client = AcpClient::mock_for_tests("parent-acp", Some(bus.clone()));
+        let parent = client.control_session_id;
+        let child = subagent_thread_id(parent, "child-acp");
+        client.handle_notification(update("parent-acp", json!({
+            "sessionUpdate": "subagent_spawned", "subagentSessionId": "child-acp", "name": "Explore",
+            "task": "Find the shader code", "prompt": "Find where the fibre shader is defined.", "capabilities": {},
+        }))).await;
+        client.handle_notification(update("child-acp", json!({
+            "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "It's in index.html." },
+        }))).await;
+        client.handle_notification(update("parent-acp", json!({
+            "sessionUpdate": "subagent_state_update", "subagentSessionId": "child-acp", "state": "completed",
+        }))).await;
+
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() { seen.push(event); }
+        let spawned = seen.iter().any(|e| matches!(e, ControlEvent::Raw { session_id: Some(s), payload } if *s == parent && payload["kind"] == "spawned" && payload["child"] == child.to_string() && payload["name"] == "Explore"));
+        assert!(spawned, "the parent hears the subagent started: {seen:?}");
+        let step: Vec<_> = seen.iter().filter_map(|e| match e { ControlEvent::ToolCall { session_id, event } if *session_id == parent && event.id == child.to_string() => Some(event.status), _ => None }).collect();
+        assert_eq!(step, vec![ToolCallStatus::Running, ToolCallStatus::Completed], "the parent shows it as a step");
+        assert!(seen.iter().any(|e| matches!(e, ControlEvent::AgentMessage { session_id, text, .. } if *session_id == child && text.contains("index.html"))), "the child's words go to the child");
+        assert!(!seen.iter().any(|e| matches!(e, ControlEvent::AgentMessage { session_id, .. } if *session_id == parent)), "not to the parent");
+        assert!(seen.iter().any(|e| matches!(e, ControlEvent::SessionStatusChanged { session_id, status: SessionStatus::Completed, .. } if *session_id == child)));
     }
 }
 

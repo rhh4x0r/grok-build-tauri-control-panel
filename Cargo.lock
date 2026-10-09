@@ -895,6 +895,7 @@ dependencies = [
  "bomb_server",
  "bomb_transcript",
  "chrono",
+ "grok_acp",
  "grok_config",
  "grok_events",
  "serde",

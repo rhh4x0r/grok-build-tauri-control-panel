@@ -157,6 +157,28 @@ async fn a_paired_phone_starts_a_thread_watches_it_and_answers_an_approval() {
     std::fs::write(&notes, b"secret").unwrap();
     assert!(machine.fetch_media(id.clone(), notes.display().to_string()).await.is_err());
 
+    // A subagent: its own saved thread under the parent, a step in the parent, never a thread of its own in the list.
+    let child = grok_acp::subagent_thread_id(session_id, "child-acp");
+    let raw = |payload: serde_json::Value| grok_events::ControlEvent::Raw { session_id: Some(session_id), payload };
+    state.event_bus.emit(raw(json!({ "channel": "subagent", "kind": "spawned", "child": child, "name": "Explore", "task": "Find the shader", "prompt": "Find where the fibre shader is defined." })));
+    state.event_bus.emit_tool_call(session_id, grok_events::ToolCallEvent { id: child.to_string(), tool: "Subagent · Explore".into(), args_summary: "Find the shader".into(), status: grok_events::ToolCallStatus::Running, result_summary: None, at: chrono::Utc::now() });
+    state.event_bus.emit(grok_events::ControlEvent::AgentMessage { session_id: child, text: "It's in index.html.".into(), at: chrono::Utc::now() });
+    state.event_bus.emit(raw(json!({ "channel": "subagent", "kind": "state", "child": child, "state": "completed" })));
+    until(&screen, "the subagent step", |s| s.entries.iter().any(|e| matches!(&e.body, EntryBody::Tool { name, .. } if name == "Subagent · Explore"))).await;
+    let mut listed = Vec::new();
+    for _ in 0..100 {
+        listed = bomb_core::rpc::dispatch(&state, "setup", "list_subagents", json!({ "thread": id })).await.unwrap().as_array().cloned().unwrap_or_default();
+        if listed.first().is_some_and(|s| s["state"] == "completed") { break; }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!((listed[0]["id"].as_str(), listed[0]["name"].as_str(), listed[0]["state"].as_str()), (Some(child.to_string().as_str()), Some("Explore"), Some("completed")));
+    let threads = bomb_core::rpc::dispatch(&state, "setup", "list_threads", json!({})).await.unwrap();
+    assert!(threads.as_array().unwrap().iter().all(|t| t["id"] != child.to_string()), "a subagent isn't a thread in the list");
+    let rows = state.persistence.transcript_entries(child).unwrap();
+    assert!(rows.iter().any(|r| r.body.contains("fibre shader")) && rows.iter().any(|r| r.body.contains("index.html")), "{rows:?}");
+    assert!(machine.send_prompt(child.to_string(), "hi".into(), PromptOptions::default()).await.is_err(), "a subagent takes no messages");
+
     // Backgrounding pauses; coming back reconnects.
     machine.set_active(false);
     until(&screen, "paused", |s| s.link == Some(LinkState::Paused)).await;
