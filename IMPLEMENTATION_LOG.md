@@ -904,3 +904,23 @@ Approved defaults: automatic checkpoint commits, merge-based Update, and read-on
   - A saved `worktrees_root` pointing at `~/.grok/worktrees` is repointed at startup.
 - On Max's Mac: 10 items, 15 worktrees (registrations updated), 1,666 database cells. A clone backup is in `~/.bombcode-move-backup`.
 - Caveat: Claude Code keys sessions by folder, so Claude threads whose worktree moved may reopen history-only.
+
+## 2026-10-08 — Thread behavior: new chats, Failed, type-ahead queue
+
+Built in parallel: the orchestrator did the new-chat fix; two Opus 5.5 subagents built the other two in their own worktrees, then they were merged and wired together.
+
+- **New chats open as soon as they start** (`models/app.rs`). A thread-list refresh that read the list before the new thread existed could land after it was selected, drop it and clear the selection.
+  - `just_started` keeps a thread started here until a list reports it.
+  - `list_fetches`/`list_applied` ignore an older local list fetch that lands after a newer one.
+  - The new thread is opened through `select()`, keeping the temporary/worktree location it was started with, since its workspace isn't listed yet.
+  - Cause found by reading code; not reproduced in the running app.
+- **Failed can be cleared** (`bomb_core/src/failures.rs`, kv `failed_dismissed`).
+  - A × next to "Retry last prompt" hides the status line. The error row stays in the transcript.
+  - The sidebar shows Failed (thread row and workspace rollup) only while the failure is newer than its dismissal. Opening the thread counts as seeing it, and a later failure brings it back.
+- **Type-ahead queue** (`bomb_core/src/queue.rs`).
+  - Sending while the agent works, or while a new thread starts, queues the message. Queued messages show above the composer with Edit / Remove / Send now.
+  - When a turn finishes, the queue goes as one prompt, shown live as separate bubbles.
+  - A failed or stopped turn pauses the queue; Resume releases it. Dismiss resumes it too. Retry lifts the pause, and the queue follows the retried turn.
+  - Send now cancels, then waits for the ACP client to confirm the stopped `session/prompt` came back (`open_prompts`, `wait_turn_settled`, through the registry, service, RPC and `Core`).
+  - After a reload, a combined send shows as one bubble.
+- Tests: `remote::keychain` and the remote e2e test raced on `BOMB_KEY_DIR`; they now share one per-process folder (`keychain::test_dir`). The workspace passes clippy `-D warnings` (5 newer lints fixed) and tests: 293 passed.

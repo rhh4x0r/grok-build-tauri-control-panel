@@ -106,6 +106,8 @@ pub struct ComposerView {
     location: Entity<super::work_location::WorkLocation>,
     sent_draft: Option<(String, Vec<Attachment>, u64)>,
     failed_draft: Option<(String, Vec<Attachment>)>,
+    /// A queued message open for editing: (thread, message id, the draft it replaced).
+    editing_queued: Option<(Option<uuid::Uuid>, u64, String, Vec<Attachment>)>,
     destination_busy: bool,
     destination_message: Option<String>,
     destination_init: Option<String>,
@@ -182,6 +184,7 @@ impl ComposerView {
             provider_filter: None,
             sent_draft: None,
             failed_draft: None,
+            editing_queued: None,
             destination_busy: false,
             destination_message: None,
             destination_init: None,
@@ -649,21 +652,26 @@ impl ComposerView {
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value().to_string();
         let text = text.trim().to_string();
+        // Saving an edit to a queued message: it keeps its place in line.
+        if let Some((thread, item, draft, kept)) = self.editing_queued.take() {
+            self.model.update(cx, |m, cx| m.save_queued_edit(thread, item, text, cx));
+            self.restore_draft(draft, kept, window, cx);
+            return;
+        }
         if text.is_empty() && self.attachments.is_empty() {
             return;
         }
-        let busy = self
-            .model
-            .read(cx)
-            .selected_thread()
-            .map(|t| t.read(cx).thread.presence.turn_active())
-            .unwrap_or(false);
-        if busy || self.model.read(cx).starting {
+        // The agent is working or the thread is starting: the message waits for the turn to end.
+        if self.model.read(cx).queue_instead(cx) {
+            let (images, files) = self.take_attachments();
+            self.input.update(cx, |s, cx| s.set_value("", window, cx));
+            self.model.update(cx, |m, cx| m.enqueue(text, images, files, cx));
+            self.focus(window, cx);
+            return;
+        }
+        if self.model.read(cx).starting {
             self.model.update(cx, |m, cx| {
-                m.toast(
-                    ToastKind::Warning,
-                    "The agent is still working — stop it first.",
-                );
+                m.toast(ToastKind::Info, "A new thread is still starting. Send this in a moment.");
                 cx.notify();
             });
             return;
@@ -707,8 +715,17 @@ impl ComposerView {
         self.routing_suggestion=None;
         self.destination_ready=None;self.destination_message=None;self.destination_init=None;
         if self.model.read(cx).selected.is_none() { self.sent_draft=Some((text.clone(),self.attachments.clone(),self.model.read(cx).start_failure_serial)); }
-        let files: Vec<(std::path::PathBuf, u64)> = self.attachments.iter().filter_map(|a| a.path.clone().map(|p| (p, a.size))).collect();
-        let images: Vec<ImageInput> = self
+        let (images, files) = self.take_attachments();
+        self.input.update(cx, |s, cx| s.set_value("", window, cx));
+        self.model
+            .update(cx, |m, cx| m.send_prompt_with_files(text, images, files, cx));
+        self.focus(window, cx);
+    }
+
+    /// Hand the attachments over for sending: images as data, other files by path.
+    fn take_attachments(&mut self) -> (Vec<ImageInput>, Vec<(std::path::PathBuf, u64)>) {
+        let files = self.attachments.iter().filter_map(|a| a.path.clone().map(|p| (p, a.size))).collect();
+        let images = self
             .attachments
             .drain(..)
             .filter(|a| a.path.is_none())
@@ -718,14 +735,37 @@ impl ComposerView {
                 name: Some(a.name),
             })
             .collect();
-        self.input.update(cx, |s, cx| s.set_value("", window, cx));
-        self.model
-            .update(cx, |m, cx| m.send_prompt_with_files(text, images, files, cx));
-        self.focus(window, cx);
+        (images, files)
     }
 
     fn stop(&mut self, cx: &mut Context<Self>) {
         self.model.update(cx, |m, cx| m.cancel_selected(cx));
+    }
+
+    /// Open a queued message in the box below; the draft there is set aside until the edit is done.
+    fn edit_queued(&mut self, thread: Option<uuid::Uuid>, item: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_queued_edit(window, cx);
+        let Some(text) = self.model.update(cx, |m, cx| m.begin_queued_edit(thread, item, cx)) else { return };
+        let draft = self.input.read(cx).value().to_string();
+        let kept = std::mem::take(&mut self.attachments);
+        self.editing_queued = Some((thread, item, draft, kept));
+        self.input.update(cx, |s, cx| s.set_value(text, window, cx));
+        self.focus(window, cx);
+    }
+
+    fn cancel_queued_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((thread, _, draft, kept)) = self.editing_queued.take() {
+            self.model.update(cx, |m, cx| m.cancel_queued_edit(thread, cx));
+            self.restore_draft(draft, kept, window, cx);
+        }
+    }
+
+    fn restore_draft(&mut self, draft: String, mut kept: Vec<Attachment>, window: &mut Window, cx: &mut Context<Self>) {
+        // Anything attached during the edit stays attached.
+        kept.append(&mut self.attachments);
+        self.attachments = kept;
+        self.input.update(cx, |s, cx| s.set_value(draft, window, cx));
+        cx.notify();
     }
 
     fn pick_files(&mut self, cx: &mut Context<Self>) {
@@ -870,6 +910,98 @@ impl ComposerView {
     }
 
     // ── render pieces ───────────────────────────────────────────────────
+
+    /// Messages waiting for the agent: dimmed bubbles above the composer, each with
+    /// Edit, Remove and Send now, and a note with Resume while the queue is paused.
+    fn queue_panel(&self, ui: &Ui, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use bomb_core::queue::Pause;
+        let m = self.model.read(cx);
+        let thread = m.selected;
+        let q = m.queue(thread)?;
+        let (items, paused, sending_now) = (q.items().to_vec(), q.paused(), q.sending_now().cloned());
+        // Stopping needs a turn to stop; a thread that is still starting has none yet.
+        let can_send_now = thread.is_some() && !m.starting && sending_now.is_none();
+        let editing = self.editing_queued.as_ref().filter(|e| e.0 == thread).map(|e| e.1);
+        let caption = |text: String| div().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint).child(text);
+        let bubble = |message: &bomb_core::queue::Queued| {
+            let attached = message.images.len() + message.files.len();
+            let text = if message.text.trim().is_empty() { "Attachment".to_string() } else { message.text.clone() };
+            div()
+                .min_w_0()
+                .max_w(relative(0.8))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .bg(ui.bubble)
+                .opacity(0.6)
+                .rounded(px(Layout::BUBBLE_RADIUS))
+                .px(px(14.))
+                .py(px(8.))
+                .text_size(px(Layout::BODY_SIZE))
+                .line_height(px(Layout::BODY_LINE))
+                .text_color(ui.text)
+                .whitespace_normal()
+                .child(text)
+                .when(attached > 0, |el| el.child(caption(if attached == 1 { "1 attachment".into() } else { format!("{attached} attachments") })))
+        };
+        let header = match paused {
+            Some(why) => div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_size(px(crate::theme::Type::SMALL))
+                .text_color(ui.text_muted)
+                .child(Icon::from(Lucide::Clock).size(px(12.)))
+                .child(match why {
+                    Pause::Failed => "Queue paused · the last turn failed, so these wait for you.",
+                    Pause::Stopped => "Queue paused · you stopped the agent, so these wait for you.",
+                })
+                .child(Button::new("queue-resume").ghost().small().label("Resume").on_click(cx.listener(move |v, _, _, cx| {
+                    v.model.update(cx, |m, cx| m.resume_queue(thread, cx));
+                })))
+                .into_any_element(),
+            None => caption(if items.len() + sending_now.iter().count() == 1 { "Queued · goes out when the agent finishes".into() } else { "Queued · these go out together when the agent finishes".into() }).into_any_element(),
+        };
+        let rows = items.iter().map(|message| {
+            let id = message.id;
+            let actions = if editing == Some(id) {
+                div().flex().items_center().gap_1()
+                    .child(caption("Editing below · Enter saves".into()))
+                    .child(Button::new(("queue-cancel-edit", id)).ghost().small().label("Cancel").on_click(cx.listener(|v, _, window, cx| v.cancel_queued_edit(window, cx))))
+            } else {
+                div().flex().items_center().gap_1()
+                    .child(Button::new(("queue-edit", id)).ghost().small().label("Edit").on_click(cx.listener(move |v, _, window, cx| v.edit_queued(thread, id, window, cx))))
+                    .child(Button::new(("queue-remove", id)).ghost().small().label("Remove").on_click(cx.listener(move |v, _, _, cx| {
+                        v.model.update(cx, |m, cx| m.remove_queued(thread, id, cx));
+                    })))
+                    .when(can_send_now, |el| el.child(Button::new(("queue-send-now", id)).ghost().small().label("Send now")
+                        .tooltip("Stop the agent and send this now")
+                        .on_click(cx.listener(move |v, _, _, cx| {
+                            v.model.update(cx, |m, cx| m.send_queued_now(thread, id, cx));
+                        }))))
+            };
+            div().w_full().flex().flex_col().items_end().gap_1().child(bubble(message)).child(actions)
+        }).collect::<Vec<_>>();
+        Some(
+            div()
+                .id("composer-queue")
+                .w_full()
+                .max_h(px(260.))
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .px(px(14.))
+                .pb_2()
+                .child(header)
+                .when_some(sending_now, |el, message| {
+                    el.child(div().w_full().flex().flex_col().items_end().gap_1().child(bubble(&message))
+                        .child(super::motion::breathe("queue-stopping", 0.45, caption("Sending once the agent stops…".into()))))
+                })
+                .children(rows)
+                .into_any_element(),
+        )
+    }
 
     fn tray(&self, ui: &Ui, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.attachments.is_empty() {
@@ -1755,7 +1887,9 @@ impl Render for ComposerView {
             !self.input.read(cx).value().trim().is_empty() || !self.attachments.is_empty();
         let (solid, on_solid, danger) = (ui.solid, ui.on_solid, ui.danger);
 
-        let send_button: AnyElement = if busy {
+        let editing = self.editing_queued.is_some();
+        let queues = self.model.read(cx).queue_instead(cx);
+        let stop_button = busy.then(|| {
             div()
                 .id("composer-stop")
                 .size(px(28.))
@@ -1770,9 +1904,14 @@ impl Render for ComposerView {
                 .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
                 .child(div().size(px(11.)).rounded(px(3.)).bg(on_solid))
                 .into_any_element()
+        });
+        // While the agent works, typing still sends: the message joins the queue.
+        let send_button: AnyElement = if busy && !has_text && !editing {
+            div().children(stop_button).into_any_element()
         } else {
-            let enabled = has_text && !starting;
-            div()
+            let enabled = has_text || editing;
+            let tip = if editing { "Save the queued message" } else if queues { "Queue: goes out when the agent finishes" } else { "Send" };
+            let arrow = div()
                 .id("composer-send")
                 .size(px(28.))
                 .flex_shrink_0()
@@ -1787,13 +1926,14 @@ impl Render for ComposerView {
                         .hover(|s| s.opacity(0.85))
                         .on_click(cx.listener(|this, _, window, cx| this.send(window, cx)))
                 })
+                .tooltip(move |window, cx| Tooltip::new(tip).build(window, cx))
                 .child(
                     div()
                         .size(px(14.))
                         .text_color(on_solid)
-                        .child(Icon::from(Lucide::ArrowUp)),
-                )
-                .into_any_element()
+                        .child(Icon::from(if editing { Lucide::Check } else { Lucide::ArrowUp })),
+                );
+            div().flex().items_center().gap(px(6.)).child(arrow).children(stop_button).into_any_element()
         };
 
         let drag_border = if self.drag_over {
@@ -1805,6 +1945,7 @@ impl Render for ComposerView {
         let destination=self.destination_message.as_ref().map(|_|self.destination_panel(&ui,cx));
         let setup = self.foundry_setup.then(||self.foundry_panel(&ui,cx));
         let tray = self.tray(&ui, cx);
+        let queue_panel = self.queue_panel(&ui, cx);
         let model_picker = self.model_selector(&ui, cx);
         let routing_card = self.routing_card(cx);
         let routing_control = self.routing_control(cx);
@@ -1864,7 +2005,7 @@ impl Render for ComposerView {
                 cx.notify();
             }))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
-                if ev.keystroke.key == "escape" && this.foundry_setup {this.foundry_setup=false;cx.stop_propagation();cx.notify();return;}
+                if ev.keystroke.key == "escape" && this.foundry_setup {this.foundry_setup=false;cx.stop_propagation();cx.notify();}
             }))
             // ⌘V reaches the text box as its own Paste action before any key listener here runs, so
             // attachments are taken in the capture phase, on the way down. Plain text is left to the box.
@@ -1883,6 +2024,7 @@ impl Render for ComposerView {
                     .child(div().flex().justify_center().child(
                         div().w_full().max_w(px(Layout::CONTENT_MAX)).px_6().child(routing_card)
                     ))
+                    .children(queue_panel)
                     .child(
                         div()
                             .flex()

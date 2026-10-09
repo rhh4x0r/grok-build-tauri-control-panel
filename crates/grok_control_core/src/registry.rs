@@ -603,6 +603,17 @@ impl SessionRegistry {
         Ok(())
     }
 
+    /// Wait until the session's agent has answered every prompt it was sent, so a
+    /// stopped turn is really over. True at once for sessions without an ACP client;
+    /// false when `timeout` passed first.
+    pub async fn wait_turn_settled(&self, id: Uuid, timeout: std::time::Duration) -> Result<bool> {
+        let client = self.sessions.get(&id).ok_or(CoreError::SessionNotFound(id))?.acp_client.clone();
+        Ok(match client {
+            Some(client) => client.wait_turn_settled(timeout).await,
+            None => true,
+        })
+    }
+
     pub async fn set_plan_mode(&self, id: Uuid, enabled: bool) -> Result<()> {
         let client = {
             let mut entry = self

@@ -115,6 +115,14 @@ impl Core {
         }
     }
 
+    /// See [`services::wait_turn_settled`].
+    pub async fn wait_turn_settled(&self, id: &str, timeout: std::time::Duration) -> Result<(), String> {
+        match self {
+            Self::Local(state) => services::wait_turn_settled(state, id, timeout).await,
+            Self::Remote(r) => r.request("wait_turn_settled", json!({ "id": id, "seconds": timeout.as_secs() })).await.map(|_| ()),
+        }
+    }
+
     pub async fn respond_approval(&self, id: String, request_id: String, option_id: Option<String>) -> Result<(), String> {
         match self {
             Self::Local(state) => services::respond_approval(state, id, request_id, option_id).await,

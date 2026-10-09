@@ -225,6 +225,9 @@ fn is_history_update(params: &Value) -> bool {
 
 pub struct AcpClient {
     turn_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// `session/prompt` requests the agent has not answered yet. A cancelled turn
+    /// is only over once its prompt comes back; see [`AcpClient::wait_turn_settled`].
+    open_prompts: Arc<tokio::sync::watch::Sender<usize>>,
     config: AcpClientConfig,
     child: Mutex<Option<Child>>,
     transport: RwLock<Option<Arc<NdjsonTransport>>>,
@@ -461,6 +464,7 @@ impl AcpClient {
         let client = Arc::new(Self {
             config,
             turn_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            open_prompts: Arc::new(tokio::sync::watch::Sender::new(0)),
             child: Mutex::new(Some(child)),
             transport: RwLock::new(Some(transport)),
             session_id: RwLock::new(None),
@@ -540,6 +544,7 @@ impl AcpClient {
         Arc::new(Self {
             config,
             turn_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            open_prompts: Arc::new(tokio::sync::watch::Sender::new(0)),
             child: Mutex::new(None),
             transport: RwLock::new(None),
             session_id: RwLock::new(Some(session_id.to_string())),
@@ -1417,6 +1422,8 @@ impl AcpClient {
                 let bus = bus.clone();
                 let sid = self.control_session_id;
                 let chars = prompt.len();
+                let open = self.open_prompts.clone();
+                open.send_modify(|n| *n += 1);
                 tokio::spawn(async move {
                     use tokio::time::{sleep, Duration};
                     let say = |t: &str| ControlEvent::AgentMessage {
@@ -1474,6 +1481,7 @@ impl AcpClient {
                         payload: json!({"turn_complete":true,"correlation":correlation}),
                     });
                     bus.emit_status(sid, SessionStatus::Idle).await;
+                    open.send_modify(|n| *n = n.saturating_sub(1));
                 });
             }
             return Ok(());
@@ -1548,9 +1556,13 @@ impl AcpClient {
         let prompt_timeout = self.config.prompt_timeout;
         let generation = self.turn_generation.clone();
         let turn = generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let open = self.open_prompts.clone();
+        open.send_modify(|n| *n += 1);
 
         tokio::spawn(async move {
             let response = tokio::time::timeout(prompt_timeout, rx).await;
+            // Settled even when cancelled: the agent has stopped working on it.
+            open.send_modify(|n| *n = n.saturating_sub(1));
             if generation.load(std::sync::atomic::Ordering::SeqCst) != turn {
                 return;
             }
@@ -1636,6 +1648,15 @@ impl AcpClient {
             .and_then(|c| c.pointer("/promptCapabilities/image"))
             .and_then(|v| v.as_bool())
             .unwrap_or(true)
+    }
+
+    /// Wait until every prompt sent so far has been answered: after [`cancel`](Self::cancel)
+    /// the agent replies to the stopped turn's `session/prompt` once it has wound down.
+    /// False when `timeout` passed first.
+    pub async fn wait_turn_settled(&self, timeout: Duration) -> bool {
+        let mut rx = self.open_prompts.subscribe();
+        let settled = tokio::time::timeout(timeout, rx.wait_for(|n| *n == 0)).await.is_ok();
+        settled
     }
 
     pub async fn cancel(&self) -> Result<()> {
@@ -3534,6 +3555,17 @@ mod tests {
             })
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn a_stopped_turn_settles_only_when_its_prompt_comes_back() {
+        let client = AcpClient::mock_for_tests("settle", Some(Arc::new(EventBus::new())));
+        assert!(client.wait_turn_settled(Duration::from_millis(1)).await, "nothing sent yet");
+        client.send_prompt("hello").await.unwrap();
+        client.cancel().await.unwrap();
+        // Stop returns at once; the scripted turn is still winding down.
+        assert!(!client.wait_turn_settled(Duration::from_millis(50)).await);
+        assert!(client.wait_turn_settled(Duration::from_secs(20)).await);
     }
 
     #[tokio::test]

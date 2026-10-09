@@ -13,6 +13,18 @@ fn dir() -> Option<PathBuf> {
     Some(grok_config::paths::bomb_home()?.join("servers"))
 }
 
+/// One key folder for every test in the process: tests run in parallel, and setting
+/// `BOMB_KEY_DIR` per test made each one read the other's folder.
+#[cfg(test)]
+pub(crate) fn test_dir() -> &'static std::path::Path {
+    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let temp = tempfile::tempdir().unwrap();
+        std::env::set_var("BOMB_KEY_DIR", temp.path());
+        temp
+    }).path()
+}
+
 fn path(server: &str) -> Option<PathBuf> {
     // The id is ours (`s` + hex), never a path.
     let safe: String = server.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
@@ -72,18 +84,17 @@ mod tests {
 
     #[test]
     fn keys_round_trip_in_a_private_file_and_ids_cannot_escape_the_folder() {
-        let temp = tempfile::tempdir().unwrap();
-        std::env::set_var("BOMB_KEY_DIR", temp.path());
+        let dir = test_dir();
         let identity = Identity::generate("mac").unwrap();
         save("s1234abcd", &identity).unwrap();
         assert_eq!(load("s1234abcd").map(|i| i.cert_pem), Some(identity.cert_pem.clone()));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(temp.path().join("s1234abcd.key.json")).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(std::fs::metadata(dir.join("s1234abcd.key.json")).unwrap().permissions().mode() & 0o777, 0o600);
         }
         save("../../etc/evil", &identity).unwrap();
-        assert!(temp.path().join("etcevil.key.json").exists());
+        assert!(dir.join("etcevil.key.json").exists());
         forget("s1234abcd");
         assert!(load("s1234abcd").is_none());
     }

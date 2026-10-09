@@ -54,6 +54,12 @@ pub async fn dispatch(state: &AppState, origin: &str, method: &str, p: Value) ->
             Ok(Value::Null)
         }
         "cancel_session" => { services::cancel_session(state, arg(&p, "id")?).await?; Ok(Value::Null) }
+        "wait_turn_settled" => {
+            let id: String = arg(&p, "id")?;
+            let seconds: u64 = arg::<Option<u64>>(&p, "seconds")?.unwrap_or(30).min(120);
+            services::wait_turn_settled(state, &id, std::time::Duration::from_secs(seconds)).await?;
+            Ok(Value::Null)
+        }
         "respond_approval" => {
             let (id, request_id): (String, String) = (arg(&p, "id")?, arg(&p, "request_id")?);
             // First answer wins; a second device answering the same request is not an error.

@@ -160,7 +160,7 @@ impl Remotes {
 
     pub fn all(&self) -> Vec<Arc<RemoteCore>> {
         let mut all: Vec<_> = self.servers.read().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
-        all.sort_by(|a, b| a.config.name.to_lowercase().cmp(&b.config.name.to_lowercase()));
+        all.sort_by_key(|a| a.config.name.to_lowercase());
         all
     }
 
@@ -264,7 +264,7 @@ mod tests {
     #[tokio::test]
     async fn a_paired_mac_runs_a_project_on_the_server_and_survives_a_dropped_connection() {
         let temp = tempfile::tempdir().unwrap();
-        std::env::set_var("BOMB_KEY_DIR", temp.path().join("keys"));
+        keychain::test_dir();
         // Mock-model threads are hidden from thread lists outside smoke runs.
         std::env::set_var("BOMB_SMOKE", "1");
         let home = temp.path().join("server-home");
