@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bomb_core::devserver::DevServerStatus;
+use bomb_core::queue::{Batch, PromptQueue, TurnEnd};
 use bomb_core::services::{self, BackendInfo, ImageInput};
 use bomb_core::transcript::ImageAttachment;
 use bomb_core::ControlEvent;
@@ -32,6 +33,8 @@ const THREAD_SEEN_KEY: &str = "thread_seen";
 const THREAD_SEEN_SINCE_KEY: &str = "thread_seen_since";
 const PINNED_PROJECTS_KEY: &str = "pinned_projects";
 const PROJECT_INTRO_KEY: &str = "project_intro_seen";
+/// How long a queued message waits for the last turn to wind down before it goes anyway.
+const SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct ProjectGroup {
@@ -245,6 +248,7 @@ pub struct AppModel {
     threads_loaded: bool,
     local_workspaces: Vec<grok_persistence::WorkspaceRecord>,
     local_projects: Vec<String>,
+    #[allow(clippy::type_complexity)]
     server_lists: HashMap<String, (Vec<ThreadDto>, Vec<grok_persistence::WorkspaceRecord>, Vec<String>)>,
     /// Which folder on this Mac is a copy of which server project.
     pub project_links: Vec<crate::remote::sync::Link>,
@@ -319,6 +323,11 @@ pub struct AppModel {
     /// A prompt is in flight for a not-yet-created thread.
     pub starting: bool,
     pub start_failure_serial: u64,
+    /// Messages typed while a thread's agent works, per thread; `None` is the
+    /// thread still being started. See `bomb_core::queue`.
+    pub queues: HashMap<Option<Uuid>, PromptQueue>,
+    /// Threads with a prompt on its way to the agent.
+    sending: HashSet<Uuid>,
     /// Threads hidden from the sidebar (kv "archived_threads"). Nothing is
     /// deleted; the group's Archived shelf lists them.
     pub archived: HashSet<Uuid>,
@@ -392,6 +401,8 @@ impl AppModel {
             toasts: VecDeque::new(),
             starting: false,
             start_failure_serial: 0,
+            queues: HashMap::new(),
+            sending: HashSet::new(),
             archived: HashSet::new(),
             login_poll: None,
             dev_poll: None,
@@ -1454,6 +1465,7 @@ impl AppModel {
     pub fn apply_events(&mut self, batch: Vec<ControlEvent>, cx: &mut Context<Self>) {
         let mut need_refresh = false;
         let mut ended = Vec::new();
+        let mut touched = HashSet::new();
         for ev in batch {
             match &ev {
                 ControlEvent::SessionCreated { session_id, .. } => {
@@ -1512,12 +1524,16 @@ impl AppModel {
                     debug!(%sid, "event for unknown thread");
                     need_refresh = true;
                 }
+                if let Some(end) = TurnEnd::of(&ev) { self.queues.entry(Some(sid)).or_default().on_turn_end(end); }
+                touched.insert(sid);
             }
         }
         if need_refresh {
             self.refresh_threads(cx);
         }
         for session in ended { self.turn_ended(session, cx); }
+        // The agent may be free now: send what was typed while it worked.
+        for session in touched { self.pump_queue(Some(session), cx); }
     }
 
     // ── prompts / sessions ──────────────────────────────────────────────
@@ -1525,7 +1541,7 @@ impl AppModel {
     /// Files attached to a message. On this Mac the agent opens them where they are; for a project on a
     /// server they are uploaded first and the message names their paths there.
     pub fn send_prompt_with_files(&mut self, text: String, images: Vec<ImageInput>, files: Vec<(PathBuf, u64)>, cx: &mut Context<Self>) {
-        let note = |files: &[(PathBuf, u64)], text: &str| if files.is_empty() { text.to_string() } else if text.is_empty() { crate::views::composer::attached_files_note(files) } else { format!("{text}\n\n{}", crate::views::composer::attached_files_note(files)) };
+        let note = with_files_note;
         let remote = self.active_project.as_deref().and_then(|root| crate::runtime::servers(cx).for_root(root));
         let (Some(remote), false) = (remote, files.is_empty()) else {
             let text = note(&files, &text);
@@ -1533,17 +1549,7 @@ impl AppModel {
         };
         self.starting = true; cx.notify();
         let this = cx.entity().downgrade();
-        spawn_service(cx, async move {
-            let client = remote.client()?;
-            let mut placed = Vec::new();
-            for (path, size) in &files {
-                let stream = client.upload(path).await?;
-                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
-                let there: String = client.request("store_attachment", serde_json::json!({ "stream": stream, "name": name })).await.and_then(|v| v.as_str().map(str::to_owned).ok_or_else(|| "bad reply".to_string()))?;
-                placed.push((PathBuf::from(there), *size));
-            }
-            Ok::<_, String>(placed)
-        }, move |res, cx| {
+        spawn_service(cx, upload_files(remote, files), move |res, cx| {
             let _ = this.update(cx, |m, cx| {
                 m.starting = false;
                 match res {
@@ -1580,41 +1586,8 @@ impl AppModel {
             .collect();
         match self.selected_thread() {
             Some(t) => {
-                let id = t.read(cx).id();
-                t.update(cx, |t, cx| {
-                    let ch = t.thread.note_prompt(&text, attachments, std::time::Instant::now());
-                    t.absorb(&ch, cx);
-                });
-                let core = self.core_of_thread(Uuid::parse_str(&id).unwrap_or_default(), cx);
-                let this = cx.entity().downgrade();
-                let weak = t.downgrade();
-                spawn_service(
-                    cx,
-                    async move {
-                        core.send_prompt(
-                            id,
-                            text,
-                            Some(prefs.backend),
-                            prefs.model,
-                            Some(prefs.mode),
-                            None,
-                            None,
-                            Some(images),
-                            prefs.fast_mode,
-                            Some(prefs.effort),
-                        )
-                        .await
-                    },
-                    move |res, cx| {
-                        if let Err(e) = res {
-                            let _ = weak.update(cx, |t, cx| {
-                                let ch = t.thread.note_failure(&format!("send failed: {e}"), std::time::Instant::now());
-                                t.absorb(&ch, cx);
-                            });
-                            let _ = this.update(cx, |m, cx| m.fail(e, cx));
-                        }
-                    },
-                );
+                let id = Uuid::parse_str(&t.read(cx).id()).unwrap_or_default();
+                self.send_to_thread(id, vec![(text.clone(), attachments)], text, images, Some(prefs), false, cx);
             }
             None => {
                 let Some(cwd) = self.active_project.clone() else {
@@ -1669,6 +1642,8 @@ impl AppModel {
                             Ok(started) => {
                                 if let Ok(id) = Uuid::parse_str(&started.id) {
                                     m.selected = Some(id);
+                                    // What was typed while it started now waits on the thread itself.
+                                    if let Some(q) = m.queues.remove(&None) { m.queues.insert(Some(id), q); }
                                     // Started on another thread's branch: say what that means once, up front.
                                     if let Some(parent) = prefs2.base_branch.as_deref().and_then(|b| m.workspaces.iter().find(|w| w.branch == b && w.archived_at.is_none() && !w.inline)) {
                                         m.toast(ToastKind::Info, format!("This thread builds on “{}”. Merge that one first; this one is brought up to date automatically and merges after it.", parent.name));
@@ -1742,20 +1717,24 @@ impl AppModel {
                                                             t.absorb(&ch, cx);
                                                         });
                                                     }
+                                                    if let Some(q) = m.queues.get_mut(&Some(id)) { q.on_turn_end(TurnEnd::Failed); }
                                                     m.fail(e, cx);
                                                 }
                                                 m.refresh_threads(cx);
+                                                m.pump_queue(Some(id), cx);
                                             });
                                         },
                                     );
                                 } else {
                                     m.starting = false;
+                                    if let Some(q) = m.queues.get_mut(&None) { q.on_turn_end(TurnEnd::Failed); }
                                     m.refresh_threads(cx);
                                 }
                             }
                             Err(e) => {
                                 m.starting = false;
                                 m.start_failure_serial += 1;
+                                if let Some(q) = m.queues.get_mut(&None) { q.on_turn_end(TurnEnd::Failed); }
                                 m.fail(e, cx);
                             }
                         });
@@ -1763,6 +1742,224 @@ impl AppModel {
                 );
             }
         }
+    }
+
+    /// Send to a thread that exists: one bubble per message, one prompt to the agent.
+    /// `prefs` carries the composer's picks for the thread in view; a thread in the
+    /// background keeps its own. `settle` first waits for the last turn to wind down.
+    #[allow(clippy::too_many_arguments)]
+    fn send_to_thread(&mut self, id: Uuid, bubbles: Vec<(String, Vec<ImageAttachment>)>, text: String, images: Vec<ImageInput>, prefs: Option<ComposerPrefs>, settle: bool, cx: &mut Context<Self>) {
+        let Some(t) = self.threads.get(&id).cloned() else { return };
+        t.update(cx, |t, cx| {
+            for (text, attachments) in bubbles {
+                let ch = t.thread.note_prompt(&text, attachments, std::time::Instant::now());
+                t.absorb(&ch, cx);
+            }
+        });
+        if let Some(q) = self.queues.get_mut(&Some(id)) { q.turn_started(); }
+        self.sending.insert(id);
+        let core = self.core_of_thread(id, cx);
+        let this = cx.entity().downgrade();
+        let weak = t.downgrade();
+        let (backend, model, mode, fast_mode, effort) = match prefs {
+            Some(p) => (Some(p.backend), p.model, Some(p.mode), p.fast_mode, Some(p.effort)),
+            None => (None, None, None, None, None),
+        };
+        spawn_service(
+            cx,
+            async move {
+                let sid = id.to_string();
+                // A server too old to know this call just sends straight away.
+                if settle { let _ = core.wait_turn_settled(&sid, SETTLE_TIMEOUT).await; }
+                core.send_prompt(sid, text, backend, model, mode, None, None, Some(images), fast_mode, effort).await
+            },
+            move |res, cx| {
+                if let Err(e) = &res {
+                    let _ = weak.update(cx, |t, cx| {
+                        let ch = t.thread.note_failure(&format!("send failed: {e}"), std::time::Instant::now());
+                        t.absorb(&ch, cx);
+                    });
+                }
+                let _ = this.update(cx, |m, cx| {
+                    m.sending.remove(&id);
+                    if let Err(e) = res {
+                        if let Some(q) = m.queues.get_mut(&Some(id)) { q.on_turn_end(TurnEnd::Failed); }
+                        m.fail(e, cx);
+                    }
+                    m.pump_queue(Some(id), cx);
+                });
+            },
+        );
+    }
+
+    // ── type-ahead queue ────────────────────────────────────────────────
+
+    /// A thread's agent is mid-turn, or about to be.
+    fn thread_busy(&self, id: Uuid, cx: &App) -> bool {
+        self.sending.contains(&id)
+            || (self.starting && self.selected == Some(id))
+            || self.threads.get(&id).is_some_and(|t| t.read(cx).thread.presence.turn_active())
+    }
+
+    /// The composer's next message waits in the queue: the thread in view is working or still starting.
+    pub fn queue_instead(&self, cx: &App) -> bool {
+        match self.selected {
+            Some(id) => self.thread_busy(id, cx),
+            None => self.starting,
+        }
+    }
+
+    /// The messages waiting on a thread (`None`: the thread still being started).
+    pub fn queue(&self, thread: Option<Uuid>) -> Option<&PromptQueue> {
+        self.queues.get(&thread).filter(|q| !q.is_empty())
+    }
+
+    /// Hold a message for the thread in view until its agent is free.
+    pub fn enqueue(&mut self, text: String, images: Vec<ImageInput>, files: Vec<(PathBuf, u64)>, cx: &mut Context<Self>) {
+        let images = images.into_iter().map(|i| ImageAttachment { mime_type: i.mime_type, data: i.data, name: i.name }).collect();
+        self.queues.entry(self.selected).or_default().push(text, images, files);
+        cx.notify();
+    }
+
+    /// Open a queued message for editing; returns its text. It is held back until saved.
+    pub fn begin_queued_edit(&mut self, thread: Option<Uuid>, item: u64, cx: &mut Context<Self>) -> Option<String> {
+        let text = self.queues.get_mut(&thread)?.begin_edit(item).map(|m| m.text.clone());
+        cx.notify();
+        text
+    }
+
+    pub fn save_queued_edit(&mut self, thread: Option<Uuid>, item: u64, text: String, cx: &mut Context<Self>) {
+        if let Some(q) = self.queues.get_mut(&thread) { q.edit(item, text); }
+        cx.notify();
+        self.pump_queue(thread, cx);
+    }
+
+    pub fn cancel_queued_edit(&mut self, thread: Option<Uuid>, cx: &mut Context<Self>) {
+        if let Some(q) = self.queues.get_mut(&thread) { q.cancel_edit(); }
+        cx.notify();
+        self.pump_queue(thread, cx);
+    }
+
+    pub fn remove_queued(&mut self, thread: Option<Uuid>, item: u64, cx: &mut Context<Self>) {
+        if let Some(q) = self.queues.get_mut(&thread) { q.remove(item); }
+        cx.notify();
+    }
+
+    /// "Send now": stop the current turn, wait until the agent confirms it has
+    /// ended, then send this message on its own. The rest wait for that turn.
+    pub fn send_queued_now(&mut self, thread: Option<Uuid>, item: u64, cx: &mut Context<Self>) {
+        // A thread that is still starting has no turn to stop yet.
+        let Some(id) = thread else { return };
+        if !self.thread_busy(id, cx) {
+            let Some(message) = self.queues.get_mut(&thread).and_then(|q| q.remove(item)) else { return };
+            self.send_batch(id, Batch { messages: vec![message] }, cx);
+            return;
+        }
+        if self.starting && self.selected == Some(id) {
+            self.toast(ToastKind::Info, "The agent is still starting. This message goes out after its first reply.");
+            cx.notify(); return;
+        }
+        if !self.queues.get_mut(&thread).is_some_and(|q| q.send_now(item)) { return; }
+        cx.notify();
+        let core = self.core_of_thread(id, cx);
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move {
+            let sid = id.to_string();
+            core.cancel_session(sid.clone()).await?;
+            // Stop returns before the agent has wound down; the new prompt must not race the old turn.
+            let _ = core.wait_turn_settled(&sid, SETTLE_TIMEOUT).await;
+            Ok::<_, String>(())
+        }, move |res, cx| {
+            let _ = this.update(cx, |m, cx| {
+                let quiet = !m.threads.get(&id).is_some_and(|t| t.read(cx).thread.presence.turn_active());
+                let Some(q) = m.queues.get_mut(&Some(id)) else { return };
+                match res {
+                    Ok(()) => {
+                        q.send_now_settled();
+                        // The thread already shows the turn over: the stop got there.
+                        if quiet { q.on_turn_end(TurnEnd::Stopped); }
+                        m.pump_queue(Some(id), cx);
+                    }
+                    Err(e) => { q.send_now_failed(); m.fail(e, cx); }
+                }
+                cx.notify();
+            });
+        });
+    }
+
+    /// Let a paused queue go again after a failed or stopped turn: its messages go
+    /// together as soon as the agent is free, at once if it already is. `None` is the
+    /// queue of a thread that could not start; resuming it starts a new thread.
+    /// Dismissing or retrying a failed turn should call this for that thread too.
+    pub fn resume_queue(&mut self, thread_id: Option<Uuid>, cx: &mut Context<Self>) {
+        let Some(q) = self.queues.get_mut(&thread_id) else { return };
+        q.resume();
+        cx.notify();
+        self.pump_queue(thread_id, cx);
+    }
+
+    /// Send what a thread's queue has ready, if its agent is free.
+    fn pump_queue(&mut self, thread: Option<Uuid>, cx: &mut Context<Self>) {
+        let busy = match thread {
+            Some(id) => self.thread_busy(id, cx),
+            // A thread that could not start goes out as a new one, from the project page.
+            None => self.starting || self.selected.is_some() || self.active_project.is_none() || !self.model_ready(),
+        };
+        let Some(batch) = self.queues.get_mut(&thread).and_then(|q| q.next(busy)) else { return };
+        cx.notify();
+        match thread {
+            Some(id) => self.send_batch(id, batch, cx),
+            None => {
+                let images = batch.images().into_iter().map(image_input).collect();
+                self.send_prompt_with_files(batch.prompt(), images, batch.files(), cx);
+            }
+        }
+    }
+
+    /// Send a drained batch to its thread; files go up first for a thread on a server.
+    fn send_batch(&mut self, id: Uuid, mut batch: Batch, cx: &mut Context<Self>) {
+        let root = self.threads.get(&id).map(|t| { let meta = &t.read(cx).meta; meta.project_root.clone().unwrap_or_else(|| meta.cwd.clone()) }).unwrap_or_default();
+        let files = batch.files();
+        let (Some(remote), false) = (crate::runtime::servers(cx).for_root(&root), files.is_empty()) else {
+            return self.send_batch_resolved(id, batch, cx);
+        };
+        self.sending.insert(id);
+        let this = cx.entity().downgrade();
+        spawn_service(cx, upload_files(remote, files), move |res, cx| {
+            let _ = this.update(cx, |m, cx| {
+                m.sending.remove(&id);
+                match res {
+                    Ok(placed) => {
+                        let mut placed = placed.into_iter();
+                        for file in batch.messages.iter_mut().flat_map(|m| m.files.iter_mut()) {
+                            if let Some(there) = placed.next() { *file = there; }
+                        }
+                        m.send_batch_resolved(id, batch, cx);
+                    }
+                    Err(e) => {
+                        m.queues.entry(Some(id)).or_default().requeue(batch);
+                        m.fail(format!("Could not send the attached files to the server: {e}"), cx);
+                    }
+                }
+            });
+        });
+    }
+
+    fn send_batch_resolved(&mut self, id: Uuid, mut batch: Batch, cx: &mut Context<Self>) {
+        for message in &mut batch.messages {
+            message.text = with_files_note(&message.files, &message.text);
+            message.files.clear();
+        }
+        let bubbles = batch.messages.iter().map(|m| (m.text.clone(), m.images.clone())).collect();
+        let images = batch.images().into_iter().map(image_input).collect();
+        // The thread in view sends with what the composer shows, like a typed message.
+        let prefs = (self.selected == Some(id)).then(|| {
+            let mut prefs = self.prefs.clone();
+            let model = self.effective_model();
+            prefs.model = (!model.is_empty()).then_some(model);
+            prefs
+        });
+        self.send_to_thread(id, bubbles, batch.prompt(), images, prefs, true, cx);
     }
 
     /// Pin a reply into project memory.
@@ -2351,7 +2548,7 @@ impl AppModel {
 
     pub fn add_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         // The whole home folder (or the disk) as one project makes every thread copy everything.
-        if path.parent().is_none() || std::env::var_os("HOME").is_some_and(|home| PathBuf::from(home) == path) {
+        if path.parent().is_none() || std::env::var_os("HOME").is_some_and(|home| home == path) {
             self.fail("Choose a project folder inside your home folder, not the home folder itself. New projects go in Documents/BombCode.".into(), cx);
             return;
         }
@@ -2698,6 +2895,28 @@ impl AppModel {
             },
         );
     }
+}
+
+fn image_input(a: ImageAttachment) -> ImageInput {
+    ImageInput { mime_type: a.mime_type, data: a.data, name: a.name }
+}
+
+/// A message with a note naming its attached files, as the agent receives it.
+fn with_files_note(files: &[(PathBuf, u64)], text: &str) -> String {
+    if files.is_empty() { text.to_string() } else if text.is_empty() { crate::views::composer::attached_files_note(files) } else { format!("{text}\n\n{}", crate::views::composer::attached_files_note(files)) }
+}
+
+/// Copy attached files to a server; returns where each one landed there.
+async fn upload_files(remote: std::sync::Arc<crate::remote::RemoteCore>, files: Vec<(PathBuf, u64)>) -> Result<Vec<(PathBuf, u64)>, String> {
+    let client = remote.client()?;
+    let mut placed = Vec::new();
+    for (path, size) in &files {
+        let stream = client.upload(path).await?;
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
+        let there: String = client.request("store_attachment", serde_json::json!({ "stream": stream, "name": name })).await.and_then(|v| v.as_str().map(str::to_owned).ok_or_else(|| "bad reply".to_string()))?;
+        placed.push((PathBuf::from(there), *size));
+    }
+    Ok(placed)
 }
 
 fn session_of(ev: &ControlEvent) -> Option<Uuid> {

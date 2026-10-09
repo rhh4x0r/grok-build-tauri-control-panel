@@ -1266,6 +1266,25 @@ pub async fn cancel_session(state: &AppState, id: String) -> Result<(), String> 
     Ok(())
 }
 
+/// Wait until a thread's last turn has wound down: the agent answered its prompt (a
+/// stopped turn answers once it has really stopped) and the checkpoint commit after
+/// it is done. Queued messages and "Send now" wait here so a new prompt never races
+/// the old turn. Gives up quietly after `timeout`; the send that follows reports
+/// anything still wrong.
+pub async fn wait_turn_settled(state: &AppState, id: &str, timeout: std::time::Duration) -> Result<(), String> {
+    let id = Uuid::parse_str(id).map_err(err)?;
+    let deadline = tokio::time::Instant::now() + timeout;
+    if state.registry.is_live(id) {
+        state.registry.wait_turn_settled(id, timeout).await.map_err(err)?;
+    }
+    let Some(path) = state.persistence.workspace_for_session(id).map_err(err)?.map(|w| w.path) else { return Ok(()) };
+    let checkpointing = || state.workspace_turns.lock().unwrap_or_else(|e| e.into_inner()).contains(&path);
+    while checkpointing() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    Ok(())
+}
+
 pub async fn remove_session(
     state: &AppState,
     id: String,

@@ -5,11 +5,13 @@
 //! - [`services`] exposes every user action as a plain async fn over `&AppState`.
 //! - [`transcript`] and [`presence`] are pure reducers over [`grok_events::ControlEvent`]
 //!   that turn the event stream into a renderable thread model.
+//! - [`queue`] holds what the user types while the agent works, per thread.
 
 pub mod devserver;
 pub mod explainer;
 pub mod journal;
 pub mod presence;
+pub mod queue;
 pub mod rpc;
 pub mod services;
 pub mod state;
