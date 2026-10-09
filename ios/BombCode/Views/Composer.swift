@@ -230,11 +230,15 @@ private struct MicButton: View {
 
     var body: some View {
         Button(action: toggle) {
-            Image(systemName: recording ? "stop.fill" : "mic")
-                .font(.system(size: recording ? 11 : 14, weight: recording ? .bold : .regular))
-                .foregroundStyle(recording ? .white : Theme.textMuted)
-                .frame(width: 30, height: 30)
-                .background { if recording { Circle().fill(Theme.danger) } }
+            Group {
+                if recording {
+                    RoundedRectangle(cornerRadius: 2).fill(.white).frame(width: 9, height: 9)
+                } else {
+                    Image(systemName: "mic").font(.system(size: 14)).foregroundStyle(Theme.textMuted)
+                }
+            }
+            .frame(width: 30, height: 30)
+            .background { if recording { Circle().fill(Theme.danger) } }
         }
         .buttonStyle(.plain)
         .accessibilityLabel(recording ? "Stop recording" : "Dictate")
@@ -276,10 +280,11 @@ private struct SoundBars: View {
     var body: some View {
         let recent = Array(levels.suffix(count))
         let padded = Array(repeating: Float(0), count: max(0, count - recent.count)) + recent
-        HStack(alignment: .center, spacing: 2) {
+        HStack(alignment: .center, spacing: 3) {
             ForEach(Array(padded.enumerated()), id: \.offset) { _, level in
-                Capsule().fill(Theme.danger.opacity(0.85))
-                    .frame(width: 3, height: max(3, CGFloat(level) * 22))
+                // Quiet reads as a calm row of short bars; speech lifts them.
+                Capsule().fill(Theme.danger.opacity(level < 0.08 ? 0.35 : 0.9))
+                    .frame(width: 3, height: min(22, max(4, CGFloat(level) * 22)))
             }
         }
         .animation(.linear(duration: 0.08), value: levels.count)

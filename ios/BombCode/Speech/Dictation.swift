@@ -71,8 +71,10 @@ final class Dictation {
         let mic = engine.inputNode
         let micFormat = mic.outputFormat(forBus: 0)
         guard let converter = AVAudioConverter(from: micFormat, to: format) else { throw Failure.noFormat }
+        // The start chime can reach the microphone; keep it out of the sound bars.
+        let quietUntil = Date.now.addingTimeInterval(0.35)
         mic.installTap(onBus: 0, bufferSize: 4096, format: micFormat) { buffer, _ in
-            let level = Self.level(of: buffer)
+            let level = Date.now < quietUntil ? 0 : Self.level(of: buffer)
             DispatchQueue.main.async { onLevel(level) }
             if let converted = Self.convert(buffer, with: converter, to: format) {
                 input.yield(AnalyzerInput(buffer: converted))
@@ -112,14 +114,15 @@ final class Dictation {
         #endif
     }
 
-    /// Loudness 0…1 from the buffer's RMS, over a 50 dB range.
+    /// Loudness 0…1 from the buffer's RMS.
     private static func level(of buffer: AVAudioPCMBuffer) -> Float {
         guard let samples = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return 0 }
         var sum: Float = 0
         for i in 0..<Int(buffer.frameLength) { sum += samples[i] * samples[i] }
         let rms = (sum / Float(buffer.frameLength)).squareRoot()
         let db = 20 * log10(max(rms, 0.000_01))
-        return min(max((db + 50) / 50, 0), 1)
+        // About -55 dB (a quiet room) to -10 dB (close, loud speech).
+        return min(max((db + 55) / 45, 0), 1)
     }
 
     private static func microphoneAllowed() async -> Bool {

@@ -2109,7 +2109,12 @@ impl Render for ComposerView {
                                                         .cursor_pointer()
                                                         .tooltip(move |window, cx| Tooltip::new(if listening { "Stop recording" } else { "Dictate" }).build(window, cx))
                                                         .on_click(cx.listener(|this, _, window, cx| this.toggle_dictation(window, cx)))
-                                                        .child(div().size(px(if listening { 12. } else { 16. })).child(Icon::from(if listening { Lucide::Square } else { Lucide::Mic }))),
+                                                        .map(|el| if listening {
+                                                            // A filled stop square, like any recorder.
+                                                            el.child(div().size(px(9.)).rounded(px(2.)).bg(gpui_kit::white()))
+                                                        } else {
+                                                            el.child(div().size(px(16.)).child(Icon::from(Lucide::Mic)))
+                                                        }),
                                                 )
                                             })
                                             .child(mode_picker)
@@ -2388,14 +2393,21 @@ fn recording_strip(ui: &Ui, since: Option<std::time::Instant>, levels: &std::col
             .into_any_element();
     }
     let secs = since.map(|s| s.elapsed().as_secs()).unwrap_or(0);
-    const BARS: usize = 32;
+    const BARS: usize = 28;
+    const TALL: f32 = 20.;
     let padding = BARS.saturating_sub(levels.len());
     let bars = std::iter::repeat_n(0.0, padding).chain(levels.iter().rev().take(BARS).rev().copied());
     row.child(div().size(px(8.)).rounded_full().bg(ui.danger))
         .child(div().font_family(ui.mono.clone()).text_color(ui.text).child(format!("{}:{:02}", secs / 60, secs % 60)))
         .child(
-            div().flex().items_center().gap(px(2.)).h(px(22.)).children(bars.map(|level: f32| {
-                div().w(px(3.)).h(px((level * 22.).max(3.))).rounded_full().bg(ui.danger.opacity(0.85))
+            div().flex().items_center().gap(px(3.)).h(px(TALL)).children(bars.map(|level: f32| {
+                // Quiet reads as a calm row of short bars; speech lifts them.
+                let quiet = level < 0.08;
+                div()
+                    .w(px(3.))
+                    .h(px((level * TALL).clamp(4., TALL)))
+                    .rounded_full()
+                    .bg(if quiet { ui.danger.opacity(0.35) } else { ui.danger.opacity(0.9) })
             })),
         )
         .into_any_element()
