@@ -49,6 +49,13 @@ pub struct SessionMetadata {
     /// full_brain | history_only | fresh — agent context recovery mode.
     #[serde(default)]
     pub brain_mode: BrainMode,
+    /// The thread that started this one, for a subagent or helper. Such threads are listed under
+    /// their parent, not on their own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_thread: Option<String>,
+    /// What the subagent or helper is: name, task, kind ("helper"), agent, model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent: Option<serde_json::Value>,
 }
 
 /// Serializable snapshot of a handle (no process handles).

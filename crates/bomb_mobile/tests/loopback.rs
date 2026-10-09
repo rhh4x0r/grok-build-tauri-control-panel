@@ -179,6 +179,27 @@ async fn a_paired_phone_starts_a_thread_watches_it_and_answers_an_approval() {
     assert!(rows.iter().any(|r| r.body.contains("fibre shader")) && rows.iter().any(|r| r.body.contains("index.html")), "{rows:?}");
     assert!(machine.send_prompt(child.to_string(), "hi".into(), PromptOptions::default()).await.is_err(), "a subagent takes no messages");
 
+    // A helper: the thread's agent starts one on another agent and model through the `bomb` tools.
+    tokio::spawn(bomb_core::helpers::serve(state.clone()));
+    for _ in 0..100 { if bomb_core::helpers::mcp_server(&state, session_id).is_some() { break; } tokio::time::sleep(Duration::from_millis(20)).await; }
+    let started = bomb_core::helpers::call(&state, session_id, "start_helper", &json!({ "agent": "grok", "model": "mock", "task": "Say what's in this repo.", "name": "Repo tour" })).await.unwrap();
+    let helper = started["id"].as_str().unwrap().to_string();
+    assert_eq!(started["status"], "running");
+    let waited = bomb_core::helpers::call(&state, session_id, "wait_helpers", &json!({ "ids": [helper], "timeout_secs": 30 })).await.unwrap();
+    let report = &waited["helpers"][0];
+    assert_eq!(report["status"], "finished", "{waited}");
+    assert!(report["report"].as_str().is_some_and(|r| r.contains("mock")), "its report comes back: {waited}");
+    let listed = bomb_core::rpc::dispatch(&state, "setup", "list_subagents", json!({ "thread": id })).await.unwrap();
+    assert!(listed.as_array().unwrap().iter().any(|s| s["id"] == helper.as_str() && s["name"] == "Repo tour" && s["state"] == "completed"), "{listed}");
+    let threads = bomb_core::rpc::dispatch(&state, "setup", "list_threads", json!({})).await.unwrap();
+    assert!(threads.as_array().unwrap().iter().all(|t| t["id"] != helper.as_str()), "a helper isn't a thread in the list");
+    until(&screen, "the helper step", |s| s.entries.iter().any(|e| matches!(&e.body, EntryBody::Tool { name, status, .. } if name == "Subagent · Repo tour" && status == "completed"))).await;
+    // A follow-up, and helpers that aren't this thread's are refused.
+    bomb_core::helpers::call(&state, session_id, "message_helper", &json!({ "id": helper, "text": "One more thing." })).await.unwrap();
+    let again = bomb_core::helpers::call(&state, session_id, "wait_helpers", &json!({ "ids": [helper], "timeout_secs": 30 })).await.unwrap();
+    assert_eq!(again["helpers"][0]["status"], "finished", "{again}");
+    assert!(bomb_core::helpers::call(&state, uuid::Uuid::new_v4(), "wait_helpers", &json!({ "ids": [helper] })).await.is_err());
+
     // Backgrounding pauses; coming back reconnects.
     machine.set_active(false);
     until(&screen, "paused", |s| s.link == Some(LinkState::Paused)).await;

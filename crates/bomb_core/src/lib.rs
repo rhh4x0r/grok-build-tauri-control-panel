@@ -22,3 +22,5 @@ pub use state::AppState;
 pub mod terminal;
 
 pub mod foundry;
+pub mod helpers;
+pub mod helpers_mcp;

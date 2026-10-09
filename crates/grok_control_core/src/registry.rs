@@ -300,6 +300,8 @@ impl SessionRegistry {
             last_activity: now,
             label: None,
             brain_mode: BrainMode::Fresh,
+            parent_thread: opts.parent_thread.clone(),
+            subagent: opts.subagent.clone(),
         };
 
         let handle = match opts.mode {

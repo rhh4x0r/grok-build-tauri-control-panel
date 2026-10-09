@@ -42,6 +42,11 @@ impl AssetSource for Assets {
 }
 
 fn main() {
+    // A thread's agent runs this app as its `bomb` MCP server: protocol only, no logging, no UI.
+    if std::env::args().any(|a| a == "--bomb-mcp") {
+        bomb_core::helpers_mcp::run_stdio();
+        return;
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -61,6 +66,13 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // Threads' agents start helpers on other agents through this.
+    rt.spawn({
+        let state = state.clone();
+        async move {
+            if let Err(e) = bomb_core::helpers::serve(state).await { tracing::warn!(error = %e, "helpers unavailable"); }
+        }
+    });
     if std::env::var("BOMB_SMOKE").ok().as_deref() == Some("1") {
         std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_secs(35));
