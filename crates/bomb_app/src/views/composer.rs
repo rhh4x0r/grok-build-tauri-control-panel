@@ -130,8 +130,14 @@ pub struct ComposerView {
     foundry_undo: Option<(String, String, Option<uuid::Uuid>)>,
     foundry_message: Option<String>,
     placeholder: &'static str,
-    /// Listening for dictation, and the text it adds to (`base`, plus a space if needed).
-    dictation: Option<(crate::dictation::Listening, String)>,
+    /// Recording for dictation, and since when.
+    dictation: Option<(crate::dictation::Listening, std::time::Instant)>,
+    /// Recent loudness while recording, newest last, for the sound bars.
+    dictation_levels: std::collections::VecDeque<f32>,
+    /// Stopped, waiting for the words.
+    transcribing: bool,
+    /// Send once the words arrive (Enter or Send pressed while recording).
+    send_after_transcribe: bool,
     dictation_ok: bool,
     dictation_error: Option<String>,
     /// Which dictation is current, so a finished one's late words never reach the next.
@@ -219,46 +225,57 @@ impl ComposerView {
             foundry_message: None,
             placeholder: "Do anything…",
             dictation: None,
+            dictation_levels: std::collections::VecDeque::new(),
+            transcribing: false,
+            send_after_transcribe: false,
             dictation_ok: false,
             dictation_error: None,
             dictation_serial: 0,
         }
     }
 
-    /// Click to listen, click to stop. Words land after what's typed and are never sent on their
-    /// own, so a prompt can be dictated in parts and edited in between.
+    /// Click to record, click to stop. The words are added after what's typed once recording
+    /// stops, and never sent on their own, so a prompt can be dictated in parts and edited between.
     fn toggle_dictation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.dictation.is_some() {
             self.stop_dictation(cx);
             return;
         }
+        if self.transcribing { return; }
         self.dictation_error = None;
-        let (listening, heard) = match crate::dictation::Listening::start() {
+        let (recording, heard) = match crate::dictation::Listening::start() {
             Ok(started) => started,
             Err(error) => { self.dictation_error = Some(error); cx.notify(); return; }
         };
-        let current = self.input.read(cx).value().to_string();
-        let base = if current.is_empty() || current.ends_with(char::is_whitespace) { current } else { format!("{current} ") };
-        self.dictation = Some((listening, base));
+        self.dictation = Some((recording, std::time::Instant::now()));
+        self.dictation_levels.clear();
         self.dictation_serial += 1;
         let serial = self.dictation_serial;
         cx.spawn_in(window, async move |this, cx| {
             while let Ok(heard) = heard.recv().await {
-                let finished = !matches!(heard, crate::dictation::Heard::Words { .. });
+                let finished = matches!(heard, crate::dictation::Heard::Done | crate::dictation::Heard::Failed(_));
                 let _ = this.update_in(cx, |v, window, cx| {
                     if v.dictation_serial != serial { return; }
                     match heard {
-                        crate::dictation::Heard::Words { settled, volatile } => {
-                            let Some((_, base)) = &v.dictation else { return };
-                            let words = format!("{settled}{volatile}");
-                            let words = words.trim_start();
-                            let text = if words.is_empty() { base.trim_end().to_string() } else { format!("{base}{words}") };
-                            v.input.update(cx, |s, cx| s.set_value(text, window, cx));
+                        crate::dictation::Heard::Level(level) => {
+                            v.dictation_levels.push_back(level);
+                            while v.dictation_levels.len() > 40 { v.dictation_levels.pop_front(); }
+                        }
+                        crate::dictation::Heard::Text(words) => {
+                            let current = v.input.read(cx).value().to_string();
+                            if !words.is_empty() {
+                                let gap = if current.is_empty() || current.ends_with(char::is_whitespace) { "" } else { " " };
+                                v.input.update(cx, |s, cx| s.set_value(format!("{current}{gap}{words}"), window, cx));
+                            }
                         }
                         crate::dictation::Heard::Failed(error) => v.dictation_error = Some(error),
                         crate::dictation::Heard::Done => {}
                     }
-                    if finished { v.dictation = None; }
+                    if finished {
+                        v.dictation = None;
+                        v.transcribing = false;
+                        if std::mem::take(&mut v.send_after_transcribe) { v.send(window, cx); }
+                    }
                     cx.notify();
                 });
                 if finished { break; }
@@ -268,10 +285,11 @@ impl ComposerView {
         cx.notify();
     }
 
-    /// Stop listening; the last words still land, then the mic turns off.
+    /// Stop recording; the words land when they've settled.
     fn stop_dictation(&mut self, cx: &mut Context<Self>) {
-        if let Some((listening, _)) = &mut self.dictation {
-            listening.stop();
+        if let Some((recording, _)) = &mut self.dictation {
+            recording.stop();
+            self.transcribing = true;
             cx.notify();
         }
     }
@@ -714,8 +732,12 @@ impl ComposerView {
     }
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Sending ends dictation; what it had heard is already in the text.
-        self.dictation = None;
+        // Sending while recording stops it, and sends once the words are in.
+        if self.dictation.is_some() || self.transcribing {
+            self.send_after_transcribe = true;
+            self.stop_dictation(cx);
+            return;
+        }
         let text = self.input.read(cx).value().to_string();
         let text = text.trim().to_string();
         if text.is_empty() && self.attachments.is_empty() {
@@ -2028,13 +2050,19 @@ impl Render for ComposerView {
                                             .on_click(cx.listener(|this, _, window, cx| this.focus(window, cx)))
                                             .text_size(px(Layout::BODY_SIZE))
                                             .line_height(px(Layout::BODY_LINE))
-                                            .child(
-                                                Textarea::new(&self.input)
-                                                    .text_size(px(Layout::BODY_SIZE))
-                                                    .line_height(px(Layout::BODY_LINE))
-                                                    .appearance(false)
-                                                    .bordered(false),
-                                            ),
+                                            .map(|el| {
+                                                if self.dictation.is_some() || self.transcribing {
+                                                    el.child(recording_strip(&ui, self.dictation.as_ref().map(|(_, since)| *since), &self.dictation_levels, self.transcribing))
+                                                } else {
+                                                    el.child(
+                                                        Textarea::new(&self.input)
+                                                            .text_size(px(Layout::BODY_SIZE))
+                                                            .line_height(px(Layout::BODY_LINE))
+                                                            .appearance(false)
+                                                            .bordered(false),
+                                                    )
+                                                }
+                                            }),
                                     )
                                     .child(
                                         div()
@@ -2065,6 +2093,7 @@ impl Render for ComposerView {
                                             )
                                             .when(self.dictation_ok, |row| {
                                                 let listening = self.dictation.is_some();
+                                                let busy_transcribing = self.transcribing;
                                                 row.child(
                                                     div()
                                                         .id("dictate")
@@ -2073,13 +2102,14 @@ impl Render for ComposerView {
                                                         .items_center()
                                                         .justify_center()
                                                         .rounded_full()
-                                                        .text_color(if listening { ui.danger } else { ui.text_muted })
-                                                        .when(listening, |el| el.bg(ui.danger.opacity(0.14)))
+                                                        .text_color(if listening { gpui_kit::white() } else { ui.text_muted })
+                                                        .when(listening, |el| el.bg(ui.danger))
+                                                        .when(!listening, |el| el.hover(move |s| s.bg(attach_hover)))
+                                                        .when(busy_transcribing, |el| el.opacity(0.4))
                                                         .cursor_pointer()
-                                                        .hover(move |s| s.bg(attach_hover))
-                                                        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(if listening { "Stop dictation" } else { "Dictate" }).build(window, cx))
+                                                        .tooltip(move |window, cx| Tooltip::new(if listening { "Stop recording" } else { "Dictate" }).build(window, cx))
                                                         .on_click(cx.listener(|this, _, window, cx| this.toggle_dictation(window, cx)))
-                                                        .child(div().size(px(16.)).child(Icon::from(if listening { Lucide::MicOff } else { Lucide::Mic }))),
+                                                        .child(div().size(px(if listening { 12. } else { 16. })).child(Icon::from(if listening { Lucide::Square } else { Lucide::Mic }))),
                                                 )
                                             })
                                             .child(mode_picker)
@@ -2345,4 +2375,28 @@ mod attachment_tests {
         let two = super::attached_files_note(&[("/a/data.csv".into(), 1500), ("/a/empty.txt".into(), 12)]);
         assert_eq!(two, "Attached files (open them from these paths):\n- /a/data.csv (2 KB)\n- /a/empty.txt (12 bytes)");
     }
+}
+
+/// Where the text goes while recording: a red dot, the time, and the sound coming in.
+fn recording_strip(ui: &Ui, since: Option<std::time::Instant>, levels: &std::collections::VecDeque<f32>, transcribing: bool) -> AnyElement {
+    let row = div().flex().items_center().gap(px(10.)).h(px(Layout::BODY_LINE + 6.));
+    if transcribing {
+        return row
+            .text_color(ui.text_muted)
+            .child(div().size(px(14.)).child(ProgressCircle::new("transcribing").loading(true)))
+            .child("Transcribing…")
+            .into_any_element();
+    }
+    let secs = since.map(|s| s.elapsed().as_secs()).unwrap_or(0);
+    const BARS: usize = 32;
+    let padding = BARS.saturating_sub(levels.len());
+    let bars = std::iter::repeat_n(0.0, padding).chain(levels.iter().rev().take(BARS).rev().copied());
+    row.child(div().size(px(8.)).rounded_full().bg(ui.danger))
+        .child(div().font_family(ui.mono.clone()).text_color(ui.text).child(format!("{}:{:02}", secs / 60, secs % 60)))
+        .child(
+            div().flex().items_center().gap(px(2.)).h(px(22.)).children(bars.map(|level: f32| {
+                div().w(px(3.)).h(px((level * 22.).max(3.))).rounded_full().bg(ui.danger.opacity(0.85))
+            })),
+        )
+        .into_any_element()
 }

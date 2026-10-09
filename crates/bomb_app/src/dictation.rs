@@ -7,10 +7,12 @@ use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-/// What the helper reports while it listens.
+/// What the helper reports while it records.
 pub enum Heard {
-    /// `settled` only grows; `volatile` is the words still being worked out, replaced each time.
-    Words { settled: String, volatile: String },
+    /// How loud the microphone is, 0…1, several times a second.
+    Level(f32),
+    /// Everything that was said, once recording stops.
+    Text(String),
     Done,
     Failed(String),
 }
@@ -31,7 +33,7 @@ pub fn available() -> bool {
     })
 }
 
-/// A running dictation. Dropping it stops listening.
+/// A running recording. Dropping it stops it.
 pub struct Listening {
     child: Option<Child>,
 }
@@ -54,8 +56,10 @@ impl Listening {
                     Heard::Failed(error.to_string())
                 } else if v["done"] == true {
                     Heard::Done
-                } else if let Some(settled) = v["final"].as_str() {
-                    Heard::Words { settled: settled.to_string(), volatile: v["volatile"].as_str().unwrap_or_default().to_string() }
+                } else if let Some(level) = v["level"].as_f64() {
+                    Heard::Level(level as f32)
+                } else if let Some(text) = v["text"].as_str() {
+                    Heard::Text(text.to_string())
                 } else {
                     continue;
                 };
@@ -68,7 +72,7 @@ impl Listening {
         Ok((Self { child: Some(child) }, rx))
     }
 
-    /// Stop listening: the last words still arrive, then `Done`.
+    /// Stop recording: the words arrive as `Text`, then `Done`.
     pub fn stop(&mut self) {
         if let Some(child) = &mut self.child {
             drop(child.stdin.take());

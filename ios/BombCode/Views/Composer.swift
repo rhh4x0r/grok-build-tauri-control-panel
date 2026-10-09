@@ -22,9 +22,13 @@ struct Composer: View {
     @State private var images: [ImageUpload] = []
     @State private var picks: [PhotosPickerItem] = []
     @State private var sending = false
-    /// The running `Dictation` (iOS 26+), while listening.
+    /// The running `Dictation` (iOS 26+), while recording.
     @State private var dictation: AnyObject?
     @State private var dictationError: String?
+    @State private var recordingSince = Date.now
+    /// Recent loudness, newest last, for the sound bars.
+    @State private var levels: [Float] = []
+    @State private var transcribing = false
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -47,14 +51,20 @@ struct Composer: View {
             if let dictationError {
                 Text(dictationError).font(Theme.caption).foregroundStyle(Theme.danger).padding(.horizontal, 4)
             }
-            TextField("", text: $text, prompt: Text(dictation == nil ? placeholder : "Listening…").foregroundStyle(Theme.textFaint), axis: .vertical)
-                .font(Theme.prose)
-                .foregroundStyle(Theme.text)
-                .tint(Theme.accent)
-                .lineLimit(1...6)
-                .focused($focused)
-                .padding(.horizontal, 4)
-                .padding(.top, 2)
+            if dictation != nil || transcribing {
+                RecordingStrip(since: recordingSince, levels: levels, transcribing: transcribing)
+                    .padding(.horizontal, 4)
+                    .padding(.top, 2)
+            } else {
+                TextField("", text: $text, prompt: Text(placeholder).foregroundStyle(Theme.textFaint), axis: .vertical)
+                    .font(Theme.prose)
+                    .foregroundStyle(Theme.text)
+                    .tint(Theme.accent)
+                    .lineLimit(1...6)
+                    .focused($focused)
+                    .padding(.horizontal, 4)
+                    .padding(.top, 2)
+            }
             HStack(spacing: 8) {
                 PhotosPicker(selection: $picks, maxSelectionCount: 4, matching: .images) {
                     Image(systemName: "photo.on.rectangle")
@@ -63,7 +73,8 @@ struct Composer: View {
                         .frame(width: 30, height: 30)
                 }
                 if #available(iOS 26.0, *), Dictation.isAvailable || Smoke.showMic {
-                    MicButton(listening: dictation != nil) { Task { await toggleDictation() } }
+                    MicButton(recording: dictation != nil) { Task { await toggleDictation() } }
+                        .disabled(transcribing)
                 }
                 ModeMenu(mode: $choices.mode)
                 ModelMenu(machine: machine, choices: $choices)
@@ -95,20 +106,20 @@ struct Composer: View {
         .onDisappear { Task { await stopDictation() } }
     }
 
-    /// Tap to listen, tap to stop. Words land after what's already typed and are never sent on
-    /// their own, so a prompt can be dictated in parts and edited in between.
+    /// Tap to record, tap to stop. The words are added after what's typed once recording stops,
+    /// and never sent on their own, so a prompt can be dictated in parts and edited in between.
     private func toggleDictation() async {
         guard #available(iOS 26.0, *) else { return }
         if dictation != nil { return await stopDictation() }
         dictationError = nil
-        let base = text
-        let gap = base.isEmpty || base.hasSuffix(" ") || base.hasSuffix("\n") ? "" : " "
-        let listener = Dictation()
-        dictation = listener
+        levels = []
+        recordingSince = .now
+        let recorder = Dictation()
+        dictation = recorder
         do {
-            try await listener.start { final, volatile in
-                let words = (final + volatile).drop(while: \.isWhitespace)
-                text = words.isEmpty ? base : base + gap + words
+            try await recorder.start { level in
+                levels.append(level)
+                if levels.count > 40 { levels.removeFirst(levels.count - 40) }
             }
         } catch {
             dictation = nil
@@ -117,9 +128,14 @@ struct Composer: View {
     }
 
     private func stopDictation() async {
-        guard #available(iOS 26.0, *), let listener = dictation as? Dictation else { return }
+        guard #available(iOS 26.0, *), let recorder = dictation as? Dictation else { return }
         dictation = nil
-        await listener.stop()
+        transcribing = true
+        let words = await recorder.stop()
+        transcribing = false
+        guard !words.isEmpty else { return }
+        let gap = text.isEmpty || text.hasSuffix(" ") || text.hasSuffix("\n") ? "" : " "
+        text += gap + words
     }
 
     private func submit() async {
@@ -207,27 +223,65 @@ struct ModelMenu: View {
     }
 }
 
-/// The microphone: plain while idle, red and breathing while it listens.
+/// The microphone while idle; a red stop button while recording.
 private struct MicButton: View {
-    let listening: Bool
+    let recording: Bool
     let toggle: () -> Void
-    @State private var pulse = false
 
     var body: some View {
         Button(action: toggle) {
-            Image(systemName: listening ? "mic.fill" : "mic")
-                .font(.system(size: 14, weight: listening ? .semibold : .regular))
-                .foregroundStyle(listening ? Theme.danger : Theme.textMuted)
+            Image(systemName: recording ? "stop.fill" : "mic")
+                .font(.system(size: recording ? 11 : 14, weight: recording ? .bold : .regular))
+                .foregroundStyle(recording ? .white : Theme.textMuted)
                 .frame(width: 30, height: 30)
-                .background {
-                    if listening {
-                        Circle().fill(Theme.danger.opacity(pulse ? 0.22 : 0.08))
-                            .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: pulse)
-                    }
-                }
+                .background { if recording { Circle().fill(Theme.danger) } }
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(listening ? "Stop dictation" : "Dictate")
-        .onChange(of: listening, initial: true) { _, on in pulse = on }
+        .accessibilityLabel(recording ? "Stop recording" : "Dictate")
+    }
+}
+
+/// Where the text goes while recording: a red dot, the time, and the sound coming in.
+private struct RecordingStrip: View {
+    let since: Date
+    let levels: [Float]
+    let transcribing: Bool
+    @State private var blink = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            if transcribing {
+                ProgressView().controlSize(.small).tint(Theme.textMuted)
+                Text("Transcribing…").font(Theme.sans(15)).foregroundStyle(Theme.textMuted)
+            } else {
+                Circle().fill(Theme.danger).frame(width: 8, height: 8).opacity(blink ? 0.35 : 1)
+                    .animation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true), value: blink)
+                    .onAppear { blink = true }
+                Text(since, style: .timer).font(Theme.mono(14, .medium)).foregroundStyle(Theme.text).monospacedDigit()
+                SoundBars(levels: levels).frame(height: 22)
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(minHeight: 28)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(transcribing ? "Transcribing" : "Recording")
+    }
+}
+
+/// The last few moments of loudness as bars, newest on the right.
+private struct SoundBars: View {
+    let levels: [Float]
+    private let count = 28
+
+    var body: some View {
+        let recent = Array(levels.suffix(count))
+        let padded = Array(repeating: Float(0), count: max(0, count - recent.count)) + recent
+        HStack(alignment: .center, spacing: 2) {
+            ForEach(Array(padded.enumerated()), id: \.offset) { _, level in
+                Capsule().fill(Theme.danger.opacity(0.85))
+                    .frame(width: 3, height: max(3, CGFloat(level) * 22))
+            }
+        }
+        .animation(.linear(duration: 0.08), value: levels.count)
     }
 }

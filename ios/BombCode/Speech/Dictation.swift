@@ -1,12 +1,16 @@
 import AVFoundation
+import AudioToolbox
 import Foundation
 import Speech
+#if os(macOS)
+import AppKit
+#endif
 
 /// On-device dictation with Apple's SpeechAnalyzer (iOS 26 / macOS 26 and later).
 ///
-/// Start listening and text arrives as it's recognized: what's settled (`final`), and the words
-/// still being worked out (`volatile`), which may change. Stop, and the rest is settled. Shared
-/// with the Mac's dictation helper (`tools/bomb-dictate`), so keep it free of app code.
+/// A recorder, as far as the person can tell: a chime, a live sound level while they talk, and
+/// the words only once they stop. Shared with the Mac's dictation helper (`tools/bomb-dictate`),
+/// so keep it free of app code.
 @available(iOS 26.0, macOS 26.0, *)
 final class Dictation {
     enum Failure: LocalizedError {
@@ -28,15 +32,15 @@ final class Dictation {
     private let engine = AVAudioEngine()
     private var analyzer: SpeechAnalyzer?
     private var input: AsyncStream<AnalyzerInput>.Continuation?
-    private var results: Task<Void, Never>?
+    private var results: Task<String, Never>?
 
-    /// Listen until `stop()`. `onText(final, volatile)` is called on the main queue as words arrive;
-    /// `final` grows, `volatile` is replaced each time.
-    func start(onText: @escaping (String, String) -> Void) async throws {
+    /// Listen until `stop()`, which returns what was said. `onLevel` gets how loud the microphone
+    /// is (0…1) on the main queue, several times a second.
+    func start(onLevel: @escaping (Float) -> Void) async throws {
         guard Self.isAvailable else { throw Failure.unsupported }
         guard await Self.microphoneAllowed() else { throw Failure.noMicrophone }
         guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale.current) else { throw Failure.noLanguage }
-        let transcriber = SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [.volatileResults], attributeOptions: [])
+        let transcriber = SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [], attributeOptions: [])
         // The language model downloads once, the first time.
         if let download = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
             try await download.downloadAndInstall()
@@ -50,15 +54,15 @@ final class Dictation {
         results = Task {
             var settled = ""
             do {
-                for try await result in transcriber.results {
-                    let words = String(result.text.characters)
-                    if result.isFinal { settled += words }
-                    let (final, volatile) = (settled, result.isFinal ? "" : words)
-                    await MainActor.run { onText(final, volatile) }
+                for try await result in transcriber.results where result.isFinal {
+                    settled += String(result.text.characters)
                 }
             } catch {}
+            return settled.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
+        // The chime plays before the microphone takes over the audio session.
+        await Self.chime(starting: true)
         #if os(iOS)
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.record, mode: .measurement, options: .duckOthers)
@@ -68,6 +72,8 @@ final class Dictation {
         let micFormat = mic.outputFormat(forBus: 0)
         guard let converter = AVAudioConverter(from: micFormat, to: format) else { throw Failure.noFormat }
         mic.installTap(onBus: 0, bufferSize: 4096, format: micFormat) { buffer, _ in
+            let level = Self.level(of: buffer)
+            DispatchQueue.main.async { onLevel(level) }
             if let converted = Self.convert(buffer, with: converter, to: format) {
                 input.yield(AnalyzerInput(buffer: converted))
             }
@@ -77,19 +83,43 @@ final class Dictation {
         try await analyzer.start(inputSequence: stream)
     }
 
-    /// Stop listening and wait for the last words to settle.
-    func stop() async {
+    /// Stop listening, and return everything that was said once the last words settle.
+    func stop() async -> String {
         engine.stop()
         engine.inputNode.removeTap(onBus: 0)
         input?.finish()
         input = nil
-        try? await analyzer?.finalizeAndFinishThroughEndOfInput()
-        analyzer = nil
-        await results?.value
-        results = nil
         #if os(iOS)
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         #endif
+        await Self.chime(starting: false)
+        try? await analyzer?.finalizeAndFinishThroughEndOfInput()
+        analyzer = nil
+        let text = await results?.value ?? ""
+        results = nil
+        return text
+    }
+
+    /// The system's begin/end recording sounds on iPhone; Tink and Pop on the Mac.
+    private static func chime(starting: Bool) async {
+        #if os(iOS)
+        await withCheckedContinuation { done in
+            AudioServicesPlaySystemSoundWithCompletion(starting ? 1113 : 1114) { done.resume() }
+        }
+        #else
+        NSSound(named: starting ? "Tink" : "Pop")?.play()
+        try? await Task.sleep(for: .milliseconds(200))
+        #endif
+    }
+
+    /// Loudness 0…1 from the buffer's RMS, over a 50 dB range.
+    private static func level(of buffer: AVAudioPCMBuffer) -> Float {
+        guard let samples = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return 0 }
+        var sum: Float = 0
+        for i in 0..<Int(buffer.frameLength) { sum += samples[i] * samples[i] }
+        let rms = (sum / Float(buffer.frameLength)).squareRoot()
+        let db = 20 * log10(max(rms, 0.000_01))
+        return min(max((db + 50) / 50, 0), 1)
     }
 
     private static func microphoneAllowed() async -> Bool {

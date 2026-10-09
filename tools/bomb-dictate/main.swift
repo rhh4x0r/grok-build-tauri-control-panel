@@ -2,9 +2,9 @@
 // ios/BombCode/Speech/Dictation.swift, and placed next to the bomb_app binary.
 //
 //   bomb-dictate --check   prints "ok", or why dictation can't run here
-//   bomb-dictate           listens; prints one JSON object per line as words arrive:
-//                          {"final": "...", "volatile": "..."}, then {"done": true} once stdin
-//                          closes (or gets a line) and the last words settle. {"error": "..."} on failure.
+//   bomb-dictate           records; prints one JSON object per line: {"level": 0…1} as sound comes
+//                          in, then once stdin closes (or gets a line) and the words settle,
+//                          {"text": "..."} and {"done": true}. {"error": "..."} on failure.
 
 import Foundation
 
@@ -23,7 +23,7 @@ func run() -> Never {
     let dictation = Dictation()
     Task { @MainActor in
         do {
-            try await dictation.start { final, volatile in emit(["final": final, "volatile": volatile]) }
+            try await dictation.start { level in emit(["level": Double(level)]) }
             emit(["listening": true])
         } catch {
             emit(["error": error.localizedDescription])
@@ -34,7 +34,8 @@ func run() -> Never {
     Thread.detachNewThread {
         _ = readLine()
         Task { @MainActor in
-            await dictation.stop()
+            let text = await dictation.stop()
+            emit(["text": text])
             emit(["done": true])
             exit(0)
         }
