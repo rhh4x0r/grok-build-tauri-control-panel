@@ -412,6 +412,11 @@ impl PreviewPanel {
                                 .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().font_weight(FontWeight::MEDIUM).text_color(ui.text).child(info.name.clone()))
                                 .child(div().flex_shrink_0().text_size(px(crate::theme::Type::CAPTION)).text_color(if info.state == "running" { ui.accent } else { ui.text_faint }).child(word)),
                         )
+                        .when(info.model.is_some() || info.tokens.is_some(), |el| {
+                            let facts = [info.model.clone(), info.tokens.map(|t| format!("{} tokens", bomb_core::presence::format_count(t as usize)))]
+                                .into_iter().flatten().collect::<Vec<_>>().join(" · ");
+                            el.child(div().font_family(ui.mono.clone()).text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint).child(facts))
+                        })
                         .when(!info.task.is_empty(), |el| {
                             el.child(div().text_size(px(crate::theme::Type::SMALL)).line_height(px(18.)).text_color(ui.text_muted).line_clamp(3).child(info.task.clone()))
                         })

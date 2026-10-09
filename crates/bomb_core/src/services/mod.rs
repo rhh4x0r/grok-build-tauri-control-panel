@@ -2451,14 +2451,15 @@ fn persist_subagent(db: &grok_persistence::Persistence, parent: Uuid, payload: &
             meta["id"] = child.to_string().into();
             meta["label"] = name.into();
             meta["parentThread"] = parent.to_string().into();
-            meta["subagent"] = serde_json::json!({ "name": name, "task": task, "state": "running", "startedAt": now.to_rfc3339() });
+            meta["subagent"] = serde_json::json!({ "name": name, "task": task, "state": "running", "startedAt": now.to_rfc3339(), "model": payload["model"].as_str() });
+            if let Some(model) = payload["model"].as_str() { meta["model"] = model.into(); }
             meta["acpSessionId"] = serde_json::Value::Null;
             snapshot["metadata"] = meta;
             db.upsert_session(&SessionRecord {
                 id: child,
                 cwd: parent_rec.cwd,
                 mode: "acp".into(),
-                model: parent_rec.model,
+                model: payload["model"].as_str().map(String::from).unwrap_or(parent_rec.model),
                 status: "running".into(),
                 worktree: parent_rec.worktree,
                 acp_session_id: None,
@@ -2486,6 +2487,17 @@ fn persist_subagent(db: &grok_persistence::Persistence, parent: Uuid, payload: &
             rec.updated_at = now;
             db.upsert_session(&rec)
         }
+        // How many tokens it has used (its context, as the agent reports it).
+        Some("usage") => {
+            let Some(tokens) = payload["tokens"].as_u64() else { return Ok(()) };
+            let Ok(mut rec) = db.get_session(child) else { return Ok(()) };
+            let mut snapshot: serde_json::Value = serde_json::from_str(&rec.metadata_json).unwrap_or_else(|_| serde_json::json!({}));
+            let Some(sub) = snapshot.pointer_mut("/metadata/subagent").filter(|s| s.is_object()) else { return Ok(()) };
+            if sub["tokens"].as_u64() == Some(tokens) { return Ok(()); }
+            sub["tokens"] = tokens.into();
+            rec.metadata_json = snapshot.to_string();
+            db.upsert_session(&rec)
+        }
         _ => Ok(()),
     }
 }
@@ -2508,6 +2520,12 @@ pub struct SubagentInfo {
     pub started_at: String,
     pub ended_at: Option<String>,
     pub message_count: u64,
+    /// The model it ran on, when the agent says.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Tokens it used (its context), when the agent reports them.
+    #[serde(default)]
+    pub tokens: Option<u64>,
 }
 
 /// Every thread's subagents (or one thread's), oldest first.
@@ -2531,6 +2549,8 @@ pub async fn list_subagents(state: &AppState, parent: Option<String>) -> Result<
             started_at: text("startedAt").unwrap_or_else(|| rec.created_at.to_rfc3339()),
             ended_at: text("endedAt"),
             message_count: rec.message_count,
+            model: text("model"),
+            tokens: sub.get("tokens").and_then(|t| t.as_u64()),
         })
     }).collect();
     out.sort_by(|a, b| a.started_at.cmp(&b.started_at));

@@ -654,6 +654,7 @@ impl AppModel {
                     list.push(services::SubagentInfo {
                         id: child.to_string(), parent: parent.to_string(), name: text("name"), task: text("task"),
                         state: "running".into(), started_at: now, ended_at: None, message_count: 0,
+                        model: payload["model"].as_str().map(String::from), tokens: None,
                     });
                 }
             }
@@ -661,6 +662,11 @@ impl AppModel {
                 if let Some(info) = self.subagents.get_mut(&parent).and_then(|l| l.iter_mut().find(|s| s.id == child.to_string())) {
                     info.state = text("state");
                     info.ended_at = Some(now);
+                }
+            }
+            Some("usage") => {
+                if let Some(info) = self.subagents.get_mut(&parent).and_then(|l| l.iter_mut().find(|s| s.id == child.to_string())) {
+                    info.tokens = payload["tokens"].as_u64();
                 }
             }
             _ => {}
