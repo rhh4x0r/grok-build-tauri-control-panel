@@ -34,6 +34,9 @@ struct PendingConnect {
     /// Reasoning effort to apply through the agent's `effort` config option
     /// (the Claude adapter advertises one; Grok takes a CLI flag instead).
     effort: Option<String>,
+    /// The person (or caller) picked the model. Otherwise the agent starts on its own default
+    /// and the thread records that, so a stale built-in default can't fail the start.
+    model_chosen: bool,
 }
 
 /// Run the ACP handshake and fill in (or fail) the placeholder session entry.
@@ -44,6 +47,7 @@ async fn connect_and_fill(
     pending: PendingConnect,
 ) -> Result<()> {
     let pending_effort = pending.effort.clone();
+    let model_chosen = pending.model_chosen;
     match AcpClient::connect_with(
         pending.client_cfg,
         &pending.acp_opts,
@@ -67,6 +71,9 @@ async fn connect_and_fill(
             // Never hold a DashMap guard across an await.
             if let Some(mut entry) = sessions.get_mut(&id) {
                 entry.metadata.acp_session_id = acp_session_id;
+                if let (false, Some(model)) = (model_chosen, selected_model.clone()) {
+                    entry.metadata.model = model;
+                }
                 if let Some(model) = selected_model {
                     if entry.metadata.backend == Backend::Claude
                         && entry.metadata.model.strip_suffix("[1m]") == Some(model.as_str())
@@ -242,9 +249,11 @@ impl SessionRegistry {
         }
 
         let backend = opts.backend;
+        let model_chosen = opts.model.as_deref().is_some_and(|m| !m.trim().is_empty());
         let model = opts
             .model
             .clone()
+            .filter(|_| model_chosen)
             .unwrap_or_else(|| cfg.model_for(backend));
         // Mock threads need no binary; headless resolves via grok_cli.
         let needs_binary =
@@ -314,7 +323,8 @@ impl SessionRegistry {
                     }
                 } else {
                     let acp_opts = AcpSpawnOptions {
-                        model: Some(model),
+                        // Unchosen: leave the agent on its own default (recorded once connected).
+                        model: model_chosen.then(|| model.clone()),
                         rules: if opts.rules.is_empty() {
                             None
                         } else {
@@ -407,6 +417,7 @@ impl SessionRegistry {
                         acp_opts,
                         connect_opts,
                         effort: opts.effort.clone(),
+                        model_chosen,
                     };
                     if background {
                         let sessions = self.sessions.clone();
