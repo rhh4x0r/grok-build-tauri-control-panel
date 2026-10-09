@@ -536,7 +536,10 @@ impl AppModel {
     pub fn open_workspace(&mut self, id: String, cx: &mut Context<Self>) {
         if let Some(w) = self.workspaces.iter().find(|w| w.id == id).cloned() {
             self.active_project = Some(w.project_root);
-            self.select(w.threads.first().and_then(|t| Uuid::parse_str(t).ok()), cx);
+            // A failed thread opens first, so its "Failed" is seen (and cleared) where it happened.
+            let ids: Vec<Uuid> = w.threads.iter().filter_map(|t| Uuid::parse_str(t).ok()).collect();
+            let failed = ids.iter().copied().find(|id| self.shows_failed(*id, cx));
+            self.select(failed.or_else(|| ids.first().copied()), cx);
             self.active_workspace = Some(id);
             if self.selected.is_none() {
                 self.new_thread_open = true;

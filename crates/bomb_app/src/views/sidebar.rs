@@ -418,24 +418,6 @@ impl SidebarView {
                 let model_label = models.join(" · ");
                 let corner = status_corner(&status, &latest, ui);
                 let selected_bg = ui.selected_bg();
-                let clear_failed = (status == "failed").then(|| {
-                    let (app, failed) = (self.model.clone(), failed.clone());
-                    div()
-                        .id(SharedString::from(format!("clear-failed-{wid}")))
-                        .size(px(16.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(4.))
-                        .text_color(ui.text_faint)
-                        .hover(move |s| s.bg(hover))
-                        .tooltip(|window, cx| Tooltip::new("Clear Failed").build(window, cx))
-                        .on_click(move |_, _, cx| {
-                            cx.stop_propagation();
-                            app.update(cx, |m, cx| for id in &failed { m.dismiss_failure(*id, cx); });
-                        })
-                        .child(div().size(px(10.)).child(Icon::from(Lucide::X)))
-                });
                 let menu_failed = failed.clone();
                 group = group.child(
                     div()
@@ -489,8 +471,7 @@ impl SidebarView {
                                         .whitespace_nowrap()
                                         .child(row_title),
                                 )
-                                .child(corner)
-                                .children(clear_failed),
+                                .child(corner),
                         )
                         .child(
                             div()
