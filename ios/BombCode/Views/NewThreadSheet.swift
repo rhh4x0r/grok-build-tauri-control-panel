@@ -38,12 +38,13 @@ struct NewThreadSheet: View {
                         divider
                         PickRow(icon: making ? "hourglass" : "folder", label: "Project",
                                 value: making ? "Setting up…" : project.map(projectName) ?? (projects.isEmpty ? "None yet" : "Choose")) {
+                            // Starting something new comes first: the projects list can be long.
+                            Button("New project…", systemImage: "plus") { newName = ""; asking = .empty }
+                            Button("Clone from Git…", systemImage: "arrow.down.circle") { newURL = ""; newName = ""; asking = .clone }
+                            Divider()
                             ForEach(projects, id: \.self) { root in
                                 Button(projectName(root)) { project = root }
                             }
-                            Divider()
-                            Button("New project…", systemImage: "plus") { newName = ""; asking = .empty }
-                            Button("Clone from Git…", systemImage: "arrow.down.circle") { newURL = ""; newName = ""; asking = .clone }
                         }
                         .disabled(machine == nil || making)
                         divider
@@ -185,6 +186,8 @@ private struct PickRow<Choices: View>: View {
             .frame(minHeight: 50)
             .contentShape(Rectangle())
         }
+        // Keep the written order: iOS otherwise flips a menu that opens upward.
+        .menuOrder(.fixed)
     }
 }
 
