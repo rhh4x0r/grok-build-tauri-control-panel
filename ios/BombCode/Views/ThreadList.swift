@@ -20,6 +20,39 @@ enum ListSort: String, CaseIterable {
     }
 }
 
+/// How far back a project's threads show before "Show more", like the desktop sidebar's setting.
+enum RecentWindow: String, CaseIterable {
+    case off, day = "1d", threeDays = "3d", week = "1w", month = "1m"
+    var label: String {
+        switch self {
+        case .off: "Off"
+        case .day: "1 day"
+        case .threeDays: "3 days"
+        case .week: "1 week"
+        case .month: "1 month"
+        }
+    }
+    var seconds: TimeInterval? {
+        switch self {
+        case .off: nil
+        case .day: 86_400
+        case .threeDays: 3 * 86_400
+        case .week: 7 * 86_400
+        case .month: 30 * 86_400
+        }
+    }
+    /// The oldest time that still counts, as an RFC 3339 UTC prefix: thread times are UTC RFC 3339, so
+    /// text order is time order.
+    func cutoff(now: Date = .now) -> String? {
+        guard let seconds else { return nil }
+        let format = DateFormatter()
+        format.locale = Locale(identifier: "en_US_POSIX")
+        format.timeZone = TimeZone(identifier: "UTC")
+        format.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+        return format.string(from: now.addingTimeInterval(-seconds))
+    }
+}
+
 /// Which threads the list shows.
 enum ListShow: String, CaseIterable {
     case all, working, input
@@ -61,9 +94,10 @@ struct ThreadList: View {
     @AppStorage("list.show") private var show: ListShow = .all
     @AppStorage("list.archived") private var showArchived = false
     @AppStorage("list.collapsed") private var collapsedRaw = ""
+    @AppStorage("list.recent") private var recent: RecentWindow = .threeDays
 
-    /// Rows per project before "Show more", like the sidebar.
-    private let keep = 5
+    /// Recent rows per project before "Show more", like the sidebar.
+    private let keep = 3
 
     private var collapsed: Set<String> { Set(collapsedRaw.split(separator: "\n").map(String.init)) }
 
@@ -202,6 +236,10 @@ struct ThreadList: View {
                 ForEach(ListSort.allCases, id: \.self) { Text($0.label).tag($0) }
             }
             .pickerStyle(.menu)
+            Picker("Recent threads", selection: $recent) {
+                ForEach(RecentWindow.allCases, id: \.self) { Text($0 == .off ? "Off · tap a project to see its threads" : "Last \($0.label)").tag($0) }
+            }
+            .pickerStyle(.menu)
             Toggle("Show archived", systemImage: "archivebox", isOn: $showArchived)
             if !collapsed.isEmpty {
                 Button("Expand all projects", systemImage: "rectangle.expand.vertical") { collapsedRaw = "" }
@@ -249,10 +287,14 @@ struct ThreadList: View {
 
     private func projectGroup(_ group: ProjectGroup) -> some View {
         let isCollapsed = collapsed.contains(group.key) && search.isEmpty
-        // Searching or filtering shows every match; otherwise the newest few, and anything working.
+        // Searching or filtering shows every match; otherwise, like the desktop sidebar, the few
+        // newest from the recent window, and anything working or waiting on you.
         let limited = search.isEmpty && show == .all && !expanded.contains(group.key)
+        let cutoff = recent.cutoff()
         let visible = limited
-            ? group.threads.enumerated().filter { $0.offset < keep || $0.element.running }.map(\.element)
+            ? group.threads.enumerated().filter { index, thread in
+                thread.running || (cutoff.map { index < keep && thread.updatedAt >= $0 } ?? false)
+            }.map(\.element)
             : group.threads
         let hidden = group.threads.count - visible.count
         let machine = app.machine(id: group.machineId)
@@ -290,7 +332,7 @@ struct ThreadList: View {
                             .padding(.vertical, 6)
                     }
                     .buttonStyle(.plain)
-                } else if !limited && expanded.contains(group.key) && group.threads.count > keep && search.isEmpty && show == .all {
+                } else if !limited && expanded.contains(group.key) && search.isEmpty && show == .all {
                     Button {
                         withAnimation(.snappy(duration: 0.2)) { _ = expanded.remove(group.key) }
                     } label: {

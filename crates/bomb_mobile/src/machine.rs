@@ -48,6 +48,19 @@ pub trait MachineListener: Send + Sync {
     fn on_threads(&self, threads: Vec<ThreadSummary>);
     /// Changes to a thread that is open on screen.
     fn on_thread(&self, thread_id: String, patches: Vec<ThreadPatch>, presence: PresenceView);
+    /// Settings shared by the person's devices (read-aloud) changed on the machine: ask again.
+    fn on_settings_changed(&self);
+}
+
+/// Read-aloud settings the machine shares with the person's devices.
+#[derive(Debug, Clone, Default, PartialEq, uniffi::Record, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeechSettings {
+    /// The Fish Audio API key.
+    pub api_key: Option<String>,
+    pub voice: Option<String>,
+    pub voice_name: Option<String>,
+    pub rate: Option<f32>,
 }
 
 /// An image attached to a prompt.
@@ -192,6 +205,17 @@ impl Machine {
     pub async fn list_backends(&self) -> Result<Vec<BackendChoice>> {
         let rows: Vec<BackendRow> = self.call("list_backends", Value::Null).await?;
         Ok(rows.into_iter().map(BackendChoice::from).collect())
+    }
+
+    /// The machine's read-aloud settings. None from a machine too old to share them.
+    pub async fn speech_settings(&self) -> Result<Option<SpeechSettings>> {
+        Ok(self.call("speech_settings", Value::Null).await.ok())
+    }
+
+    /// Change the machine's read-aloud settings (`None` leaves one as it is; an empty key removes it).
+    pub async fn set_speech_settings(&self, api_key: Option<String>, voice: Option<String>, voice_name: Option<String>, rate: Option<f32>) -> Result<()> {
+        self.request("set_speech_settings", json!({ "apiKey": api_key, "voice": voice, "voiceName": voice_name, "rate": rate })).await?;
+        Ok(())
     }
 
     /// Archived threads and pinned projects from the machine's sidebar. Empty from a machine too old to say.
@@ -543,6 +567,10 @@ impl Shared {
 
     fn handle_event(self: &Arc<Self>, seq: u64, event: ControlEvent) {
         if matches!(&event, ControlEvent::UserMessage { origin, .. } if *origin == self.machine.device_id) { return; }
+        if let ControlEvent::Raw { session_id: None, payload } = &event {
+            if payload["channel"] == "settings" { self.listener.on_settings_changed(); }
+            return;
+        }
         let Some(id) = event.session_id() else { return };
         self.note_in_list(id, &event);
 

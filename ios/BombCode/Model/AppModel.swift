@@ -9,6 +9,7 @@ final class AppModel {
 
     init() {
         for paired in MachineStore.load() { machines.append(MachineModel(info: paired)) }
+        ReadAloud.shared.machines = { [weak self] in self?.machines ?? [] }
     }
 
     /// Threads from every machine, newest first.

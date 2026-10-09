@@ -133,7 +133,7 @@ struct VoiceSettings: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
-                    Footnote("Replies are read with Fish Audio voices, using your own Fish Audio API key. Tap the speaker under a reply.")
+                    Footnote("Replies are read with Fish Audio voices, using your own Fish Audio API key. The key, voice and speed are shared with your Mac. Tap the speaker under a reply.")
                     keyCard
                     SectionLabel("Reading with \(reader.chosenVoiceName)").padding(.top, 6)
                     Picker("Voices", selection: Binding(get: { reader.voiceList }, set: { reader.showList($0) })) {
@@ -184,7 +184,7 @@ struct VoiceSettings: View {
             Text("Fish Audio API key").font(Theme.sans(15, .semibold)).foregroundStyle(Theme.text)
             if reader.hasKey {
                 HStack {
-                    Text("Saved on this iPhone").font(Theme.small).foregroundStyle(Theme.textMuted)
+                    Text(reader.sharedWith.map { "Shared with \($0)" } ?? "Saved on this iPhone").font(Theme.small).foregroundStyle(Theme.textMuted)
                     Spacer()
                     Button("Remove", role: .destructive) { reader.removeKey() }.font(Theme.small)
                 }

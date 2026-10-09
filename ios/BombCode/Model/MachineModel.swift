@@ -58,7 +58,7 @@ final class MachineModel: Identifiable {
 
     fileprivate func receive(link: LinkState) {
         self.link = link
-        if link == .connected { Task { await loadBackends(); await loadPrefs() } }
+        if link == .connected { Task { await loadBackends(); await loadPrefs(); await ReadAloud.shared.sync(from: self) } }
     }
 
     fileprivate func receive(threads: [ThreadSummary]) {
@@ -95,5 +95,9 @@ private final class ListenerRelay: MachineListener, @unchecked Sendable {
 
     func onThread(threadId: String, patches: [ThreadPatch], presence: PresenceView) {
         onMain { $0.receive(threadId: threadId, patches: patches, presence: presence) }
+    }
+
+    func onSettingsChanged() {
+        onMain { machine in Task { await ReadAloud.shared.sync(from: machine) } }
     }
 }

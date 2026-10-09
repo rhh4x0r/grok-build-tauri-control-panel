@@ -1623,6 +1623,15 @@ impl AppModel {
                     cx.notify();
                 }
                 ControlEvent::McpChanged { .. } => self.refresh_mcp_names(cx),
+                // Read-aloud settings changed (here or on a paired phone).
+                ControlEvent::Raw { session_id: None, payload }
+                    if payload.get("channel").and_then(|c| c.as_str()) == Some("settings")
+                        && payload.get("kind").and_then(|c| c.as_str()) == Some("speech") =>
+                {
+                    if let Some(reader) = cx.try_global::<crate::models::read_aloud::ReadAloudHandle>().map(|h| h.0.clone()) {
+                        reader.update(cx, |m, cx| m.reload(cx));
+                    }
+                }
                 ControlEvent::Raw { payload, .. }
                     if matches!(payload.get("channel").and_then(|c| c.as_str()), Some("provider_commands" | "foundry")) =>
                 {

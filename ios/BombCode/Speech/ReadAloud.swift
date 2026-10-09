@@ -6,7 +6,11 @@ import Security
 
 /// Reading replies aloud on the iPhone with Fish Audio voices: which message plays, where, how fast,
 /// in which voice. One message at a time; starting another replaces it. The engine is
-/// `SpeechPlayer`, shared with the Mac. The person's Fish Audio key lives in the Keychain.
+/// `SpeechPlayer`, shared with the Mac.
+///
+/// The key, voice and speed follow the paired Mac (the first machine with a key): taken when it
+/// connects and whenever they change there, and changes made here go back to it. A copy stays in
+/// this iPhone's Keychain so reading works while the Mac is away.
 @MainActor @Observable
 final class ReadAloud {
     static let shared = ReadAloud()
@@ -44,8 +48,20 @@ final class ReadAloud {
     private(set) var voiceId: String?
     private(set) var voiceName: String?
     var rate: Float {
-        didSet { UserDefaults.standard.set(rate, forKey: "readAloud.rate"); player.setRate(rate); updateNowPlaying() }
+        didSet {
+            UserDefaults.standard.set(rate, forKey: "readAloud.rate"); player.setRate(rate); updateNowPlaying()
+            if !adopting && rate != oldValue { share(rate: rate) }
+        }
     }
+
+    /// The paired machines, to share settings with (set by the app).
+    var machines: () -> [MachineModel] = { [] }
+    /// The machine whose settings this iPhone follows.
+    private weak var source: MachineModel?
+    /// Its name, for the settings screen.
+    var sharedWith: String? { source?.name }
+    /// Taking settings from a machine, so they aren't sent straight back.
+    private var adopting = false
 
     private let player = SpeechPlayer()
 
@@ -76,10 +92,68 @@ final class ReadAloud {
     var chosenVoiceName: String { voiceId == nil ? "Sarah" : (voiceName ?? "Your voice") }
 
     func choose(_ voice: SpeechVoiceInfo) {
-        voiceId = voice.id
-        voiceName = voice.name
-        UserDefaults.standard.set(voice.id, forKey: "readAloud.voice")
-        UserDefaults.standard.set(voice.name, forKey: "readAloud.voiceName")
+        setVoice(voice.id, name: voice.name)
+        share(voice: voice)
+    }
+
+    private func setVoice(_ id: String, name: String?) {
+        voiceId = id
+        voiceName = name
+        UserDefaults.standard.set(id, forKey: "readAloud.voice")
+        UserDefaults.standard.set(name, forKey: "readAloud.voiceName")
+    }
+
+    // MARK: Following the Mac
+
+    /// Take a machine's shared settings (on connect, and when they change there). The first machine
+    /// with a key is followed; if none has one and this iPhone does, it's offered to that machine.
+    func sync(from machine: MachineModel) async {
+        let shared: SpeechSettings
+        do {
+            guard let answer = try await machine.machine.speechSettings() else { return }
+            shared = answer
+        } catch {
+            #if DEBUG
+            if Smoke.enabled { print("smoke: speech settings failed", error) }
+            #endif
+            return
+        }
+        #if DEBUG
+        if Smoke.enabled { print("smoke: speech settings", shared.apiKey == nil ? "no key" : "key", shared.voiceName ?? "-") }
+        #endif
+        if let source, source !== machine, source.connected { return }
+        if shared.apiKey == nil && source !== machine {
+            // The machine has no key: give it this iPhone's, so the two match from now on.
+            guard let apiKey, machine.isMac else { return }
+            source = machine
+            try? await machine.machine.setSpeechSettings(apiKey: apiKey, voice: voiceId, voiceName: voiceName, rate: rate)
+            return
+        }
+        source = machine
+        adopting = true
+        defer { adopting = false }
+        if let key = shared.apiKey {
+            if key != apiKey { FishKey.save(key); apiKey = key; refreshVoices() }
+        } else if apiKey != nil {
+            // Removed on the Mac.
+            FishKey.delete()
+            apiKey = nil
+        }
+        if let voice = shared.voice { setVoice(voice, name: shared.voiceName) }
+        if let shared = shared.rate, shared > 0, shared != rate { rate = shared }
+    }
+
+    /// The machine to send changes to: the one followed, else the first connected Mac.
+    private var target: MachineModel? {
+        if let source, source.connected { return source }
+        let connected = machines().filter(\.connected)
+        return connected.first(where: \.isMac) ?? connected.first
+    }
+
+    private func share(apiKey: String? = nil, voice: SpeechVoiceInfo? = nil, rate: Float? = nil) {
+        guard let machine = target else { return }
+        source = machine
+        Task { try? await machine.machine.setSpeechSettings(apiKey: apiKey, voice: voice?.id, voiceName: voice?.name, rate: rate) }
     }
 
     /// A key being checked with Fish Audio, and why the last one wasn't accepted.
@@ -101,6 +175,7 @@ final class ReadAloud {
         }
         FishKey.save(key)
         apiKey = key
+        share(apiKey: key)
         refreshVoices()
         return true
     }
@@ -108,6 +183,7 @@ final class ReadAloud {
     func removeKey() {
         FishKey.delete()
         apiKey = nil
+        share(apiKey: "")
     }
 
     func showList(_ list: String) {

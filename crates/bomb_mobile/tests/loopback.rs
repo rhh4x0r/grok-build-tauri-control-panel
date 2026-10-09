@@ -15,6 +15,7 @@ struct Screen {
     threads: Vec<ThreadSummary>,
     entries: Vec<EntryView>,
     resets: usize,
+    settings_changed: usize,
 }
 
 struct Listener(Arc<Mutex<Screen>>);
@@ -41,6 +42,9 @@ impl MachineListener for Listener {
                 ThreadPatch::Trim { count } => { screen.entries.drain(..count as usize); }
             }
         }
+    }
+    fn on_settings_changed(&self) {
+        self.0.lock().unwrap().settings_changed += 1;
     }
 }
 
@@ -97,6 +101,15 @@ async fn a_paired_phone_starts_a_thread_watches_it_and_answers_an_approval() {
     until(&screen, "connected", |s| s.link == Some(LinkState::Connected)).await;
     assert_eq!(machine.list_projects().await.unwrap(), vec![root.clone()]);
     assert!(machine.list_backends().await.unwrap().iter().any(|b| b.id == "grok"));
+
+    // Read-aloud settings are shared: what the phone sets, the machine keeps, and every device hears of it.
+    assert_eq!(machine.speech_settings().await.unwrap(), Some(Default::default()));
+    machine.set_speech_settings(Some("fish-key".into()), Some("v123".into()), Some("Sarah".into()), Some(1.25)).await.unwrap();
+    until(&screen, "the settings notice", |s| s.settings_changed > 0).await;
+    let shared = machine.speech_settings().await.unwrap().unwrap();
+    assert_eq!((shared.api_key.as_deref(), shared.voice.as_deref(), shared.voice_name.as_deref(), shared.rate), (Some("fish-key"), Some("v123"), Some("Sarah"), Some(1.25)));
+    machine.set_speech_settings(Some(String::new()), None, None, None).await.unwrap();
+    assert_eq!(machine.speech_settings().await.unwrap().unwrap().api_key, None, "an empty key removes it");
 
     // The phone never turns on always-approve.
     let yolo = NewThread { project_root: root.clone(), backend: "grok".into(), model: Some("mock".into()), effort: None, approval_mode: Some("yolo".into()), prompt: "x".into(), own_worktree: true, images: vec![] };

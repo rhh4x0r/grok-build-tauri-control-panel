@@ -207,6 +207,7 @@ mod tests {
             fn on_link(&self, state: LinkState) { *self.0.lock().unwrap() = Some(state); }
             fn on_threads(&self, _: Vec<bomb_mobile::view::ThreadSummary>) {}
             fn on_thread(&self, _: String, _: Vec<bomb_mobile::view::ThreadPatch>, _: bomb_mobile::view::PresenceView) {}
+            fn on_settings_changed(&self) {}
         }
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");

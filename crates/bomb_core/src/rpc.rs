@@ -3,7 +3,9 @@
 //! [`dispatch`] maps a method name and JSON parameters onto the same
 //! `services::*` functions the desktop UI calls in-process. Only a curated set
 //! is reachable: nothing that edits settings, MCP or memory, and no raw
-//! key-value access (the settings table holds credentials).
+//! key-value access (the settings table holds credentials). The one exception
+//! is read-aloud (`speech_settings`): the person's own devices share its Fish
+//! Audio key, voice and speed, so the key is entered once.
 
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -28,6 +30,13 @@ pub async fn dispatch(state: &AppState, origin: &str, method: &str, p: Value) ->
         // Threads
         "list_threads" => out(services::list_threads(state).await?),
         "sidebar_prefs" => out(services::sidebar_prefs(state).await?),
+        "speech_settings" => out(services::speech_key::settings(state).await),
+        "set_speech_settings" => {
+            let voice: Option<String> = arg(&p, "voice")?;
+            let voice_name: Option<String> = arg(&p, "voiceName")?;
+            services::speech_key::update(state, arg(&p, "apiKey")?, voice.map(|v| (v.clone(), voice_name.unwrap_or(v))), arg(&p, "rate")?).await?;
+            Ok(Value::Null)
+        }
         "list_subagents" => out(services::list_subagents(state, arg(&p, "thread")?).await?),
         "wake_thread" => { services::wake_thread(state, arg(&p, "id")?).await?; Ok(Value::Null) }
         "read_media" => out(services::media::read_media(state, arg(&p, "thread")?, arg(&p, "path")?, arg::<Option<u64>>(&p, "offset")?.unwrap_or(0), arg(&p, "length")?).await?),

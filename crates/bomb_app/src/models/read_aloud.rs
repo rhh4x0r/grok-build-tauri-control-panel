@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use crate::runtime::{services, spawn_service};
 use crate::speech::{self, HelperEngine, SpeechEngine, SpeechEvent, SpeechStatus, Voice, VoiceList};
 
-const SETTINGS_KEY: &str = "read_aloud";
 /// The speeds the player offers.
 pub const RATES: [f32; 5] = [0.75, 1.0, 1.25, 1.5, 2.0];
 
@@ -77,32 +76,39 @@ pub struct ReadAloud {
 impl ReadAloud {
     /// Saved settings, and whether this Mac can read aloud at all.
     pub fn load(&mut self, cx: &mut Context<Self>) {
-        let state = services(cx);
         let this = cx.entity().downgrade();
         spawn_service(cx, async move {
-            let saved = bomb_core::services::kv_get(&state, SETTINGS_KEY).await.ok().flatten();
-            let key = bomb_core::services::speech_key::load(state.persistence.clone()).await;
-            let available = tokio::task::spawn_blocking(speech::available).await.unwrap_or(false);
-            Ok::<_, String>((saved, key, available))
+            Ok::<_, String>(tokio::task::spawn_blocking(speech::available).await.unwrap_or(false))
         }, move |res, cx| {
-            let Ok((saved, key, available)) = res else { return };
+            let Ok(available) = res else { return };
+            let _ = this.update(cx, |m, cx| { m.available = available; cx.notify(); });
+        });
+        self.reload(cx);
+    }
+
+    /// Take the shared settings again (they changed here or on a paired phone).
+    pub fn reload(&mut self, cx: &mut Context<Self>) {
+        let state = services(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move { Ok::<_, String>(bomb_core::services::speech_key::settings(&state).await) }, move |res, cx| {
+            let Ok(shared) = res else { return };
             let _ = this.update(cx, |m, cx| {
-                m.available = available;
-                m.api_key = key;
-                if let Some(mut settings) = saved.and_then(|raw| serde_json::from_str::<ReadAloudSettings>(&raw).ok()) {
-                    // An Apple voice from before Fish Audio: start over with the default.
-                    if settings.voice.as_deref().is_some_and(|v| v.contains('.')) { settings.voice = None; settings.voice_name = None; }
-                    m.settings = settings;
-                }
+                m.api_key = shared.api_key;
+                m.settings.voice = shared.voice;
+                m.settings.voice_name = shared.voice_name;
+                if let Some(rate) = shared.rate { m.settings.rate = rate; }
+                if let Some(engine) = m.engine.as_mut() { engine.set_rate(m.settings.rate); }
                 cx.notify();
             });
         });
     }
 
+    /// Save the voice and speed for every device.
     fn save(&self, cx: &mut Context<Self>) {
-        let raw = serde_json::to_string(&self.settings).unwrap_or_default();
         let state = services(cx);
-        spawn_service(cx, async move { bomb_core::services::kv_set(&state, SETTINGS_KEY, &raw).await }, |_, _| {});
+        let voice = self.settings.voice.clone().map(|v| (v.clone(), self.settings.voice_name.clone().unwrap_or(v)));
+        let rate = self.settings.rate;
+        spawn_service(cx, async move { bomb_core::services::speech_key::update(&state, None, voice, Some(rate)).await }, |_, _| {});
     }
 
     /// The helper, started on first use; its reports update this model.
@@ -293,7 +299,7 @@ impl ReadAloud {
         let state = services(cx);
         let this = cx.entity().downgrade();
         let saved = key.trim().to_string();
-        spawn_service(cx, async move { bomb_core::services::speech_key::save(state.persistence.clone(), key).await }, move |res, cx| {
+        spawn_service(cx, async move { bomb_core::services::speech_key::update(&state, Some(key), None, None).await }, move |res, cx| {
             let _ = this.update(cx, |m, cx| match res {
                 Ok(()) => { m.api_key = Some(saved.clone()); m.clear_key_input = true; m.refresh_voices(cx); }
                 Err(e) => { m.key_error = Some(e); cx.notify(); }
@@ -304,7 +310,7 @@ impl ReadAloud {
     pub fn remove_api_key(&mut self, cx: &mut Context<Self>) {
         self.api_key = None;
         let state = services(cx);
-        spawn_service(cx, async move { bomb_core::services::speech_key::remove(state.persistence.clone()).await }, |_, _| {});
+        spawn_service(cx, async move { bomb_core::services::speech_key::update(&state, Some(String::new()), None, None).await }, |_, _| {});
         cx.notify();
     }
 
