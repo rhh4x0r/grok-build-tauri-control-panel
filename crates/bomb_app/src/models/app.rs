@@ -24,14 +24,14 @@ use crate::runtime::{services as svc, spawn_service};
 pub struct AppModelHandle(pub Entity<AppModel>);
 impl Global for AppModelHandle {}
 
-const ARCHIVED_KEY: &str = "archived_threads";
+const ARCHIVED_KEY: &str = services::ARCHIVED_THREADS_KEY;
 const SIDEBAR_SORT_KEY: &str = "sidebar_sort";
 const RECENT_WINDOW_KEY: &str = "sidebar_recent_window";
 /// When each thread was last looked at (JSON map of id → RFC 3339).
 const THREAD_SEEN_KEY: &str = "thread_seen";
 /// Activity before this counts as seen: threads don't all light up the first time.
 const THREAD_SEEN_SINCE_KEY: &str = "thread_seen_since";
-const PINNED_PROJECTS_KEY: &str = "pinned_projects";
+const PINNED_PROJECTS_KEY: &str = services::PINNED_PROJECTS_KEY;
 const PROJECT_INTRO_KEY: &str = "project_intro_seen";
 /// How long a queued message waits for the last turn to wind down before it goes anyway.
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -49,6 +49,9 @@ struct ServerPreview {
     _forward: crate::remote::live::ForwardGuard,
     local_url: String,
 }
+
+/// A paired server's threads, workspaces and projects, as last fetched.
+type ServerLists = (Vec<ThreadDto>, Vec<grok_persistence::WorkspaceRecord>, Vec<String>);
 
 /// How the sidebar orders projects and the threads inside them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -97,6 +100,7 @@ pub enum RightTab {
     Processes,
     Files,
     Changes,
+    Subagents,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -262,8 +266,7 @@ pub struct AppModel {
     list_applied: u64,
     local_workspaces: Vec<grok_persistence::WorkspaceRecord>,
     local_projects: Vec<String>,
-    #[allow(clippy::type_complexity)]
-    server_lists: HashMap<String, (Vec<ThreadDto>, Vec<grok_persistence::WorkspaceRecord>, Vec<String>)>,
+    server_lists: HashMap<String, ServerLists>,
     /// Which folder on this Mac is a copy of which server project.
     pub project_links: Vec<crate::remote::sync::Link>,
     /// A dev server running on a paired server, reached through a forwarded local port.
@@ -302,6 +305,10 @@ pub struct AppModel {
     pub thread_order: Vec<Uuid>,
     pub threads: HashMap<Uuid, Entity<ThreadModel>>,
     pub selected: Option<Uuid>,
+    /// Each thread's subagents, oldest first.
+    pub subagents: HashMap<Uuid, Vec<services::SubagentInfo>>,
+    /// A subagent's parent thread.
+    pub subagent_of: HashMap<Uuid, Uuid>,
     pub new_thread_open: bool,
     pub foundry_request: Option<String>,
     pub foundry_insert: Option<String>,
@@ -394,6 +401,8 @@ impl AppModel {
             active_project: None,
             thread_order: Vec::new(),
             threads: HashMap::new(),
+            subagents: HashMap::new(),
+            subagent_of: HashMap::new(),
             selected: None,
             new_thread_open: false,
             foundry_request: None,
@@ -632,6 +641,7 @@ impl AppModel {
 
     pub fn refresh_threads(&mut self, cx: &mut Context<Self>) {
         self.refresh_workspaces(cx);
+        self.load_subagents(cx);
         let state = svc(cx);
         let this = cx.entity().downgrade();
         self.list_fetches += 1;
@@ -648,6 +658,81 @@ impl AppModel {
             },
         );
         self.refresh_servers(cx);
+    }
+
+    /// Every thread's subagents on this Mac, for the sidebar.
+    fn load_subagents(&mut self, cx: &mut Context<Self>) {
+        let state = svc(cx);
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move { services::list_subagents(&state, None).await }, move |res, cx| {
+            let Ok(list) = res else { return };
+            let _ = this.update(cx, |m, cx| {
+                m.subagents.clear();
+                for info in list {
+                    let (Ok(id), Ok(parent)) = (Uuid::parse_str(&info.id), Uuid::parse_str(&info.parent)) else { continue };
+                    m.subagent_of.insert(id, parent);
+                    m.subagents.entry(parent).or_default().push(info);
+                }
+                cx.notify();
+            });
+        });
+    }
+
+    /// A subagent started or ended (see `grok_acp`'s `note_subagent`).
+    fn note_subagent(&mut self, parent: Uuid, payload: &serde_json::Value, cx: &mut Context<Self>) {
+        let Some(child) = payload["child"].as_str().and_then(|c| Uuid::parse_str(c).ok()) else { return };
+        let text = |k: &str| payload[k].as_str().unwrap_or_default().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        match payload["kind"].as_str() {
+            Some("spawned") => {
+                self.subagent_of.insert(child, parent);
+                let list = self.subagents.entry(parent).or_default();
+                if !list.iter().any(|s| s.id == child.to_string()) {
+                    list.push(services::SubagentInfo {
+                        id: child.to_string(), parent: parent.to_string(), name: text("name"), task: text("task"),
+                        state: "running".into(), started_at: now, ended_at: None, message_count: 0,
+                        model: payload["model"].as_str().map(String::from), tokens: None,
+                    });
+                }
+            }
+            Some("state") => {
+                if let Some(info) = self.subagents.get_mut(&parent).and_then(|l| l.iter_mut().find(|s| s.id == child.to_string())) {
+                    info.state = text("state");
+                    info.ended_at = Some(now);
+                }
+            }
+            Some("usage") => {
+                if let Some(info) = self.subagents.get_mut(&parent).and_then(|l| l.iter_mut().find(|s| s.id == child.to_string())) {
+                    info.tokens = payload["tokens"].as_u64();
+                }
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    /// The thread in view (the parent, when a subagent is open) and its subagents.
+    pub fn subagents_in_view(&self) -> (Option<Uuid>, Vec<services::SubagentInfo>) {
+        let parent = self.selected.map(|id| self.subagent_of.get(&id).copied().unwrap_or(id));
+        (parent, parent.and_then(|p| self.subagents.get(&p).cloned()).unwrap_or_default())
+    }
+
+    /// Open a subagent's own transcript (read-only), in place of the thread view.
+    pub fn open_subagent(&mut self, child: Uuid, cx: &mut Context<Self>) {
+        let Some(parent) = self.subagent_of.get(&child).copied() else { return };
+        if !self.threads.contains_key(&child) {
+            let Some(parent_meta) = self.threads.get(&parent).map(|t| t.read(cx).meta.clone()) else { return };
+            let info = self.subagents.get(&parent).and_then(|l| l.iter().find(|s| s.id == child.to_string())).cloned();
+            let mut dto = parent_meta;
+            dto.id = child.to_string();
+            dto.label = info.as_ref().map(|i| i.name.clone());
+            dto.status = info.as_ref().map(|i| i.state.clone()).unwrap_or_else(|| "completed".into());
+            dto.live = false;
+            dto.message_count = info.as_ref().map(|i| i.message_count).unwrap_or(0);
+            let entity = cx.new(|_| ThreadModel::new(dto));
+            self.threads.insert(child, entity);
+        }
+        self.select(Some(child), cx);
     }
 
     /// Ask every paired server for its projects, threads and workspaces.
@@ -1207,7 +1292,9 @@ impl AppModel {
         // Keep a just-started thread until a list reports it; it's the newest, so it goes first.
         self.just_started.retain(|id| !order.contains(id) && self.threads.contains_key(id));
         for id in &self.just_started { order.insert(0, *id); }
-        self.threads.retain(|id, _| order.contains(id));
+        // Open subagents aren't in the list; keep them.
+        let subagents = &self.subagent_of;
+        self.threads.retain(|id, _| order.contains(id) || subagents.contains_key(id));
         self.thread_order = order;
         if let Some(open) = self.selected { self.seen.insert(open, chrono::Utc::now()); self.see_failure(open, cx); }
         if let Some(sel) = self.selected {
@@ -1328,6 +1415,8 @@ impl AppModel {
         // Leaving a thread counts as having seen what it did while it was open.
         for seen in self.selected.into_iter().chain(id) { self.mark_seen(seen, cx); }
         self.selected = id;
+        // Reading aloud is for the thread in view.
+        crate::models::read_aloud::read_aloud(cx).update(cx, |r, cx| r.thread_changed(id, cx));
         self.prefs.fast_mode = Some(false);
         self.new_thread_open = false;
         self.review = None;
@@ -1445,12 +1534,9 @@ impl AppModel {
         if !needs {
             return;
         }
-        // A thread that already streamed in this session is the truth; the
-        // saved copy can only be older. Never replace live entries with it.
-        if !entity.read(cx).thread.entries.is_empty() {
-            entity.update(cx, |t, _| t.hydrated = true);
-            return;
-        }
+        // A thread can stream before it is ever opened (a prompt sent from the phone, a scheduled
+        // run): what it shows then is only that turn. The saved history holds the turn too, and
+        // everything before it, so load it either way.
         entity.update(cx, |t, _| t.loading = true);
         let core = self.core_of_thread(id, cx);
         let remote = core.is_remote();
@@ -1466,14 +1552,17 @@ impl AppModel {
                         Ok(snapshot) => {
                             let rows = snapshot.rows;
                             tracing::debug!(%id, rows = rows.len(), live = t.thread.entries.len(), "thread hydrated");
-                            if t.thread.entries.is_empty() {
+                            // Entries that streamed in before this loaded are in the saved rows as well.
+                            let had_live = !t.thread.entries.is_empty();
+                            if !had_live || rows.len() >= t.thread.entries.len() {
+                                if had_live { t.thread = bomb_core::transcript::Thread::new(); }
                                 t.thread.hydrate(&rows);
                                 t.after_hydrate(cx);
-                                // Saved rows drop an approval's id and choices; a server thread may be
-                                // waiting on one that was asked before this Mac connected.
-                                if remote { for approval in &snapshot.pending_approvals { t.apply(approval, cx); } }
-                                // The agent may still be working there: say so now, not at its next event.
-                                if remote && (t.meta.status == "running" || t.meta.status.contains("wait")) {
+                                // Saved rows drop an approval's id and choices; the thread may be waiting
+                                // on one asked before this Mac connected, or before the thread was opened.
+                                if remote || had_live { for approval in &snapshot.pending_approvals { t.apply(approval, cx); } }
+                                // The agent may still be working: say so now, not at its next event.
+                                if (remote || had_live) && (t.meta.status == "running" || t.meta.status.contains("wait")) {
                                     let ch = t.thread.resume_in_progress(std::time::Instant::now());
                                     t.absorb(&ch, cx);
                                 }
@@ -1494,6 +1583,17 @@ impl AppModel {
         let mut ended = Vec::new();
         let mut touched = HashSet::new();
         for ev in batch {
+            // A subagent's own events reach its transcript if it's open, and nothing else.
+            if let Some(sid) = session_of(&ev).filter(|sid| self.subagent_of.contains_key(sid)) {
+                if let Some(t) = self.threads.get(&sid) { t.update(cx, |t, cx| { t.apply(&ev, cx); }); }
+                if matches!(ev, ControlEvent::SessionStatusChanged { .. }) { cx.notify(); }
+                continue;
+            }
+            if let ControlEvent::Raw { session_id: Some(parent), payload } = &ev {
+                if payload.get("channel").and_then(|c| c.as_str()) == Some("subagent") {
+                    self.note_subagent(*parent, payload, cx);
+                }
+            }
             match &ev {
                 ControlEvent::SessionCreated { session_id, .. } => {
                     if !self.threads.contains_key(session_id) {

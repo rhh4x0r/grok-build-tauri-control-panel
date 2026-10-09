@@ -61,6 +61,8 @@ impl Render for SettingsView {
                         memory_page(),
                         perspective_page(),
                         servers_page(),
+                        phone_page(),
+                        voice_page(),
                         permissions_page(cx),
                         advanced_page(),
                     ]),
@@ -868,6 +870,214 @@ fn render_servers(cx: &mut App) -> AnyElement {
             ),
     )
     .into_any_element()
+}
+
+// ── Voice (read-aloud) ──────────────────────────────────────────────────
+
+fn voice_page() -> SettingPage {
+    use crate::models::read_aloud::{read_aloud, RATES};
+    SettingPage::new("Voice")
+        .description("Read replies aloud with your Mac's own voices: on this Mac, offline, free. Use the speaker under a reply.")
+        .group(
+            SettingGroup::new()
+                .item(
+                    SettingItem::new(
+                        "Speed",
+                        SettingField::dropdown(
+                            RATES.iter().map(|r| (SharedString::from(r.to_string()), SharedString::from(format!("{r}×")))).collect(),
+                            |cx| read_aloud(cx).read(cx).settings.rate.to_string().into(),
+                            |v, cx| { if let Ok(r) = v.parse::<f32>() { read_aloud(cx).update(cx, |m, cx| m.set_rate(r, cx)); } },
+                        ),
+                    )
+                    .description("Where reading starts; the player changes it too."),
+                )
+                .item(SettingItem::render(|_, _, cx| render_voices(cx))),
+        )
+}
+
+/// The voices, best first in your language, each with a preview; plus how to get better ones.
+fn render_voices(cx: &mut App) -> AnyElement {
+    let ui = Ui::of(cx);
+    let model = crate::models::read_aloud::read_aloud(cx);
+    let (available, voices, chosen, needs_better, personal) = {
+        let m = model.read(cx);
+        (m.available, m.voices.clone(), m.chosen_voice(), m.needs_better_voice, m.personal_voice)
+    };
+    let caption = |text: String| div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(text);
+    if !available {
+        return caption("Read-aloud isn't available on this Mac.".into()).into_any_element();
+    }
+    if voices.is_empty() {
+        model.update(cx, |m, cx| m.refresh_voices(cx));
+        return caption("Looking for voices…".into()).into_any_element();
+    }
+    let hover = ui.hover;
+    let selected_bg = ui.selected_bg();
+    let mut list = div().flex().flex_col().gap(px(2.)).w_full();
+    let mut last_group = String::new();
+    for v in voices.iter() {
+        let group = if v.personal { "Personal Voice".to_string() } else {
+            match v.quality.as_str() { "premium" => "Premium", "enhanced" => "Enhanced", _ => "Default" }.to_string()
+        };
+        if group != last_group {
+            list = list.child(div().pt_2().pb_1().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint).child(group.clone()));
+            last_group = group;
+        }
+        let is_chosen = chosen.as_deref() == Some(v.id.as_str());
+        let (pick, preview) = (model.clone(), model.clone());
+        let (id_pick, id_preview) = (v.id.clone(), v.id.clone());
+        list = list.child(
+            div()
+                .id(SharedString::from(format!("voice-{}", v.id)))
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .h(px(32.))
+                .rounded(px(8.))
+                .cursor_pointer()
+                .when(is_chosen, move |el| el.bg(selected_bg))
+                .when(!is_chosen, move |el| el.hover(move |s| s.bg(hover)))
+                .on_click(move |_, _, cx| pick.update(cx, |m, cx| m.set_voice(id_pick.clone(), cx)))
+                .child(div().size(px(14.)).text_color(ui.accent).when(is_chosen, |el| el.child(gpui_kit::component::Icon::from(gpui_kit::assets::IconName::Check))))
+                .child(div().flex_1().min_w_0().text_color(ui.text).child(v.name.clone()))
+                .child(div().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint).child(v.language.clone()))
+                .child(
+                    Button::new(SharedString::from(format!("voice-preview-{}", v.id))).ghost().small().icon(gpui_kit::assets::IconName::Play).tooltip("Preview")
+                        .on_click(move |_, _, cx| preview.update(cx, |m, cx| m.preview(&id_preview, cx))),
+                ),
+        );
+    }
+    let mut page = div().flex().flex_col().gap_3().w_full();
+    if needs_better {
+        page = page.child(
+            div().flex().flex_col().gap_2().p_3().rounded(px(10.)).border_1().border_color(ui.border)
+                .child(div().font_weight(FontWeight::MEDIUM).text_color(ui.text).child("Get a better voice"))
+                .child(caption("Only basic voices are installed for your language. Enhanced and Premium voices sound far more natural. On your Mac: System Settings → Accessibility → Spoken Content → System Voice → Manage Voices, then download one. It shows up here on its own.".into()))
+                .child(div().flex().child(Button::new("open-spoken-content").outline().small().label("Open Spoken Content settings").on_click(|_, _, cx| {
+                    cx.open_url("x-apple.systempreferences:com.apple.preference.universalaccess?SpokenContent");
+                }))),
+        );
+    }
+    let personal_model = model.clone();
+    page = page
+        .child(div().flex().items_center().gap_2()
+            .child(Button::new("personal-voice").outline().small().label("Use my Personal Voice").on_click(move |_, _, cx| {
+                personal_model.update(cx, |m, cx| m.request_personal_voice(cx));
+            }))
+            .when(personal == Some(false), |el| el.child(caption("Not allowed, or no Personal Voice on this Mac (macOS 14 and later).".into()))))
+        .child(list);
+    page.into_any_element()
+}
+
+// ── Phone ───────────────────────────────────────────────────────────────
+
+fn phone_page() -> SettingPage {
+    use crate::models::phone::phone;
+    let addresses: Vec<(SharedString, SharedString)> = crate::remote::host::interfaces()
+        .into_iter()
+        .map(|i| (i.ip.to_string().into(), format!("{} · {}", i.kind, i.ip).into()))
+        .collect();
+    SettingPage::new("Phone")
+        .description("Keep working from your iPhone: see every thread, answer questions, send follow-ups and start new threads. Threads keep running here; the phone steers them.")
+        .group(
+            SettingGroup::new()
+                .item(
+                    SettingItem::new(
+                        "Let my phone reach this Mac",
+                        SettingField::switch(|cx| phone(cx).read(cx).settings.enabled, |v, cx| phone(cx).update(cx, |p, cx| p.set_enabled(v, cx))),
+                    )
+                    .description("Only phones you pair can connect. While a thread is working, this Mac stays awake; with the lid closed it still sleeps, so use a server for overnight work."),
+                )
+                .item(
+                    SettingItem::new(
+                        "Address",
+                        SettingField::dropdown(
+                            addresses,
+                            |cx| phone(cx).read(cx).address().and_then(|a| a.rsplit_once(':').map(|(ip, _)| ip.to_string())).unwrap_or_default().into(),
+                            |v, cx| phone(cx).update(cx, |p, cx| p.set_address(v.to_string(), cx)),
+                        ),
+                    )
+                    .description("Use Tailscale to reach this Mac from anywhere. A home network address only works on the same Wi-Fi."),
+                )
+                .item(SettingItem::render(|_, _, cx| render_phone(cx))),
+        )
+}
+
+fn render_phone(cx: &mut App) -> AnyElement {
+    let ui = Ui::of(cx);
+    let model = crate::models::phone::phone(cx);
+    let (on, busy, error, code, devices, address) = {
+        let p = model.read(cx);
+        (p.host.is_some(), p.busy, p.error.clone(), p.code.clone(), p.devices.clone(), p.listening.clone())
+    };
+    let caption = |text: String| div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(text);
+    let mut page = div().flex().flex_col().gap_3().w_full();
+    if let Some(error) = error {
+        page = page.child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.danger).child(error));
+    }
+    if !on {
+        return page.when(busy, |el| el.child(caption("Starting…".into()))).into_any_element();
+    }
+    page = page.child(caption(format!("Listening on {}.", address.unwrap_or_default())));
+    let show = model.clone();
+    page = page.child(
+        div().flex().items_center().gap_2().child(
+            Button::new("phone-code").outline().small().label(if code.is_some() { "New pairing code" } else { "Show pairing code" }).disabled(busy).on_click(move |_, _, cx| {
+                show.update(cx, |p, cx| p.show_code(cx));
+            }),
+        ),
+    );
+    if let Some(code) = code {
+        const MODULE: f32 = 4.;
+        let quiet = 4.;
+        let mut qr = div().flex().flex_col().p(px(quiet * MODULE)).bg(gpui_kit::white()).rounded(px(8.));
+        for row in &code.rows {
+            // One element per run of dark modules keeps the code cheap to draw.
+            let mut line = div().flex().h(px(MODULE));
+            let mut x = 0;
+            while x < row.len() {
+                let dark = row[x];
+                let start = x;
+                while x < row.len() && row[x] == dark { x += 1; }
+                let width = px((x - start) as f32 * MODULE);
+                line = line.child(div().w(width).h_full().when(dark, |el| el.bg(gpui_kit::black())));
+            }
+            qr = qr.child(line);
+        }
+        let text = code.text.clone();
+        page = page
+            .child(div().flex().child(qr))
+            .child(div().flex().child(Button::new("phone-copy").ghost().small().label("Copy code as a link").on_click(move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+            })))
+            .child(caption(format!("Scan with Bomb Code on your iPhone. It pairs with {} and works once, for 10 minutes.", code.hosts.join(", "))))
+            .when(!code.skipped.is_empty(), |el| el.child(caption(format!("Not included (not connected right now): {}.", code.skipped.join(", ")))));
+    }
+    let refresh = model.clone();
+    page = page.child(
+        div().flex().items_center().gap_2().pt_2()
+            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Paired phones"))
+            .child(Button::new("phone-devices").ghost().small().label("Refresh").on_click(move |_, _, cx| refresh.update(cx, |p, cx| p.refresh_devices(cx)))),
+    );
+    if devices.is_empty() {
+        page = page.child(empty_list("No phones yet.", &ui));
+    }
+    for device in devices {
+        let (m, id) = (model.clone(), device.id.clone());
+        page = page.child(
+            list_row(&ui).child(
+                row_line()
+                    .child(row_title(device.label.clone()))
+                    .child(row_meta(format!("paired {}", chrono::DateTime::from_timestamp(device.created as i64, 0).map(|d| d.format("%b %-d").to_string()).unwrap_or_default()), &ui))
+                    .child(div().flex_1())
+                    .child(Button::new(SharedString::from(format!("phone-revoke-{id}"))).ghost().small().label("Remove").on_click(move |_, _, cx| {
+                        m.update(cx, |p, cx| p.revoke(id.clone(), cx));
+                    })),
+            ),
+        );
+    }
+    page.into_any_element()
 }
 
 // ── Worktrees ───────────────────────────────────────────────────────────

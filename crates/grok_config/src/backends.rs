@@ -222,18 +222,40 @@ pub fn resolve_backend(b: Backend, cfg: &GrokConfig) -> Result<ResolvedBackend> 
         if let Ok(npx) = which("npx") {
             let pkg = desc.npx_packages[0];
             // A bare package name makes npx reuse whatever it cached first, forever, so new
-            // models the adapters learn about never appear. Ask for the current release each
-            // launch; npx still falls back to its cache when offline.
+            // models the adapters learn about never appear. Ask for the current release once a
+            // day; other launches start from the cache instead of waiting on the registry, and
+            // rarely overlap an update (two at once can leave npx's cache broken).
+            let freshness = if npx_check_due(pkg) { "--prefer-online" } else { "--prefer-offline" };
             return Ok(ResolvedBackend {
                 backend: b,
                 program: npx,
-                args: vec!["--yes".into(), "--prefer-online".into(), format!("{pkg}@latest")],
+                args: vec!["--yes".into(), freshness.into(), format!("{pkg}@latest")],
                 via: LaunchVia::Npx,
             });
         }
     }
 
     Err(ConfigError::BackendNotFound(desc.display_name))
+}
+
+/// How often an npx adapter is checked for a new release.
+const NPX_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// True when `pkg` wasn't checked online in the last day, and marks it checked now.
+fn npx_check_due(pkg: &str) -> bool {
+    let Some(dir) = crate::paths::bomb_home().map(|h| h.join("cache").join("npx")) else { return true };
+    let stamp = dir.join(pkg.replace(['/', '@'], "_"));
+    let fresh = std::fs::metadata(&stamp)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|at| at.elapsed().ok())
+        .is_some_and(|age| age < NPX_CHECK_EVERY);
+    if fresh {
+        return false;
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(&stamp, b"");
+    true
 }
 
 fn candidate_paths(name: &str) -> Vec<PathBuf> {

@@ -126,6 +126,11 @@ pub struct ClientCapabilities {
     pub fs: FsCapabilities,
     #[serde(default)]
     pub terminal: bool,
+    /// Draft ACP subagent sessions: present (as `{}`) when this client shows each subagent as its
+    /// own session (`subagent_spawned`, the child's updates under its own sessionId, then
+    /// `subagent_state_update`). Without it, adapters fold subagent work into the parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagents: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

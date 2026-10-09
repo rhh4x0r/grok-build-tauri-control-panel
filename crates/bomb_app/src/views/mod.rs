@@ -5,6 +5,7 @@ pub mod meter;
 pub mod motion;
 pub mod palette;
 pub mod preview;
+pub mod read_aloud;
 pub mod root;
 pub mod settings;
 pub mod sidebar;

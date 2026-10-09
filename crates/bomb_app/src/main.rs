@@ -2,6 +2,8 @@
 
 mod actions;
 mod core_router;
+mod dictation;
+mod speech;
 mod models;
 mod remote;
 mod runtime;
@@ -41,6 +43,11 @@ impl AssetSource for Assets {
 }
 
 fn main() {
+    // A thread's agent runs this app as its `bomb` MCP server: protocol only, no logging, no UI.
+    if std::env::args().any(|a| a == "--bomb-mcp") {
+        bomb_core::helpers_mcp::run_stdio();
+        return;
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -60,6 +67,13 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // Threads' agents start helpers on other agents through this.
+    rt.spawn({
+        let state = state.clone();
+        async move {
+            if let Err(e) = bomb_core::helpers::serve(state).await { tracing::warn!(error = %e, "helpers unavailable"); }
+        }
+    });
     if std::env::var("BOMB_SMOKE").ok().as_deref() == Some("1") {
         std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_secs(35));
@@ -82,6 +96,12 @@ fn main() {
         let model = cx.new(models::app::AppModel::new);
         runtime::start_bridge(cx, model.downgrade());
         model.update(cx, |m, cx| m.load_servers(cx));
+        let phone = cx.new(|_| models::phone::PhoneModel::default());
+        phone.update(cx, |p, cx| p.load(cx));
+        cx.set_global(models::phone::PhoneHandle(phone));
+        let read_aloud = cx.new(|_| models::read_aloud::ReadAloud::default());
+        read_aloud.update(cx, |r, cx| r.load(cx));
+        cx.set_global(models::read_aloud::ReadAloudHandle(read_aloud));
         cx.set_global(models::app::AppModelHandle(model.clone()));
         views::root::open_main_window(model.clone(), cx);
         smoke::maybe_run(model, cx);

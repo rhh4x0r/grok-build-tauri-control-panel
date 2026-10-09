@@ -551,6 +551,8 @@ pub(super) fn to_thread(
         last_activity: p.last,
         label,
         brain_mode: BrainMode::default(),
+        parent_thread: None,
+        subagent: None,
     };
     let rec = SessionRecord {
         id,

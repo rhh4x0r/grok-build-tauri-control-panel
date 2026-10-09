@@ -4,6 +4,7 @@
 
 use crate::views::button::Button;
 use crate::models::app::AppModelHandle;
+use bomb_core::summary::{activity_label, running_label, tool_kind};
 use bomb_core::transcript::{ApprovalCard, Body, Entry, PlanDoc, Role, ToolRow};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::ButtonVariants;
@@ -158,10 +159,17 @@ impl TranscriptView {
             let entries: Vec<Entry> = t.thread.entries.clone();
             let cwd = std::path::PathBuf::from(&t.meta.cwd);
             let project_root = t.meta.project_root.clone().map(std::path::PathBuf::from);
-            let last_agent = entries
-                .iter()
-                .rposition(|e| e.role == Role::Agent && e.images.is_empty())
-                .map(|i| entries[i].id);
+            // The reply that closes each turn (its last text before the next prompt) gets the footer.
+            let mut turn_final: std::collections::HashSet<u64> = std::collections::HashSet::new();
+            let mut pending = None;
+            for e in entries.iter() {
+                if e.role == Role::You {
+                    turn_final.extend(pending.take());
+                } else if e.role == Role::Agent && e.images.is_empty() && matches!(&e.body, Body::Text(_)) {
+                    pending = Some(e.id);
+                }
+            }
+            turn_final.extend(pending);
             let mut rows: Vec<Row> = Vec::with_capacity(entries.len());
             let turn_start = entries
                 .iter()
@@ -264,7 +272,7 @@ impl TranscriptView {
                             streaming: e.streaming,
                             images,
                             attached,
-                            last: last_agent == Some(e.id),
+                            last: turn_final.contains(&e.id),
                             at: e
                                 .at
                                 .with_timezone(&chrono::Local)
@@ -440,6 +448,14 @@ impl TranscriptView {
                         .whitespace_normal()
                         .child(text.to_string()),
                 )
+                .child(
+                    // Copy your own prompt, like a reply.
+                    div().text_color(ui.text_faint).child(
+                        gpui_kit::component::clipboard::Clipboard::new(("copy-prompt", id))
+                            .value(SharedString::from(text.to_string()))
+                            .tooltip("Copy"),
+                    ),
+                )
             });
         self.enter("user", id, bubble)
     }
@@ -548,6 +564,7 @@ impl TranscriptView {
             })
             .when(last && !streaming, |el| {
                 let hover = ui.hover;
+                let speaker = read_aloud_button(&self.thread, id, raw, ui, cx);
                 let text_for_copy: SharedString = bomb_foundry::presentation::stage_prose(raw).to_string().into();
                 let text_for_mem = text_for_copy.clone();
                 let action = |id: &'static str, label: &'static str| {
@@ -568,18 +585,19 @@ impl TranscriptView {
                         .text_size(px(crate::theme::Type::SMALL))
                         .text_color(ui.text_faint)
                         .child(at.to_string())
-                        .child(action("copy-reply", "Copy").on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                text_for_copy.to_string(),
-                            ));
-                        }))
+                        .child(
+                            gpui_kit::component::clipboard::Clipboard::new(("copy-reply", id))
+                                .value(text_for_copy.clone())
+                                .tooltip("Copy"),
+                        )
                         .child(
                             action("remember-reply", "Remember").on_click(move |_, _, cx| {
                                 let app = cx.global::<AppModelHandle>().0.clone();
                                 let t = text_for_mem.to_string();
                                 app.update(cx, |m, cx| m.remember(t, cx));
                             }),
-                        ),
+                        )
+                        .children(speaker),
                 )
             });
         if raw.contains("<foundry-result>") && !streaming {
@@ -1341,6 +1359,17 @@ impl Render for TranscriptView {
                 .collect(),
             None => Vec::new(),
         };
+        // The read-aloud player asked to show the message it's reading.
+        let reading = crate::models::read_aloud::read_aloud(cx);
+        if let Some((thread, entry)) = reading.read(cx).reveal {
+            if self.thread.read(cx).meta.id == thread.to_string() {
+                if let Some(ix) = self.rows.iter().position(|r| matches!(r, Row::Agent { id, .. } if *id == entry)) {
+                    self.list.pause_following_tail();
+                    self.list.scroll_to_reveal_item(ix);
+                }
+                reading.update(cx, |r, _| r.reveal = None);
+            }
+        }
         let active_match = self.search.as_ref().and_then(|(_, ix)| self.matches.get(*ix).copied());
         if let Some(target) = active_match {
             if self.scrolled_to != Some(target) {
@@ -2070,35 +2099,6 @@ fn respond_button(
     .into_any_element()
 }
 
-fn tool_kind(name: &str) -> &'static str {
-    let n = name.to_ascii_lowercase();
-    if ["bash", "shell", "terminal", "exec", "command"]
-        .iter()
-        .any(|k| n.contains(k))
-    {
-        "command"
-    } else if ["edit", "write", "patch", "create", "apply"]
-        .iter()
-        .any(|k| n.contains(k))
-    {
-        "edit"
-    } else if [
-        "read", "glob", "grep", "search", "ls", "list", "find", "cat", "view",
-    ]
-    .iter()
-    .any(|k| n.contains(k))
-    {
-        "read"
-    } else if ["fetch", "web", "http", "browse"]
-        .iter()
-        .any(|k| n.contains(k))
-    {
-        "web"
-    } else {
-        "other"
-    }
-}
-
 fn tool_icon(name: &str) -> Lucide {
     match tool_kind(name) {
         "command" => Lucide::Terminal,
@@ -2132,77 +2132,9 @@ fn activity_summary(items: &[Activity]) -> String {
             _ => None,
         })
         .collect();
-    let base = tool_group_summary(rows.into_iter());
-    match (base.is_empty(), thoughts) {
-        (_, 0) => base,
-        (true, 1) => "Thought".into(),
-        (true, n) => format!("Thought {n} times"),
-        (false, 1) => format!("Thought · {base}"),
-        (false, n) => format!("Thought {n} times · {base}"),
-    }
+    activity_label(thoughts, rows.into_iter())
 }
 
-/// "Ran 2 commands · Edited 1 file · Read 3 files"
-/// A running step in a few words: "Running `npm test`", "Editing src/app.ts", "Reading 3 files…".
-fn running_label(row: &ToolRow) -> String {
-    let first = row.args.lines().next().unwrap_or_default().trim();
-    // Arguments often arrive as JSON; pull out the part a person would recognise.
-    let detail = serde_json::from_str::<serde_json::Value>(&row.args).ok().and_then(|v| {
-        ["command", "file_path", "path", "url", "pattern", "query"].iter().find_map(|k| v.get(*k).and_then(|x| x.as_str()).map(str::to_owned))
-    }).unwrap_or_else(|| first.to_string());
-    let detail: String = detail.lines().next().unwrap_or_default().chars().take(80).collect();
-    let verb = match tool_kind(&row.name) { "command" => "Running", "edit" => "Editing", "read" => "Reading", "web" => "Fetching", _ => "Working on" };
-    match (detail.is_empty(), tool_kind(&row.name)) {
-        (true, "command") => "Running a command".into(),
-        (true, _) => format!("{verb} {}", if row.name.is_empty() || row.name == "tool" { "a step" } else { row.name.as_str() }),
-        (false, "command") => format!("{verb} `{detail}`"),
-        (false, _) => format!("{verb} {detail}"),
-    }
-}
-
-pub fn tool_group_summary<'a>(rows: impl Iterator<Item = &'a ToolRow>) -> String {
-    let (mut cmd, mut edit, mut read, mut web, mut other) = (0, 0, 0, 0, 0);
-    let mut last_name = String::new();
-    for r in rows {
-        last_name = r.name.clone();
-        match tool_kind(&r.name) {
-            "command" => cmd += 1,
-            "edit" => edit += 1,
-            "read" => read += 1,
-            "web" => web += 1,
-            _ => other += 1,
-        }
-    }
-    let mut parts = Vec::new();
-    if cmd > 0 {
-        parts.push(format!("Ran {cmd} command{}", plural(cmd)));
-    }
-    if edit > 0 {
-        parts.push(format!("Edited {edit} file{}", plural(edit)));
-    }
-    if read > 0 {
-        parts.push(format!("Read {read} file{}", plural(read)));
-    }
-    if web > 0 {
-        parts.push(format!("Fetched {web} page{}", plural(web)));
-    }
-    if other > 0 {
-        if parts.is_empty() && other == 1 && !last_name.is_empty() && last_name != "tool" {
-            parts.push(last_name);
-        } else {
-            parts.push(format!("{other} other tool call{}", plural(other)));
-        }
-    }
-    parts.join(" · ")
-}
-
-fn plural(n: usize) -> &'static str {
-    if n == 1 {
-        ""
-    } else {
-        "s"
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -2232,8 +2164,8 @@ mod tests {
         assert_eq!(super::running_label(&row("terminal", "")), "Running a command");
         assert_eq!(super::running_label(&row("tool", "")), "Working on a step");
         // A lone unnamed step no longer renders as the bare word "tool".
-        assert_eq!(super::tool_group_summary([row("tool", "")].iter()), "1 other tool call");
-        assert_eq!(super::tool_group_summary([row("Task", "")].iter()), "Task");
+        assert_eq!(bomb_core::summary::tool_group_summary([row("tool", "")].iter()), "1 other tool call");
+        assert_eq!(bomb_core::summary::tool_group_summary([row("Task", "")].iter()), "Task");
     }
 
     #[test]
@@ -2253,7 +2185,8 @@ mod tests {
         assert_eq!(a("plain text", false), "plain text");
     }
     // No glob import: `gpui_kit::*` carries a `test` macro that shadows `#[test]`.
-    use super::{tool_group_summary, ToolRow};
+    use super::ToolRow;
+    use bomb_core::summary::tool_group_summary;
 
     fn row(name: &str) -> ToolRow {
         ToolRow {
@@ -2437,4 +2370,35 @@ mod model_switch_tests {
         assert_eq!(switch_identity(to), ("codex", "gpt-6-astra"));
         assert!(switch_parts("An ordinary message").is_none());
     }
+}
+
+/// Read a reply aloud, or stop it; shows that it's playing while it is. Hidden where the Mac can't
+/// read aloud.
+fn read_aloud_button(thread: &Entity<crate::models::thread::ThreadModel>, entry: u64, raw: &str, ui: &Ui, cx: &App) -> Option<AnyElement> {
+    let model = crate::models::read_aloud::read_aloud(cx);
+    if !model.read(cx).available {
+        return None;
+    }
+    let thread_id = uuid::Uuid::parse_str(&thread.read(cx).meta.id).ok()?;
+    let playing = model.read(cx).playing.as_ref().is_some_and(|p| p.thread == thread_id && p.entry == entry);
+    let text = raw.to_string();
+    let title = bomb_core::transcript_speech::speakable_sentences(raw).into_iter().next().unwrap_or_default();
+    let hover = ui.hover;
+    let icon = div()
+        .size(px(14.))
+        .text_color(if playing { ui.accent } else { ui.text_faint })
+        .child(Icon::from(if playing { Lucide::AudioLines } else { Lucide::Volume2 }));
+    Some(
+        div()
+            .id(("read-aloud", entry))
+            .px_1p5()
+            .py(px(2.))
+            .rounded(px(4.))
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover))
+            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(if playing { "Stop reading" } else { "Read aloud" }).build(window, cx))
+            .on_click(move |_, _, cx| model.update(cx, |m, cx| m.toggle(thread_id, entry, &text, title.clone(), cx)))
+            .child(if playing { super::motion::breathe(("reading", entry), 0.9, icon).into_any_element() } else { icon.into_any_element() })
+            .into_any_element(),
+    )
 }

@@ -1,5 +1,6 @@
 //! One person's core, served over a Unix socket.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -90,16 +91,22 @@ where
     });
     let events_out = out.clone();
     let journal = state.journal.clone();
-    let streamer = tokio::spawn(async move {
-        let mut events = attached.events;
-        for (seq, event) in attached.backlog {
-            if events_out.send(event_frame(seq, &event)).await.is_err() { return; }
+    // Threads this client has open (`watch`); until it says, it gets everything, as a Mac does.
+    let watching: Arc<std::sync::RwLock<Option<HashSet<uuid::Uuid>>>> = Default::default();
+    let streamer = tokio::spawn({
+        let watching = watching.clone();
+        async move {
+            let mut events = attached.events;
+            let wanted = |event: &bomb_core::ControlEvent| bomb_core::journal::reaches(event, watching.read().unwrap_or_else(|e| e.into_inner()).as_ref());
+            for (seq, event) in attached.backlog {
+                if wanted(&event) && events_out.send(event_frame(seq, &event)).await.is_err() { return; }
+            }
+            while let Some((seq, event)) = events.recv().await {
+                if wanted(&event) && events_out.send(event_frame(seq, &event)).await.is_err() { return; }
+            }
+            // The journal dropped us for falling behind: tell the client to start over.
+            let _ = events_out.send(Frame::Message(Message::Resync { seq: journal.seq() })).await;
         }
-        while let Some((seq, event)) = events.recv().await {
-            if events_out.send(event_frame(seq, &event)).await.is_err() { return; }
-        }
-        // The journal dropped us for falling behind: tell the client to start over.
-        let _ = events_out.send(Frame::Message(Message::Resync { seq: journal.seq() })).await;
     });
 
     // Files a client is sending, by stream id. They live in a private folder and are removed after use.
@@ -146,6 +153,16 @@ where
             Frame::Message(_) => continue,
         };
         // These change what this connection has open, so they are answered here, in order.
+        if method == "watch" {
+            // Snapshot a thread after watching it: its streamed events above the snapshot's `as_of` will arrive.
+            let result = watch_list(&params).map(|threads| {
+                *watching.write().unwrap_or_else(|e| e.into_inner()) = threads;
+                serde_json::json!({ "seq": state.journal.seq() })
+            });
+            let (ok, error) = match result { Ok(value) => (Some(value), None), Err(error) => (None, Some(error)) };
+            let _ = out.send(Frame::Message(Message::Response { id, ok, error })).await;
+            continue;
+        }
         if matches!(method.as_str(), "terminal_open" | "terminal_resize" | "forward_open") {
             let result = open_live(&state, &method, &params, &mut live, &out).await;
             let (ok, error) = match result { Ok(value) => (Some(value), None), Err(error) => (None, Some(error)) };
@@ -189,6 +206,17 @@ where
     drop(out);
     let _ = writer.await;
     Ok(())
+}
+
+/// `threads`: the ids a client has open, or null to receive every thread's events again.
+fn watch_list(params: &serde_json::Value) -> Result<Option<HashSet<uuid::Uuid>>, String> {
+    match params.get("threads") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(list) => {
+            let ids: Vec<String> = serde_json::from_value(list.clone()).map_err(|e| format!("bad `threads`: {e}"))?;
+            ids.iter().map(|id| uuid::Uuid::parse_str(id).map_err(|e| format!("bad thread id `{id}`: {e}"))).collect::<Result<_, _>>().map(Some)
+        }
+    }
 }
 
 fn event_frame(seq: u64, event: &bomb_core::ControlEvent) -> Frame {

@@ -106,6 +106,8 @@ pub struct Presence {
     pub last_tool_status: Option<String>,
     /// Short free-text detail (last tool args, approval summary, error).
     pub note: String,
+    /// The prompt is waiting for its thread's agent to start (a thread asleep since a restart).
+    pub waking: bool,
 }
 
 /// Incremental patch applied together with a phase signal.
@@ -142,6 +144,9 @@ impl Presence {
     /// patches land first, tools stay sticky while in flight, and terminal
     /// phases are always accepted; anything else only advances by rank.
     pub fn signal(&mut self, phase: Phase, patch: Patch, now: Instant) {
+        if phase != Phase::Send {
+            self.waking = false;
+        }
         if self.started_at.is_none() && phase != Phase::Idle && phase != Phase::Done {
             self.started_at = Some(now);
         }
@@ -367,6 +372,7 @@ impl Presence {
             },
             Phase::Reply => "Writing".into(),
             Phase::Think => "Thinking".into(),
+            Phase::Send if self.waking => "Starting the agent".into(),
             Phase::Send => "Sent".into(),
             Phase::Done => "Done".into(),
             Phase::Error => "Failed".into(),

@@ -11,7 +11,7 @@ mod transport;
 
 pub use client::{
     AcpClient, AcpClientConfig, ApprovalMode, BrainMode, ConnectOpts,
-    SpawnOptions as AcpSpawnOptions, ToolClass,
+    SpawnOptions as AcpSpawnOptions, ToolClass, subagent_thread_id,
 };
 pub use error::{AcpError, Result};
 pub use messages::{

@@ -31,6 +31,10 @@ sha2.workspace = true
 hex.workspace = true
 bomb_link = { path = "../bomb_link" }
 bomb_proto = { path = "../bomb_proto" }
+# Hosts this Mac's own gateway so a paired phone can reach its threads (Settings → Phone).
+bomb_server = { path = "../bomb_server" }
+libc = "0.2"
+qrcode = { version = "0.14", default-features = false }
 serde_json.workspace = true
 tokio.workspace = true
 futures.workspace = true
@@ -40,6 +44,6 @@ uuid.workspace = true
 vt100 = "0.16"
 
 [dev-dependencies]
-bomb_server = { path = "../bomb_server" }
+bomb_mobile = { path = "../bomb_mobile" }
 tempfile.workspace = true
 

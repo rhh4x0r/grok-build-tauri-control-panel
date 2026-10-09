@@ -174,6 +174,38 @@ pub struct PlanStep {
 // permanently loses transcript rows, so keep generous headroom.
 const DEFAULT_CAPACITY: usize = 8192;
 
+impl ControlEvent {
+    /// The session this event belongs to, if any.
+    pub fn session_id(&self) -> Option<Uuid> {
+        match self {
+            ControlEvent::SessionCreated { session_id, .. }
+            | ControlEvent::SessionStatusChanged { session_id, .. }
+            | ControlEvent::SessionCancelled { session_id, .. }
+            | ControlEvent::SessionCompleted { session_id, .. }
+            | ControlEvent::ToolCall { session_id, .. }
+            | ControlEvent::PlanUpdate { session_id, .. }
+            | ControlEvent::AgentMessage { session_id, .. }
+            | ControlEvent::ApprovalRequired { session_id, .. }
+            | ControlEvent::ApprovalResolved { session_id, .. }
+            | ControlEvent::UserMessage { session_id, .. } => Some(*session_id),
+            ControlEvent::Error { session_id, .. } | ControlEvent::Raw { session_id, .. } => *session_id,
+            ControlEvent::SchedulerJob { .. } | ControlEvent::McpChanged { .. } | ControlEvent::MemoryUpdated { .. } => None,
+        }
+    }
+}
+
+/// One saved transcript row, as stored by `grok_persistence` and sent to
+/// remote clients in a thread snapshot. Lives here so clients that never open
+/// the database (the iOS companion) can share the type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptEntry {
+    pub role: String,
+    pub body: String,
+    pub at: String,
+    pub seq: u64,
+}
+
 #[derive(Debug)]
 pub struct EventBus {
     tx: broadcast::Sender<ControlEvent>,

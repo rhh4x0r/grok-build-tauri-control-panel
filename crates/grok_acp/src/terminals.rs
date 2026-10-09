@@ -437,7 +437,7 @@ impl TerminalRegistry {
                     format!("{cmd} {args}")
                 };
                 let short = if full.len() > 100 {
-                    format!("{}…", &full[..100])
+                    format!("{}…", full.char_indices().take_while(|(i, _)| *i < 100).map(|(_, c)| c).collect::<String>())
                 } else {
                     full
                 };

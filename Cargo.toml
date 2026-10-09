@@ -17,6 +17,8 @@ members = [
     "crates/bomb_foundry",
     "crates/bomb_proto",
     "crates/bomb_link",
+    "crates/bomb_transcript",
+    "crates/bomb_mobile",
     "crates/bomb_core",
     "crates/bomb_server",
     "crates/bomb_app",
@@ -47,7 +49,7 @@ toml = "0.8"
 toml_edit = "0.22"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 which = "7"
 url = "2"
 bytes = "1"

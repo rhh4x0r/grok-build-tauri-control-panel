@@ -27,6 +27,8 @@ pub struct ThreadView {
     transcript: Option<(String, Entity<TranscriptView>)>,
     composer: Entity<ComposerView>,
     review_loop: Entity<super::review_loop::ReviewLoopView>,
+    /// The read-aloud player, shown while a reply in this thread is being read.
+    player: Entity<super::read_aloud::PlayerBar>,
     search_open: bool,
     terminals: std::collections::HashMap<String, Entity<super::terminal::TerminalPanel>>,
     terminals_open: std::collections::HashSet<String>,
@@ -57,11 +59,15 @@ impl ThreadView {
             _ => {}
         })
         .detach();
+        let read_aloud = crate::models::read_aloud::read_aloud(cx);
+        cx.observe(&read_aloud, |_, _, cx| cx.notify()).detach();
+        let player = cx.new(|cx| super::read_aloud::PlayerBar::new(read_aloud, cx));
         let mut this = Self {
             model,
             transcript: None,
             composer,
             review_loop,
+            player,
             search_open: false,
             terminals: std::collections::HashMap::new(),
             terminals_open: std::collections::HashSet::new(),
@@ -781,7 +787,12 @@ impl Render for ThreadView {
                     ),
             )
             .when(!crate::runtime::services(cx).foundry.for_thread(&tid).is_some_and(|r| matches!(r.status,bomb_foundry::RunStatus::Completed|bomb_foundry::RunStatus::Stopped)), |el|el.child(self.review_loop.clone()))
-            .child(composer)
+            .when(crate::models::read_aloud::read_aloud(cx).read(cx).playing.as_ref().is_some_and(|p| p.thread.to_string() == tid), |el| el.child(self.player.clone()))
+            .map(|el| match subagent_banner(&self.model, &tid, &ui, cx) {
+                // A subagent takes no messages: say whose it is, and offer the way back.
+                Some(banner) => el.child(banner),
+                None => el.child(composer),
+            })
             .when(self.terminals_open.contains(&tid), |el| {
                 if let Some(panel) = self.terminals.get(&tid) {
                     el.child(
@@ -807,4 +818,52 @@ impl Render for ThreadView {
             })
             .into_any_element()
     }
+}
+
+/// In place of the composer when a subagent is open: whose subagent it is, its task, and the way
+/// back to the thread that started it.
+fn subagent_banner(model: &Entity<AppModel>, tid: &str, ui: &Ui, cx: &App) -> Option<AnyElement> {
+    let id = uuid::Uuid::parse_str(tid).ok()?;
+    let m = model.read(cx);
+    let parent = *m.subagent_of.get(&id)?;
+    let info = m.subagents.get(&parent).and_then(|l| l.iter().find(|s| s.id == tid)).cloned();
+    let parent_title = m.threads.get(&parent).map(|t| t.read(cx).title()).unwrap_or_else(|| "its thread".into());
+    let state = match info.as_ref().map(|i| i.state.as_str()) {
+        Some("running") => "Working",
+        Some("completed") => "Finished",
+        Some("cancelled") => "Stopped",
+        Some(_) => "Failed",
+        None => "",
+    };
+    let back = model.clone();
+    Some(
+        div()
+            .mx(px(16.))
+            .mb(px(12.))
+            .p(px(14.))
+            .rounded(px(16.))
+            .border_1()
+            .border_color(ui.border)
+            .bg(ui.glass)
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(format!("Subagent of “{parent_title}” · {state}")))
+                    .when_some(info.map(|i| i.task).filter(|t| !t.is_empty()), |el, task| {
+                        el.child(div().text_size(px(crate::theme::Type::BODY)).text_color(ui.text).overflow_hidden().text_ellipsis().whitespace_nowrap().child(task))
+                    }),
+            )
+            .child(
+                Button::new("subagent-back").outline().small().icon(Lucide::ArrowLeft).label("Back to thread")
+                    .on_click(move |_, _, cx| back.update(cx, |m, cx| m.select(Some(parent), cx))),
+            )
+            .into_any_element(),
+    )
 }

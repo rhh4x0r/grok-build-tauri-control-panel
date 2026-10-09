@@ -35,6 +35,13 @@ fn owner_name() -> String {
     std::env::var("USER").ok().filter(|u| bomb_server::gateway::valid_user_name(u)).unwrap_or_else(|| "owner".into())
 }
 
+/// Threads' agents start helpers on other agents through this.
+async fn serve_helpers(state: Arc<bomb_core::AppState>) {
+    if let Err(e) = bomb_core::helpers::serve(state).await {
+        tracing::warn!(error = %e, "helpers unavailable");
+    }
+}
+
 async fn until_stopped() {
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("signal handler");
     tokio::select! { _ = term.recv() => {}, _ = tokio::signal::ctrl_c() => {} }
@@ -42,12 +49,18 @@ async fn until_stopped() {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // A thread's agent runs this as its `bomb` MCP server: protocol only on stdout.
+    if std::env::args().any(|a| a == "--bomb-mcp") {
+        bomb_core::helpers_mcp::run_stdio();
+        return Ok(());
+    }
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into())).init();
     let args = Args(std::env::args().skip(1).collect());
     match args.0.first().map(String::as_str) {
         Some("core") => {
             let socket = PathBuf::from(args.required("--socket"));
             let state = Arc::new(bomb_core::AppState::initialize().await?);
+            tokio::spawn(serve_helpers(state.clone()));
             bomb_server::core::serve(state.clone(), &socket, until_stopped()).await?;
             // Stop agents cleanly and flush history before exiting.
             let _ = bomb_core::services::shutdown_all(&state).await;
@@ -74,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
                 println!("\nPair your Mac with this link (works once, for 10 minutes):\n\n  {}\n", gateway.create_invite(&owner).map_err(anyhow::Error::msg)?);
             }
             let state = Arc::new(bomb_core::AppState::initialize().await?);
+            tokio::spawn(serve_helpers(state.clone()));
             let listener = tokio::net::TcpListener::bind(args.required("--listen")).await?;
             let (stop_core, core_stopped) = tokio::sync::oneshot::channel::<()>();
             let core = tokio::spawn({

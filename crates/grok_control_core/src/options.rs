@@ -55,6 +55,9 @@ pub struct SpawnOptions {
     /// Reasoning effort (low | medium | high) for backends that take one;
     /// Grok passes it as `--reasoning-effort` to `grok agent stdio`.
     pub effort: Option<String>,
+    /// Set for a helper: the thread that started it, and what it is (see `SessionMetadata`).
+    pub parent_thread: Option<String>,
+    pub subagent: Option<serde_json::Value>,
 }
 
 impl Default for SpawnOptions {
@@ -88,6 +91,8 @@ impl Default for SpawnOptions {
             source_thread: None,
             project_root: None,
             effort: None,
+            parent_thread: None,
+            subagent: None,
         }
     }
 }

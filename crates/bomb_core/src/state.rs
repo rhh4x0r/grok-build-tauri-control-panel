@@ -41,6 +41,8 @@ pub struct AppState {
     pub dev_server: Arc<DevServerManager>,
     pub login: Arc<LoginManager>,
     pub explainer: Arc<ExplainerService>,
+    /// Helpers on any agent, started by threads' agents (see `helpers`).
+    pub helpers: Arc<crate::helpers::Helpers>,
 }
 
 impl AppState {
@@ -312,6 +314,7 @@ impl AppState {
             dev_server,
             login,
             explainer,
+            helpers: Arc::new(Default::default()),
         })
     }
 }

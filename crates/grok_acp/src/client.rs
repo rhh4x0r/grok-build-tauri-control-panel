@@ -200,6 +200,231 @@ struct PendingPermission {
     options: Vec<PermissionOptionInfo>,
 }
 
+/// The thread id of a subagent: the same child session always maps to the same thread.
+pub fn subagent_thread_id(parent: Uuid, child_session: &str) -> Uuid {
+    Uuid::new_v5(&parent, child_session.as_bytes())
+}
+
+impl AcpClient {
+    /// `subagent_spawned` and `subagent_state_update` (draft ACP). A subagent becomes a thread of
+    /// its own, linked to its parent; the parent shows it as a "Subagent" step that runs until the
+    /// subagent ends. Returns true when the update was one of these.
+    async fn note_subagent(&self, bus: &EventBus, parent: Uuid, params: &Value) -> bool {
+        let update = params.get("update").unwrap_or(params);
+        let kind = update.get("sessionUpdate").and_then(Value::as_str).unwrap_or_default();
+        if !matches!(kind, "subagent_spawned" | "subagent_state_update") {
+            return false;
+        }
+        let Some(child_session) = update.get("subagentSessionId").and_then(Value::as_str) else { return true };
+        // A nested subagent is announced on its parent subagent's session.
+        let owner = params.get("sessionId").and_then(Value::as_str)
+            .and_then(|s| self.subagents.lock().unwrap_or_else(|e| e.into_inner()).get(s).copied())
+            .unwrap_or(parent);
+        let text = |key: &str| update.get(key).and_then(Value::as_str).unwrap_or_default().trim().to_string();
+        if kind == "subagent_spawned" {
+            let model = update.pointer("/_meta/model").and_then(Value::as_str).map(String::from);
+            self.subagent_started(bus, parent, owner, child_session, &text("name"), &text("task"), update.get("prompt").and_then(Value::as_str), model.as_deref()).await;
+        } else {
+            self.subagent_ended(bus, parent, owner, child_session, &text("state")).await;
+        }
+        true
+    }
+
+    /// A subagent became a thread of its own; its parent shows it as a running "Subagent" step.
+    #[allow(clippy::too_many_arguments)]
+    async fn subagent_started(&self, bus: &EventBus, parent: Uuid, owner: Uuid, child_session: &str, name: &str, task: &str, prompt: Option<&str>, model: Option<&str>) {
+        let child = subagent_thread_id(parent, child_session);
+        self.subagents.lock().unwrap_or_else(|e| e.into_inner()).insert(child_session.to_string(), child);
+        let name = if name.is_empty() { "Subagent" } else { name };
+        info!(%child, name, "subagent started");
+        bus.emit(ControlEvent::Raw {
+            session_id: Some(owner),
+            payload: json!({ "channel": "subagent", "kind": "spawned", "child": child, "name": name, "task": task, "prompt": prompt, "model": model }),
+        });
+        bus.emit_tool_call(owner, ToolCallEvent {
+            id: child.to_string(),
+            tool: format!("Subagent · {name}"),
+            args_summary: task.to_string(),
+            status: ToolCallStatus::Running,
+            result_summary: None,
+            at: Utc::now(),
+        });
+        bus.emit_status(child, SessionStatus::Running).await;
+    }
+
+    /// A subagent ended: completed, failed or cancelled.
+    async fn subagent_ended(&self, bus: &EventBus, parent: Uuid, owner: Uuid, child_session: &str, state: &str) {
+        let child = subagent_thread_id(parent, child_session);
+        info!(%child, state, "subagent ended");
+        let (tool_status, status) = match state {
+            "completed" => (ToolCallStatus::Completed, SessionStatus::Completed),
+            "cancelled" => (ToolCallStatus::Failed, SessionStatus::Cancelled),
+            _ => (ToolCallStatus::Failed, SessionStatus::Failed),
+        };
+        bus.emit(ControlEvent::Raw {
+            session_id: Some(owner),
+            payload: json!({ "channel": "subagent", "kind": "state", "child": child, "state": state }),
+        });
+        bus.emit_tool_call(owner, ToolCallEvent {
+            id: child.to_string(),
+            tool: "tool".into(),
+            args_summary: String::new(),
+            status: tool_status,
+            result_summary: Some(state.to_string()),
+            at: Utc::now(),
+        });
+        bus.emit_status(child, status).await;
+    }
+
+    /// Grok announces its subagents through its own notification (`_x.ai/session_notification`):
+    /// `subagent_spawned` with the child session and model, then `subagent_progress` with tokens.
+    async fn note_grok_subagent(&self, bus: &EventBus, parent: Uuid, params: &Value) {
+        let update = params.get("update").unwrap_or(params);
+        let kind = update.get("sessionUpdate").and_then(Value::as_str).unwrap_or_default();
+        let Some(child_session) = update.get("child_session_id").or_else(|| update.get("subagent_id")).and_then(Value::as_str) else { return };
+        match kind {
+            "subagent_spawned" => {
+                let description = update.get("description").and_then(Value::as_str).unwrap_or_default().trim().to_string();
+                let model = update.get("model").and_then(Value::as_str);
+                // The oldest waiting `spawn_subagent` call is this subagent's.
+                let prompt = {
+                    let mut spawns = self.grok_spawns.lock().unwrap_or_else(|e| e.into_inner());
+                    let next = spawns.waiting.pop_front();
+                    if let Some((tool_id, _)) = &next { spawns.children.insert(tool_id.clone(), child_session.to_string()); }
+                    next.map(|(_, prompt)| prompt)
+                };
+                self.subagent_started(bus, parent, parent, child_session, &description, &description, prompt.as_deref(), model).await;
+            }
+            "subagent_progress" => {
+                if let Some(tokens) = update.get("tokens_used").and_then(Value::as_u64) {
+                    let child = subagent_thread_id(parent, child_session);
+                    bus.emit(ControlEvent::Raw { session_id: Some(parent), payload: json!({ "channel": "subagent", "kind": "usage", "child": child, "tokens": tokens }) });
+                }
+            }
+            k if k.starts_with("subagent_") && (k.contains("complet") || k.contains("finish") || k.contains("fail") || k.contains("cancel") || k.contains("stop")) => {
+                let state = if k.contains("fail") { "failed" } else if k.contains("cancel") || k.contains("stop") { "cancelled" } else { "completed" };
+                self.subagent_ended(bus, parent, parent, child_session, state).await;
+            }
+            _ => {}
+        }
+    }
+
+    /// Grok's `spawn_subagent` call in the parent: held back (the subagent shows as its own step),
+    /// its prompt kept for the subagent's transcript, and its end ending the subagent.
+    async fn note_grok_spawn_call(&self, bus: &EventBus, parent: Uuid, params: &Value) -> bool {
+        let update = params.get("update").unwrap_or(params);
+        let kind = update.get("sessionUpdate").and_then(Value::as_str).unwrap_or_default();
+        let Some(tool_id) = update.get("toolCallId").and_then(Value::as_str) else { return false };
+        match kind {
+            "tool_call" => {
+                let spawn = update.pointer("/_meta/x.ai~1tool/name").and_then(Value::as_str) == Some("spawn_subagent")
+                    || update.get("title").and_then(Value::as_str) == Some("spawn_subagent");
+                if !spawn { return false; }
+                let prompt = update.pointer("/rawInput/prompt").and_then(Value::as_str).unwrap_or_default().to_string();
+                self.grok_spawns.lock().unwrap_or_else(|e| e.into_inner()).waiting.push_back((tool_id.to_string(), prompt));
+                true
+            }
+            "tool_call_update" => {
+                let (pending, child_session) = {
+                    let spawns = self.grok_spawns.lock().unwrap_or_else(|e| e.into_inner());
+                    (spawns.waiting.iter().any(|(t, _)| t == tool_id), spawns.children.get(tool_id).cloned())
+                };
+                if let Some(child_session) = child_session {
+                    match update.get("status").and_then(Value::as_str) {
+                        Some("completed") => self.subagent_ended(bus, parent, parent, &child_session, "completed").await,
+                        Some("failed") => self.subagent_ended(bus, parent, parent, &child_session, "failed").await,
+                        _ => {}
+                    }
+                    return true;
+                }
+                pending
+            }
+            _ => false,
+        }
+    }
+
+    /// Agent activity with no prompt open is a turn the agent started itself: say it's working,
+    /// and watch for it to finish (see `UnpromptedTurn`).
+    async fn note_unprompted(&self, bus: &EventBus, sid: Uuid, params: &Value) {
+        if *self.open_prompts.borrow() > 0 {
+            return;
+        }
+        let update = params.get("update").unwrap_or(params);
+        let kind = update.get("sessionUpdate").and_then(Value::as_str).unwrap_or_default();
+        if !matches!(kind, "agent_message_chunk" | "agent_thought_chunk" | "tool_call" | "tool_call_update" | "plan") {
+            return;
+        }
+        let starting = {
+            let mut guard = self.unprompted.lock().unwrap_or_else(|e| e.into_inner());
+            let starting = guard.is_none();
+            let turn = guard.get_or_insert_with(UnpromptedTurn::default);
+            turn.last = Some(tokio::time::Instant::now());
+            if let Some(id) = update.get("toolCallId").and_then(Value::as_str) {
+                match update.get("status").and_then(Value::as_str) {
+                    Some("completed" | "failed") => { turn.open_tools.remove(id); }
+                    _ => { turn.open_tools.insert(id.to_string()); }
+                }
+            }
+            starting
+        };
+        if !starting {
+            return;
+        }
+        info!("agent started a turn on its own");
+        bus.emit_status(sid, SessionStatus::Running).await;
+        let (unprompted, prompts_open, bus) = (self.unprompted.clone(), self.open_prompts.clone(), self.event_bus.clone());
+        tokio::spawn(async move {
+            let began = tokio::time::Instant::now();
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                // A prompt took over; its answer ends the turn.
+                if *prompts_open.borrow() > 0 {
+                    return;
+                }
+                let finished = {
+                    let mut guard = unprompted.lock().unwrap_or_else(|e| e.into_inner());
+                    let Some(turn) = guard.as_ref() else { return };
+                    let quiet = turn.last.is_none_or(|at| at.elapsed() >= UNPROMPTED_QUIET);
+                    let finished = quiet && (turn.open_tools.is_empty() || began.elapsed() >= UNPROMPTED_MAX);
+                    if finished { *guard = None; }
+                    finished
+                };
+                if finished {
+                    info!("agent finished its own turn");
+                    if let Some(bus) = &bus {
+                        bus.emit(ControlEvent::Raw {
+                            session_id: Some(sid),
+                            payload: json!({
+                                "channel": "term",
+                                "stream": "acp",
+                                "line": "← agent finished a turn it started itself",
+                                "turn_complete": true,
+                                "stop_reason": "end_turn",
+                            }),
+                        });
+                        bus.emit_status(sid, SessionStatus::Idle).await;
+                    }
+                    return;
+                }
+            }
+        });
+    }
+}
+
+/// The longest prefix of `s` within `max` bytes that ends on a character boundary. Slicing at
+/// a raw byte index panics inside a multi-byte character (e.g. '─'), and a panic in the event
+/// loop silently stops a thread's updates while its agent keeps working.
+fn clip_bytes(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Client-made marker queued after `session/load` answers (see `session_load`).
 const REPLAY_DONE: &str = "bomb/historyReplayDone";
 
@@ -278,7 +503,36 @@ pub struct AcpClient {
     current_mode: RwLock<Option<String>>,
     /// Host-side terminals for ACP terminal/* (required for run_terminal_command).
     terminals: TerminalRegistry,
+    /// A turn the agent started on its own, which no prompt's answer will end.
+    unprompted: Arc<std::sync::Mutex<Option<UnpromptedTurn>>>,
+    /// Subagent sessions this agent spawned: the child's ACP session id → its thread id here.
+    subagents: std::sync::Mutex<HashMap<String, Uuid>>,
+    /// Grok: `spawn_subagent` calls waiting for their `subagent_spawned` (tool call id, prompt),
+    /// and each call's child session once known, so the call's end ends the subagent.
+    grok_spawns: std::sync::Mutex<GrokSpawns>,
 }
+
+/// Grok's `spawn_subagent` calls: those waiting for their `subagent_spawned` (call id, prompt),
+/// and each call's child session once known.
+#[derive(Default)]
+struct GrokSpawns {
+    waiting: std::collections::VecDeque<(String, String)>,
+    children: HashMap<String, String>,
+}
+
+/// Claude Code starts a turn by itself when a background job it launched finishes. With no
+/// prompt to answer there's no stop reason either, so it ends when the agent goes quiet.
+#[derive(Default)]
+struct UnpromptedTurn {
+    last: Option<tokio::time::Instant>,
+    /// Tool calls started and not yet finished: a long one is quiet, not done.
+    open_tools: std::collections::HashSet<String>,
+}
+
+/// How long an unprompted turn stays quiet, with no tool running, before it counts as finished.
+const UNPROMPTED_QUIET: Duration = Duration::from_secs(8);
+/// An unprompted turn ends by this age even if a tool call never reported back.
+const UNPROMPTED_MAX: Duration = Duration::from_secs(30 * 60);
 
 impl AcpClient {
     pub async fn connect(
@@ -495,6 +749,9 @@ impl AcpClient {
             model_catalog: RwLock::new(crate::ModelCatalog::default()),
             current_mode: RwLock::new(None),
             terminals: TerminalRegistry::new(default_cwd),
+            unprompted: Arc::new(std::sync::Mutex::new(None)),
+            subagents: std::sync::Mutex::new(HashMap::new()),
+            grok_spawns: std::sync::Mutex::new(Default::default()),
         });
 
         client.initialize().await?;
@@ -575,6 +832,9 @@ impl AcpClient {
             model_catalog: RwLock::new(crate::ModelCatalog::default()),
             current_mode: RwLock::new(None),
             terminals: TerminalRegistry::new(PathBuf::from("/tmp")),
+            unprompted: Arc::new(std::sync::Mutex::new(None)),
+            subagents: std::sync::Mutex::new(HashMap::new()),
+            grok_spawns: std::sync::Mutex::new(Default::default()),
         })
     }
 
@@ -617,6 +877,7 @@ impl AcpClient {
                     write_text_file: !self.config.read_only,
                 },
                 terminal: true,
+                subagents: Some(json!({})),
             },
         );
         let result = self
@@ -1550,6 +1811,8 @@ impl AcpClient {
         let rx = transport
             .send_request("session/prompt", Some(params_val))
             .await?;
+        // A prompt's answer ends whatever the agent was doing on its own, too.
+        *self.unprompted.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
         let bus = self.event_bus.clone();
         let control_id = self.control_session_id;
@@ -2244,7 +2507,7 @@ impl AcpClient {
                                         out.get("output").and_then(|v| v.as_str()).unwrap_or("");
                                     if !text.is_empty() {
                                         let clip = if text.len() > 4000 {
-                                            format!("{}…", &text[..4000])
+                                            format!("{}…", clip_bytes(text, 4000))
                                         } else {
                                             text.to_string()
                                         };
@@ -2524,6 +2787,9 @@ impl AcpClient {
         let params = notif.params.unwrap_or(Value::Null);
 
         match notif.method.as_str() {
+            "_x.ai/session_notification" => {
+                self.note_grok_subagent(bus, sid, &params).await;
+            }
             REPLAY_DONE => {
                 self.replaying_history
                     .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -2536,7 +2802,27 @@ impl AcpClient {
                 {
                     return;
                 }
+                if self.note_subagent(bus, sid, &params).await {
+                    return;
+                }
+                // A subagent's own updates go to its thread.
+                let child = params.get("sessionId").and_then(Value::as_str)
+                    .and_then(|s| self.subagents.lock().unwrap_or_else(|e| e.into_inner()).get(s).copied());
+                if let Some(child) = child {
+                    let update = params.get("update").unwrap_or(&params);
+                    if update.get("sessionUpdate").and_then(Value::as_str) == Some("usage_update") {
+                        if let Some(used) = update.get("used").and_then(Value::as_u64) {
+                            bus.emit(ControlEvent::Raw { session_id: Some(sid), payload: json!({ "channel": "subagent", "kind": "usage", "child": child, "tokens": used }) });
+                        }
+                    }
+                    self.map_session_update(bus, child, &params).await;
+                    return;
+                }
+                if self.note_grok_spawn_call(bus, sid, &params).await {
+                    return;
+                }
                 self.map_session_update(bus, sid, &params).await;
+                self.note_unprompted(bus, sid, &params).await;
             }
             m if m.contains("tool") => {
                 let tool = params
@@ -2724,7 +3010,7 @@ impl AcpClient {
                     .map(|t| {
                         let t = t.replace('\n', " ");
                         if t.len() > 120 {
-                            format!("{}…", &t[..120])
+                            format!("{}…", clip_bytes(&t, 120))
                         } else {
                             t
                         }
@@ -2987,7 +3273,7 @@ impl AcpClient {
                 debug!(other, "unmapped session update");
                 let compact = serde_json::to_string(update).unwrap_or_default();
                 let compact = if compact.len() > 280 {
-                    format!("{}…", &compact[..280])
+                    format!("{}…", clip_bytes(&compact, 280))
                 } else {
                     compact
                 };
@@ -3517,6 +3803,142 @@ impl AcpClient {
 
     pub fn cwd(&self) -> &Path {
         &self.config.cwd
+    }
+}
+
+#[cfg(test)]
+mod subagent_tests {
+    use super::*;
+
+    fn update(session: &str, update: Value) -> JsonRpcNotification {
+        JsonRpcNotification { jsonrpc: "2.0".into(), method: "session/update".into(), params: Some(json!({ "sessionId": session, "update": update })) }
+    }
+
+    #[tokio::test]
+    async fn a_subagent_gets_its_own_thread_and_a_step_in_its_parent() {
+        let bus = Arc::new(EventBus::new());
+        let mut events = bus.subscribe();
+        let client = AcpClient::mock_for_tests("parent-acp", Some(bus.clone()));
+        let parent = client.control_session_id;
+        let child = subagent_thread_id(parent, "child-acp");
+        client.handle_notification(update("parent-acp", json!({
+            "sessionUpdate": "subagent_spawned", "subagentSessionId": "child-acp", "name": "Explore",
+            "task": "Find the shader code", "prompt": "Find where the fibre shader is defined.", "capabilities": {},
+        }))).await;
+        client.handle_notification(update("child-acp", json!({
+            "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "It's in index.html." },
+        }))).await;
+        client.handle_notification(update("parent-acp", json!({
+            "sessionUpdate": "subagent_state_update", "subagentSessionId": "child-acp", "state": "completed",
+        }))).await;
+
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() { seen.push(event); }
+        let spawned = seen.iter().any(|e| matches!(e, ControlEvent::Raw { session_id: Some(s), payload } if *s == parent && payload["kind"] == "spawned" && payload["child"] == child.to_string() && payload["name"] == "Explore"));
+        assert!(spawned, "the parent hears the subagent started: {seen:?}");
+        let step: Vec<_> = seen.iter().filter_map(|e| match e { ControlEvent::ToolCall { session_id, event } if *session_id == parent && event.id == child.to_string() => Some(event.status), _ => None }).collect();
+        assert_eq!(step, vec![ToolCallStatus::Running, ToolCallStatus::Completed], "the parent shows it as a step");
+        assert!(seen.iter().any(|e| matches!(e, ControlEvent::AgentMessage { session_id, text, .. } if *session_id == child && text.contains("index.html"))), "the child's words go to the child");
+        assert!(!seen.iter().any(|e| matches!(e, ControlEvent::AgentMessage { session_id, .. } if *session_id == parent)), "not to the parent");
+        assert!(seen.iter().any(|e| matches!(e, ControlEvent::SessionStatusChanged { session_id, status: SessionStatus::Completed, .. } if *session_id == child)));
+    }
+}
+
+#[cfg(test)]
+mod grok_subagent_tests {
+    use super::*;
+
+    fn note(method: &str, session: &str, update: Value) -> JsonRpcNotification {
+        JsonRpcNotification { jsonrpc: "2.0".into(), method: method.into(), params: Some(json!({ "sessionId": session, "update": update })) }
+    }
+
+    /// The shapes a real Grok 1.0.50 run sent for one `spawn_subagent`.
+    #[tokio::test]
+    async fn a_grok_subagent_is_its_own_thread_with_its_model_and_tokens() {
+        let bus = Arc::new(EventBus::new());
+        let mut events = bus.subscribe();
+        let client = AcpClient::mock_for_tests("parent-grok", Some(bus.clone()));
+        let parent = client.control_session_id;
+        let child = subagent_thread_id(parent, "child-grok");
+        client.handle_notification(note("session/update", "parent-grok", json!({
+            "sessionUpdate": "tool_call", "toolCallId": "call-1", "title": "spawn_subagent", "status": "pending",
+            "rawInput": { "description": "List files in folder", "prompt": "List the files here.", "background": false },
+            "_meta": { "x.ai/tool": { "name": "spawn_subagent", "kind": "task" } },
+        }))).await;
+        client.handle_notification(note("_x.ai/session_notification", "parent-grok", json!({
+            "sessionUpdate": "subagent_spawned", "subagent_id": "child-grok", "child_session_id": "child-grok",
+            "parent_session_id": "parent-grok", "description": "List files in folder", "model": "grok-4.7",
+        }))).await;
+        client.handle_notification(note("session/update", "child-grok", json!({
+            "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "README.md and hello.py" },
+        }))).await;
+        client.handle_notification(note("_x.ai/session_notification", "parent-grok", json!({
+            "sessionUpdate": "subagent_progress", "subagent_id": "child-grok", "child_session_id": "child-grok", "tokens_used": 11421,
+        }))).await;
+        client.handle_notification(note("session/update", "parent-grok", json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "call-1", "status": "completed",
+        }))).await;
+
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() { seen.push(event); }
+        assert!(seen.iter().any(|e| matches!(e, ControlEvent::Raw { payload, .. } if payload["kind"] == "spawned" && payload["model"] == "grok-4.7" && payload["prompt"] == "List the files here.")), "{seen:?}");
+        assert!(seen.iter().any(|e| matches!(e, ControlEvent::AgentMessage { session_id, .. } if *session_id == child)), "its words go to its own thread");
+        assert!(seen.iter().any(|e| matches!(e, ControlEvent::Raw { payload, .. } if payload["kind"] == "usage" && payload["tokens"] == 11421)));
+        assert!(seen.iter().any(|e| matches!(e, ControlEvent::Raw { payload, .. } if payload["kind"] == "state" && payload["state"] == "completed")));
+        assert!(!seen.iter().any(|e| matches!(e, ControlEvent::ToolCall { event, .. } if event.id == "call-1")), "the raw spawn_subagent step stays out of the parent");
+    }
+}
+
+#[cfg(test)]
+mod unprompted_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_turn_the_agent_starts_itself_finishes_once_it_goes_quiet() {
+        let bus = Arc::new(EventBus::new());
+        let mut events = bus.subscribe();
+        let client = AcpClient::mock_for_tests("self-started", Some(bus.clone()));
+        let sid = client.control_session_id;
+        let update = |u: Value| json!({ "update": u });
+        client.note_unprompted(&bus, sid, &update(json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "status": "pending" }))).await;
+        // A long tool is quiet, not finished.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert!(client.unprompted.lock().unwrap().is_some());
+        client.note_unprompted(&bus, sid, &update(json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed" }))).await;
+        client.note_unprompted(&bus, sid, &update(json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Done." } }))).await;
+        tokio::time::sleep(UNPROMPTED_QUIET + Duration::from_secs(2)).await;
+        assert!(client.unprompted.lock().unwrap().is_none());
+
+        let mut statuses = Vec::new();
+        let mut completed = false;
+        while let Ok(event) = events.try_recv() {
+            match event {
+                ControlEvent::SessionStatusChanged { status, .. } => statuses.push(status),
+                ControlEvent::Raw { payload, .. } if payload["turn_complete"] == true => completed = true,
+                _ => {}
+            }
+        }
+        assert_eq!(statuses, vec![SessionStatus::Running, SessionStatus::Idle]);
+        assert!(completed, "the turn says it finished");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn activity_during_a_prompt_is_that_prompt_s_turn() {
+        let bus = Arc::new(EventBus::new());
+        let client = AcpClient::mock_for_tests("prompted", Some(bus.clone()));
+        client.open_prompts.send_replace(1);
+        client.note_unprompted(&bus, client.control_session_id, &json!({ "update": { "sessionUpdate": "agent_message_chunk" } })).await;
+        assert!(client.unprompted.lock().unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod clip_tests {
+    #[test]
+    fn clips_on_a_character_boundary() {
+        let line = format!("{}{}", "a".repeat(119), "─────");
+        assert_eq!(super::clip_bytes(&line, 120), "a".repeat(119));
+        assert_eq!(super::clip_bytes("short", 120), "short");
     }
 }
 

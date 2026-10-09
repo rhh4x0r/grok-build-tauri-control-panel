@@ -1,0 +1,40 @@
+[package]
+name = "bomb_mobile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bomb Code — the iOS companion's Rust core (pairing, connection, transcript), exposed to Swift through UniFFI"
+
+[lib]
+crate-type = ["lib", "staticlib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+# Only for generating the Swift bindings on the Mac; keeps the CLI out of the phone build.
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+base64 = "0.22"
+bomb_link = { path = "../bomb_link" }
+bomb_proto = { path = "../bomb_proto" }
+bomb_transcript = { path = "../bomb_transcript" }
+chrono.workspace = true
+grok_events = { path = "../grok_events" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uniffi = "0.32"
+uuid.workspace = true
+
+[dev-dependencies]
+grok_acp = { path = "../grok_acp" }
+bomb_core = { path = "../bomb_core" }
+bomb_server = { path = "../bomb_server" }
+grok_config = { path = "../grok_config" }
+tempfile.workspace = true

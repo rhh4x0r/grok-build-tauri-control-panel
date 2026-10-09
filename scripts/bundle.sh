@@ -11,6 +11,10 @@ APP="${ROOT}/target/release/bundle/Bomb Code.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "${ROOT}/target/release/bomb_app" "$APP/Contents/MacOS/bomb_app"
+# The dictation helper (built by crates/bomb_app/build.rs when the Swift toolchain allows).
+if [ -f "${ROOT}/target/release/bomb-dictate" ]; then
+  cp "${ROOT}/target/release/bomb-dictate" "$APP/Contents/MacOS/bomb-dictate"
+fi
 cp "${ROOT}/crates/bomb_app/assets/icon.icns" "$APP/Contents/Resources/icon.icns"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -27,6 +31,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIconFile</key><string>icon</string>
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>Dictate your prompts. Speech is turned into text on this Mac.</string>
+  <key>NSSpeechRecognitionUsageDescription</key><string>Dictate your prompts. Speech is turned into text on this Mac.</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
 </dict>
 </plist>

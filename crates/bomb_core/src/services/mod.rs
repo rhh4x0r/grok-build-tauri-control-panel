@@ -10,6 +10,7 @@ pub mod thread_setup;
 pub mod prompt_sources;
 pub mod workspaces;
 pub mod git_ui;
+pub mod media;
 
 use std::path::PathBuf;
 
@@ -496,7 +497,10 @@ pub async fn start_session(
                 .unwrap_or_default();
             opts.read_only |= inline;
         }
-        for other in state.persistence.list_workspaces().map_err(err)?.iter().filter(|w|w.path==spawn_cwd) {workspaces::ensure_idle(state,other)?;}
+        // A helper only reads here, or works on its own branch: the folder being busy doesn't stop it.
+        if opts.parent_thread.is_none() {
+            for other in state.persistence.list_workspaces().map_err(err)?.iter().filter(|w|w.path==spawn_cwd) {workspaces::ensure_idle(state,other)?;}
+        }
         opts.project_root = Some(cwd.clone());
         let existing = state
             .persistence
@@ -542,6 +546,17 @@ pub async fn start_session(
         transcript_context: source_id.and_then(|source| build_transcript_context(state, source)),
         memory_context,
     };
+    // A helper is listed under its parent, not as a workspace of its own.
+    if opts.parent_thread.is_some() {
+        workspace_record = None;
+    }
+    // Top-level threads' agents get the `bomb` MCP server, for helpers on any agent.
+    if opts.parent_thread.is_none() && opts.mode == grok_control_core::AgentMode::Acp {
+        if let Some(server) = crate::helpers::mcp_server(state, id) {
+            opts.mcp_servers.push(server);
+            opts.permission_allow.extend(crate::helpers::allow_rules());
+        }
+    }
     if let Some(w) = &workspace_record {
         state.persistence.save_workspace(w).map_err(err)?;
     }
@@ -695,6 +710,43 @@ pub async fn dismiss_failure(state: &AppState, id: Uuid, failed_at: String) -> R
     crate::failures::DismissedFailures::save_one(&state.persistence, id, &failed_at).map_err(err)
 }
 
+/// The desktop sidebar's kv keys: threads hidden from the sidebar (comma-separated ids),
+/// and projects pinned to the top (a JSON array of roots).
+pub const ARCHIVED_THREADS_KEY: &str = "archived_threads";
+pub const PINNED_PROJECTS_KEY: &str = "pinned_projects";
+
+/// How the desktop sidebar is organised, so the phone lists threads the same way.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SidebarPrefs {
+    /// Threads archived one by one, plus every thread of an archived worktree.
+    pub archived: Vec<String>,
+    pub pinned_projects: Vec<String>,
+}
+
+pub async fn sidebar_prefs(state: &AppState) -> Result<SidebarPrefs, String> {
+    let mut archived: Vec<String> = kv_get(state, ARCHIVED_THREADS_KEY)
+        .await?
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+    for w in state.persistence.list_workspaces().map_err(err)? {
+        if w.archived_at.is_some() {
+            archived.extend(w.threads);
+        }
+    }
+    archived.sort();
+    archived.dedup();
+    let pinned_projects = kv_get(state, PINNED_PROJECTS_KEY)
+        .await?
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    Ok(SidebarPrefs { archived, pinned_projects })
+}
+
 /// Account usage limits for every backend that exposes them.
 pub async fn account_usage() -> Vec<crate::usage::AccountUsage> {
     crate::usage::all().await
@@ -718,6 +770,14 @@ pub async fn send_prompt(
     if state.foundry.for_thread(&id.to_string()).is_some_and(|r| !matches!(r.status, bomb_foundry::RunStatus::Completed | bomb_foundry::RunStatus::Stopped)) {
         return Err("This thread has a Foundry run. Stop the run before sending a separate prompt.".into());
     }
+    if state.persistence.get_session(id).is_ok_and(|r| subagent_parent(&r.metadata_json).is_some() && !is_helper(&r.metadata_json)) {
+        return Err("A subagent can't take messages. Write to the thread that started it.".into());
+    }
+    // Its agent may still be starting (woken when the thread was opened): wait for it rather than
+    // fail. A start that failed is retried below, like any failed connection.
+    if state.registry.get_snapshot(id).is_ok_and(|s| s.metadata.status == grok_events::SessionStatus::Starting) {
+        let _ = wait_until_idle(state, &id.to_string(), std::time::Duration::from_secs(90)).await;
+    }
     let _gate = state.workspace_gate.lock().await;
     let cwd = state.registry.get_snapshot(id).ok().map(|s|s.metadata.cwd)
         .or_else(||state.persistence.get_session(id).ok().map(|s|s.cwd));
@@ -739,6 +799,7 @@ pub async fn send_prompt(
 
     let requested_model = want_model.clone();
     let mut switch_notice = None;
+    let was_live = state.registry.is_live(id);
     // Switching backend/model mid-thread: restart the thread under the new
     // agent. Cross-agent session/load can't work, so the resume ladder lands
     // on history-only and injects the prior transcript as context.
@@ -786,6 +847,15 @@ pub async fn send_prompt(
             always_approve,
         )
         .await?;
+    } else if was_live && switch_notice.is_none() {
+        // A resume applies the mode sent with the prompt; an agent that was already running
+        // needs it applied here, or a mode picked on the phone would be ignored.
+        if let Some(mode) = approval_mode.as_deref().and_then(parse_approval_mode) {
+            let current = state.registry.get_snapshot(id).ok().map(|s| s.metadata.approval_mode);
+            if current != Some(mode) {
+                state.registry.set_approval_mode(id, mode).await.map_err(err)?;
+            }
+        }
     }
 
     // Smart thread naming on the FIRST prompt: instant word-slug, then an
@@ -1047,6 +1117,15 @@ async fn resume_saved_session(
         _ => None,
     });
     opts.always_approve = always_approve.unwrap_or(false);
+    // A helper stays tied to the thread that started it.
+    opts.parent_thread = extract_meta_string(&rec.metadata_json, "parentThread");
+    opts.subagent = serde_json::from_str::<serde_json::Value>(&rec.metadata_json).ok().and_then(|v| v.pointer("/metadata/subagent").cloned());
+    if opts.parent_thread.is_none() {
+        if let Some(server) = crate::helpers::mcp_server(state, id) {
+            opts.mcp_servers.push(server);
+            opts.permission_allow.extend(crate::helpers::allow_rules());
+        }
+    }
     opts.plan_mode = if opts.always_approve {
         false
     } else {
@@ -1273,6 +1352,8 @@ pub async fn cancel_session(state: &AppState, id: String) -> Result<(), String> 
     let id = Uuid::parse_str(&id).map_err(err)?;
     state.registry.cancel_session(id).await.map_err(err)?;
     persist_session(state, id).await;
+    // Stopping a thread stops the helpers it started.
+    crate::helpers::stop_all(state, id).await;
     Ok(())
 }
 
@@ -1415,13 +1496,7 @@ pub async fn set_approval_mode(state: &AppState, id: String, mode: String) -> Re
     {
         return Err("Inline is read-only. Create a thread to make changes.".into());
     }
-    let mode = match mode.to_lowercase().as_str() {
-        "plan" => grok_control_core::ApprovalMode::Plan,
-        "auto" => grok_control_core::ApprovalMode::Auto,
-        "yolo" | "always_approve" => grok_control_core::ApprovalMode::Yolo,
-        "ask" | "default" => grok_control_core::ApprovalMode::Ask,
-        other => return Err(format!("unknown approval mode: {other}")),
-    };
+    let Some(mode) = parse_approval_mode(&mode) else { return Err(format!("unknown approval mode: {mode}")) };
     if state.registry.is_live(id) {
         state
             .registry
@@ -2256,6 +2331,10 @@ fn build_thread_list_all(state: &AppState) -> Vec<ThreadDto> {
 
     for m in live {
         live_ids.insert(m.id);
+        // Helpers are listed under their parent thread.
+        if m.parent_thread.is_some() {
+            continue;
+        }
         let mode = match m.mode {
             grok_control_core::AgentMode::Acp => "acp",
             grok_control_core::AgentMode::Headless => "headless",
@@ -2294,7 +2373,8 @@ fn build_thread_list_all(state: &AppState) -> Vec<ThreadDto> {
 
     if let Ok(saved) = state.persistence.list_sessions() {
         for rec in saved {
-            if live_ids.contains(&rec.id) {
+            // Subagents are listed under their parent thread (`list_subagents`), not as threads.
+            if live_ids.contains(&rec.id) || subagent_parent(&rec.metadata_json).is_some() {
                 continue;
             }
             // After reboot ACP is gone — never show stale "running".
@@ -2358,6 +2438,38 @@ fn extract_approved_mcp_from_meta(json: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// "plan", "ask", "auto" or "yolo", as clients send them.
+fn parse_approval_mode(mode: &str) -> Option<grok_control_core::ApprovalMode> {
+    match mode.to_lowercase().as_str() {
+        "plan" => Some(grok_control_core::ApprovalMode::Plan),
+        "auto" => Some(grok_control_core::ApprovalMode::Auto),
+        "yolo" | "always_approve" => Some(grok_control_core::ApprovalMode::Yolo),
+        "ask" | "default" => Some(grok_control_core::ApprovalMode::Ask),
+        _ => None,
+    }
+}
+
+/// Start a sleeping thread's agent ahead of its next prompt (a phone opened the thread), in the
+/// mode it was saved with, so that prompt doesn't wait for the agent to launch and load.
+pub async fn wake_thread(state: &AppState, id: String) -> Result<(), String> {
+    let id = Uuid::parse_str(&id).map_err(err)?;
+    if state.registry.is_live(id) {
+        return Ok(());
+    }
+    let rec = state.persistence.get_session(id).map_err(err)?;
+    if subagent_parent(&rec.metadata_json).is_some() {
+        return Ok(());
+    }
+    let busy_elsewhere = state.foundry.for_thread(&id.to_string()).is_some_and(|r| !matches!(r.status, bomb_foundry::RunStatus::Completed | bomb_foundry::RunStatus::Stopped));
+    let archived = state.persistence.workspace_for_session(id).map_err(err)?.is_some_and(|w| w.archived_at.is_some());
+    if rec.model.eq_ignore_ascii_case("mock") || busy_elsewhere || archived {
+        return Ok(());
+    }
+    let mode = extract_meta_string(&rec.metadata_json, "approvalMode")
+        .or_else(|| extract_meta_string(&rec.metadata_json, "approval_mode"));
+    resume_saved_session(state, id, None, None, mode, None, None).await.map(|_| ())
+}
+
 fn extract_meta_string(json: &str, key: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(json)
         .ok()
@@ -2382,6 +2494,150 @@ fn extract_mcp_from_meta(json: &str) -> Vec<String> {
 }
 
 /// Called from the event-bus persistence task (best-effort, never panics).
+/// A subagent is saved as a thread of its own, linked to its parent (`parentThread`) and described
+/// by `subagent` in its metadata; its transcript starts with the task it was given.
+fn persist_subagent(db: &grok_persistence::Persistence, parent: Uuid, payload: &serde_json::Value) -> Result<(), grok_persistence::PersistenceError> {
+    let Some(child) = payload["child"].as_str().and_then(|c| Uuid::parse_str(c).ok()) else { return Ok(()) };
+    let now = Utc::now();
+    match payload["kind"].as_str() {
+        Some("spawned") => {
+            // A helper's own record already exists (it's a real thread); leave it.
+            if db.get_session(child).is_ok() { return Ok(()); }
+            let Ok(parent_rec) = db.get_session(parent) else { return Ok(()) };
+            let mut snapshot: serde_json::Value = serde_json::from_str(&parent_rec.metadata_json).unwrap_or_else(|_| serde_json::json!({}));
+            let mut meta = snapshot.get("metadata").cloned().filter(|m| m.is_object()).unwrap_or_else(|| serde_json::json!({}));
+            let name = payload["name"].as_str().unwrap_or("Subagent");
+            let task = payload["task"].as_str().unwrap_or_default();
+            meta["id"] = child.to_string().into();
+            meta["label"] = name.into();
+            meta["parentThread"] = parent.to_string().into();
+            meta["subagent"] = serde_json::json!({ "name": name, "task": task, "state": "running", "startedAt": now.to_rfc3339(), "model": payload["model"].as_str() });
+            if let Some(model) = payload["model"].as_str() { meta["model"] = model.into(); }
+            meta["acpSessionId"] = serde_json::Value::Null;
+            snapshot["metadata"] = meta;
+            db.upsert_session(&SessionRecord {
+                id: child,
+                cwd: parent_rec.cwd,
+                mode: "acp".into(),
+                model: payload["model"].as_str().map(String::from).unwrap_or(parent_rec.model),
+                status: "running".into(),
+                worktree: parent_rec.worktree,
+                acp_session_id: None,
+                metadata_json: snapshot.to_string(),
+                created_at: now,
+                updated_at: now,
+                message_count: 0,
+            })?;
+            let prompt = payload["prompt"].as_str().filter(|p| !p.trim().is_empty()).unwrap_or(task);
+            if !prompt.trim().is_empty() {
+                db.append_message(child, "prompt", prompt, now)?;
+            }
+            Ok(())
+        }
+        Some("state") => {
+            let Ok(mut rec) = db.get_session(child) else { return Ok(()) };
+            // A helper's state comes from its own thread's status.
+            if is_helper(&rec.metadata_json) { return Ok(()); }
+            let state = payload["state"].as_str().unwrap_or("completed");
+            let mut snapshot: serde_json::Value = serde_json::from_str(&rec.metadata_json).unwrap_or_else(|_| serde_json::json!({}));
+            if let Some(sub) = snapshot.pointer_mut("/metadata/subagent").filter(|s| s.is_object()) {
+                sub["state"] = state.into();
+                sub["endedAt"] = now.to_rfc3339().into();
+            }
+            rec.metadata_json = snapshot.to_string();
+            rec.status = if state == "completed" { "completed".into() } else if state == "cancelled" { "cancelled".into() } else { "failed".into() };
+            rec.updated_at = now;
+            db.upsert_session(&rec)
+        }
+        // How many tokens it has used (its context, as the agent reports it).
+        Some("usage") => {
+            let Some(tokens) = payload["tokens"].as_u64() else { return Ok(()) };
+            let Ok(mut rec) = db.get_session(child) else { return Ok(()) };
+            let mut snapshot: serde_json::Value = serde_json::from_str(&rec.metadata_json).unwrap_or_else(|_| serde_json::json!({}));
+            let Some(sub) = snapshot.pointer_mut("/metadata/subagent").filter(|s| s.is_object()) else { return Ok(()) };
+            if sub["tokens"].as_u64() == Some(tokens) { return Ok(()); }
+            sub["tokens"] = tokens.into();
+            rec.metadata_json = snapshot.to_string();
+            db.upsert_session(&rec)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// A helper (started through the `bomb` MCP server) rather than an agent's own subagent.
+pub fn is_helper(metadata_json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(metadata_json).ok()
+        .is_some_and(|v| v.pointer("/metadata/subagent/kind").and_then(|k| k.as_str()) == Some("helper"))
+}
+
+/// The parent of a subagent's thread, from its saved metadata.
+pub fn subagent_parent(metadata_json: &str) -> Option<Uuid> {
+    extract_meta_string(metadata_json, "parentThread").and_then(|p| Uuid::parse_str(&p).ok())
+}
+
+/// One subagent of a thread, for the sidebar and the phone.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentInfo {
+    pub id: String,
+    pub parent: String,
+    pub name: String,
+    pub task: String,
+    /// running | completed | failed | cancelled
+    pub state: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub message_count: u64,
+    /// The model it ran on, when the agent says.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Tokens it used (its context), when the agent reports them.
+    #[serde(default)]
+    pub tokens: Option<u64>,
+}
+
+/// Every thread's subagents (or one thread's), oldest first.
+pub async fn list_subagents(state: &AppState, parent: Option<String>) -> Result<Vec<SubagentInfo>, String> {
+    let parent = parent.map(|p| Uuid::parse_str(&p).map_err(err)).transpose()?;
+    let state_helpers = state.helpers.clone();
+    let state_of = |id: Uuid| state.registry.get_snapshot(id).ok().map(|s| format!("{:?}", s.metadata.status).to_lowercase());
+    let mut out: Vec<SubagentInfo> = state.persistence.list_sessions().map_err(err)?.into_iter().filter_map(|rec| {
+        let of = subagent_parent(&rec.metadata_json)?;
+        if parent.is_some_and(|p| p != of) { return None; }
+        let v: serde_json::Value = serde_json::from_str(&rec.metadata_json).ok()?;
+        let sub = v.pointer("/metadata/subagent")?;
+        let text = |k: &str| sub.get(k).and_then(|x| x.as_str()).map(String::from);
+        let helper = sub.get("kind").and_then(|k| k.as_str()) == Some("helper");
+        // A subagent still "running" after a restart was cut off with its agent.
+        let mut state = text("state").unwrap_or_else(|| "completed".into());
+        if state == "running" && !rec.status.eq_ignore_ascii_case("running") { state = rec.status.to_lowercase(); }
+        // A helper is a thread of its own: its status says how it's going.
+        if helper {
+            let status = state_of(rec.id).unwrap_or_else(|| rec.status.to_lowercase());
+            state = match status.as_str() {
+                "running" | "starting" | "waitingapproval" | "recovering" => "running".into(),
+                "failed" => "failed".into(),
+                "cancelled" | "cancelling" => "cancelled".into(),
+                _ => "completed".into(),
+            };
+        }
+        Some(SubagentInfo {
+            id: rec.id.to_string(),
+            parent: of.to_string(),
+            name: text("name").unwrap_or_else(|| "Subagent".into()),
+            task: text("task").unwrap_or_default(),
+            state,
+            started_at: text("startedAt").unwrap_or_else(|| rec.created_at.to_rfc3339()),
+            ended_at: text("endedAt"),
+            message_count: rec.message_count,
+            model: text("model"),
+            tokens: sub.get("tokens").and_then(|t| t.as_u64()).or_else(|| state_helpers.tokens_used(rec.id)),
+        })
+    }).collect();
+    out.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+    Ok(out)
+}
+
 pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEvent) {
     use ControlEvent::*;
     let res: Result<(), grok_persistence::PersistenceError> = (|| match ev {
@@ -2490,6 +2746,9 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
             };
             db.append_message(*session_id, "system", body, *at)
                 .map(|_| ())
+        }
+        Raw { session_id: Some(parent), payload } if payload["channel"] == "subagent" => {
+            persist_subagent(db, *parent, payload)
         }
         Raw { session_id:Some(session_id), payload } if payload["channel"]=="policy_blocked" => {
             db.append_message(*session_id,"system",payload["message"].as_str().unwrap_or("Access was blocked by read-only policy."),Utc::now()).map(|_|())
