@@ -353,6 +353,11 @@ impl ExplainerService {
             Err(e) if backend == "grok" && !model.is_empty() => {
                 warn!(%model, error = %e, "narrator model failed; falling back to the CLI default model");
                 *self.model.write().await = DEFAULT_EXPLAINER_MODEL.to_string();
+                // Don't keep a model Grok no longer has in the settings either.
+                {
+                    let mut cfg = self.config.write().await;
+                    if cfg.explainer_model.as_deref() == Some(model.as_str()) { cfg.explainer_model = None; }
+                }
                 self.emit(
                     sid,
                     &format!("(model '{model}' failed on this grok CLI — narrator switched to the default model)"),

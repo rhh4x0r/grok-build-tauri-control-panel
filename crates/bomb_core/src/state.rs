@@ -293,6 +293,33 @@ impl AppState {
             )
         };
 
+        // Grok models saved by earlier builds (grok-4) that Grok no longer offers: forget them, so
+        // threads and the narrator use Grok's own default. Checked against `grok models`, quietly.
+        if !cfg!(test) {
+            let (grok_cli, config, explainer, file) = (grok_cli.clone(), config.clone(), explainer.clone(), paths.config_file.clone());
+            tokio::spawn(async move {
+                let Ok(models) = grok_cli.list_models().await else { return };
+                if models.is_empty() { return; }
+                let offered = |m: &str| m.is_empty() || models.iter().any(|(id, _)| id == m);
+                let mut cfg = config.write().await;
+                let mut changed = false;
+                if !offered(&cfg.default_model) { cfg.default_model.clear(); changed = true; }
+                if let Some(grok) = cfg.backends.get_mut("grok") {
+                    if grok.default_model.as_deref().is_some_and(|m| !offered(m)) { grok.default_model = None; changed = true; }
+                }
+                let narrator_on_grok = cfg.explainer_backend.as_deref().is_none_or(|b| b == "grok");
+                if narrator_on_grok && cfg.explainer_model.as_deref().is_some_and(|m| !offered(m)) {
+                    cfg.explainer_model = None;
+                    explainer.set_provider(None, Some(String::new())).await;
+                    changed = true;
+                }
+                if changed {
+                    tracing::info!("forgot Grok models Grok no longer offers");
+                    let _ = cfg.save(&file);
+                }
+            });
+        }
+
         let foundry = Arc::new(
             crate::foundry::FoundryService::open(&paths.sessions_dir.join("foundry.db"))
                 .map_err(anyhow::Error::msg)?,

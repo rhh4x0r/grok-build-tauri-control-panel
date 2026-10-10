@@ -98,7 +98,9 @@ impl Default for GrokConfig {
     fn default() -> Self {
         Self {
             model_suggestions: ModelSuggestionsConfig::default(),
-            default_model: "grok-4".to_string(),
+            // Empty: the Grok agent's own default. Grok's models come from `grok models`, not a
+            // list pinned here (grok-4 and others were retired while still pinned).
+            default_model: String::new(),
             default_effort: "high".to_string(),
             default_backend: Backend::Grok,
             backends: HashMap::new(),

@@ -95,8 +95,10 @@ const GROK: BackendDescriptor = BackendDescriptor {
     env_passthrough: &["XAI_API_KEY"],
     auth_preference: &["cached_token", "grok.com", "xai.api_key"],
     skip_auth_when_unadvertised: false,
-    default_model: "grok-4",
-    model_catalog: &["grok-4", "grok-code-fast-1"],
+    // None pinned: the list comes from Grok itself (`grok models`), and an empty default means
+    // the agent's own.
+    default_model: "",
+    model_catalog: &[],
     supports_headless: true,
 };
 
