@@ -435,3 +435,23 @@ mod media_tests {
 pub fn speakable_sentences(text: String) -> Vec<String> {
     bomb_transcript::speech::speakable_sentences(&text)
 }
+
+/// A piece of a reply: markdown (math inside sentences already readable), or an equation to typeset.
+#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+pub enum MathPiece {
+    Text { markdown: String },
+    Equation { tex: String },
+}
+
+/// A reply split into markdown and equations (shared with the Mac); one `Text` when there's no math.
+#[uniffi::export]
+pub fn math_pieces(text: String) -> Vec<MathPiece> {
+    use bomb_transcript::math::MathPart;
+    bomb_transcript::math::split(&text)
+        .into_iter()
+        .map(|part| match part {
+            MathPart::Text(markdown) => MathPiece::Text { markdown },
+            MathPart::Display(tex) => MathPiece::Equation { tex },
+        })
+        .collect()
+}

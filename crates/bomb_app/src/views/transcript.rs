@@ -20,6 +20,9 @@ use crate::runtime::{services as svc, spawn_service};
 use crate::theme::{Layout, Ui};
 use crate::views::motion::{breathe, fade_in};
 
+/// A math reply's formatted text pieces, by (entry, piece), with the source each was made from.
+type MathPieces = std::collections::HashMap<(u64, usize), (String, Entity<TextViewState>)>;
+
 pub struct TranscriptView {
     thread: Entity<ThreadModel>,
     /// Only the rows on screen are laid out; the list keeps measured heights for the rest and
@@ -37,6 +40,9 @@ pub struct TranscriptView {
     scrolled_to: Option<usize>,
     stage_expanded: std::collections::HashSet<u64>,
     technical_expanded: std::collections::HashSet<u64>,
+    /// Replies with math are drawn as markdown pieces around typeset equations: each piece's
+    /// formatted text, by (entry, piece), with the source it was made from.
+    math_text: std::cell::RefCell<MathPieces>,
 }
 
 impl TranscriptView {
@@ -150,6 +156,7 @@ impl TranscriptView {
             matches: Vec::new(),
             scrolled_to: None,
             stage_expanded: Default::default(),
+            math_text: Default::default(),
             technical_expanded: Default::default(),
         }
     }
@@ -459,6 +466,70 @@ impl TranscriptView {
         self.enter("user", id, bubble)
     }
 
+    /// A reply with math: its markdown pieces, and each equation typeset (its TeX in code style
+    /// until MathJax has drawn it, or if MathJax can't read it).
+    fn math_body(&self, id: u64, parts: Vec<bomb_core::transcript_math::MathPart>, link_cwd: &std::path::Path, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
+        use bomb_core::transcript_math::MathPart;
+        let mut column = div().flex().flex_col().gap_2().w_full();
+        for (ix, part) in parts.into_iter().enumerate() {
+            match part {
+                MathPart::Text(text) => {
+                    // The text either side of an equation, without the spaces next to it.
+                    let text = text.trim().to_string();
+                    if text.is_empty() { continue; }
+                    let state = {
+                        let mut pieces = self.math_text.borrow_mut();
+                        match pieces.get(&(id, ix)) {
+                            Some((source, state)) if *source == text => state.clone(),
+                            Some((_, state)) => {
+                                let state = state.clone();
+                                state.update(cx, |s, cx| s.set_text(&text, cx));
+                                pieces.insert((id, ix), (text, state.clone()));
+                                state
+                            }
+                            None => {
+                                let state = cx.new(|cx| TextViewState::markdown(&text, cx).selectable(true));
+                                pieces.insert((id, ix), (text, state.clone()));
+                                state
+                            }
+                        }
+                    };
+                    let link_cwd = link_cwd.to_path_buf();
+                    column = column.child(
+                        TextView::new(&state)
+                            .selectable(true)
+                            .code_block_actions(|block, _, _| copy_code_button(block.code()))
+                            .on_link_click(move |href, click, _, cx| open_link_with(href, &link_cwd, click.modifiers().platform, cx)),
+                    );
+                }
+                MathPart::Display(tex) => {
+                    let drawn = crate::math::equation(&tex, ui.text, cx);
+                    column = column.child(match drawn {
+                        Some(Ok(eq)) => div()
+                            .w_full()
+                            .flex()
+                            .justify_center()
+                            .py_1()
+                            .overflow_x_hidden()
+                            .child(img(eq.image).w(px(eq.width)).h(px(eq.height)).flex_shrink_0())
+                            .into_any_element(),
+                        _ => div()
+                            .px_2()
+                            .py_1()
+                            .rounded(px(6.))
+                            .bg(ui.hover)
+                            .font_family(ui.mono.clone())
+                            .text_size(px(crate::theme::Type::SMALL))
+                            .text_color(ui.text_muted)
+                            .child(tex)
+                            .into_any_element(),
+                    });
+                }
+            }
+        }
+        column.into_any_element()
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn agent_row(
         &self,
@@ -478,8 +549,13 @@ impl TranscriptView {
         let videos = if streaming { Vec::new() } else { super::media::linked_videos(raw, &cwd) };
         // Formatted as it streams. A Foundry stage's reply carries markers that are only tidied
         // once it's complete, so it streams as plain text instead.
+        let prose = bomb_foundry::presentation::stage_prose(raw);
+        let math = bomb_core::transcript_math::split(prose);
+        let has_math = !matches!(&math[..], [bomb_core::transcript_math::MathPart::Text(t)] if t == prose);
         let body_text: AnyElement = if streaming && raw.contains("<foundry") {
-            streaming_text(id, bomb_foundry::presentation::stage_prose(raw), ui)
+            streaming_text(id, prose, ui)
+        } else if has_math {
+            self.math_body(id, math, &link_cwd, ui, cx)
         } else {
             TextView::new(state)
                 .selectable(true)

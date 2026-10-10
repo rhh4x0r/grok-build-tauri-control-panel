@@ -91,6 +91,8 @@ struct ThreadList: View {
     @State private var showVoice = false
     /// Test mode: a preview opened straight away (BOMB_SMOKE_PREVIEW=port).
     @State private var smokePreview: PreviewTarget?
+    /// Test mode: a sample reply with math (BOMB_SMOKE_SHEET=math).
+    @State private var smokeMath = false
     @State private var expanded: Set<String> = []
     @AppStorage("list.sort") private var sort: ListSort = .recent
     @AppStorage("list.show") private var show: ListShow = .all
@@ -182,6 +184,15 @@ struct ThreadList: View {
         .toolbar(.hidden, for: .navigationBar)
         .sheet(isPresented: $showMachines) { MachinesView() }
         .sheet(isPresented: $showVoice) { VoiceSettings() }
+        #if DEBUG
+        .sheet(isPresented: $smokeMath) {
+            ScrollView {
+                ReplyText(source: "The map sends each $d\\in\\mathbb{R}$ to the unit circle:\n\\[ s(d)=\\frac{1-di}{|1-di|}. \\]\nIts square is $$\\frac{(1-di)^2}{1+d^2}$$ and \\(e^{i\\pi}+1=0\\) still holds.\n\n```\n\\[ not math \\]\n```")
+                    .padding(20)
+            }
+            .background(Theme.bg)
+        }
+        #endif
         .fullScreenCover(item: $smokePreview) { target in
             if let machine = app.machines.first(where: \.connected) { PreviewBrowser(machine: machine, target: target) }
         }
@@ -196,6 +207,7 @@ struct ThreadList: View {
             guard Smoke.enabled, let sheet = ProcessInfo.processInfo.environment["BOMB_SMOKE_SHEET"] else { return }
             try? await Task.sleep(for: .seconds(4))
             if sheet == "machines" { showMachines = true } else if sheet == "new" { showNew = true } else if sheet == "voice" { showVoice = true }
+            if sheet == "math" { smokeMath = true }
             if sheet.hasPrefix("preview:"), let port = UInt16(sheet.dropFirst(8)) { smokePreview = PreviewTarget(port: port, path: "/") }
         }
         #endif

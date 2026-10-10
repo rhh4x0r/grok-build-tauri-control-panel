@@ -10,6 +10,7 @@ default-run = "bomb_app"
 bomb_foundry = { path = "../bomb_foundry" }
 anyhow.workspace = true
 async-channel = "2"
+mathjax-svg-rs = "0.4.0"
 base64 = "0.22"
 bomb_core = { path = "../bomb_core" }
 chrono.workspace = true

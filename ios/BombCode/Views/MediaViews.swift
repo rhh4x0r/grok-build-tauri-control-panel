@@ -9,7 +9,7 @@ struct AgentReply: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             if !entry.text.isEmpty {
-                MarkdownText(source: entry.text).padding(.horizontal, 2)
+                ReplyText(source: entry.text).padding(.horizontal, 2)
             }
             ForEach(entry.media, id: \.path) { media in
                 if media.isVideo {
