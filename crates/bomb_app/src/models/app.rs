@@ -3160,20 +3160,10 @@ async fn upload_files(remote: std::sync::Arc<crate::remote::RemoteCore>, files: 
     Ok(placed)
 }
 
+/// The thread an event belongs to. The events crate's own list, so no kind is left out: a list
+/// of its own here once missed `UserMessage`, and prompts sent from a phone never showed.
 fn session_of(ev: &ControlEvent) -> Option<Uuid> {
-    match ev {
-        ControlEvent::SessionCreated { session_id, .. }
-        | ControlEvent::SessionStatusChanged { session_id, .. }
-        | ControlEvent::SessionCancelled { session_id, .. }
-        | ControlEvent::SessionCompleted { session_id, .. }
-        | ControlEvent::ToolCall { session_id, .. }
-        | ControlEvent::PlanUpdate { session_id, .. }
-        | ControlEvent::AgentMessage { session_id, .. }
-        | ControlEvent::ApprovalRequired { session_id, .. }
-        | ControlEvent::ApprovalResolved { session_id, .. } => Some(*session_id),
-        ControlEvent::Error { session_id, .. } | ControlEvent::Raw { session_id, .. } => *session_id,
-        _ => None,
-    }
+    ev.session_id()
 }
 
 pub fn project_name(root: &str) -> String {

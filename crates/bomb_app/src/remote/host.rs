@@ -254,6 +254,32 @@ mod tests {
         }
         assert!(created && prompt, "created {created}, prompt {prompt}");
 
+        // Later prompts reach the Mac too, including after the phone was backgrounded and came back.
+        async fn heard(mac_ui: &mut bomb_core::journal::EventReceiver, want: &str) -> bool {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+            while tokio::time::Instant::now() < deadline {
+                if let Ok(Some((_, bomb_core::ControlEvent::UserMessage { text, .. }))) = tokio::time::timeout(Duration::from_millis(500), mac_ui.recv()).await {
+                    if text == want { return true; }
+                }
+            }
+            false
+        }
+        let options = || bomb_mobile::machine::PromptOptions { backend: None, model: None, effort: None, approval_mode: None, images: vec![] };
+        let settle = || bomb_core::rpc::dispatch(&state, "test", "wait_turn_settled", serde_json::json!({ "id": id, "seconds": 30 }));
+        settle().await.unwrap();
+        machine.send_prompt(id.clone(), "second".into(), options()).await.unwrap();
+        assert!(heard(&mut mac_ui, "second").await, "the second prompt reaches the Mac");
+        machine.set_active(false);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        machine.set_active(true);
+        for _ in 0..100 {
+            if *link.lock().unwrap() == Some(LinkState::Connected) { break; }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        settle().await.unwrap();
+        machine.send_prompt(id.clone(), "after coming back".into(), options()).await.unwrap();
+        assert!(heard(&mut mac_ui, "after coming back").await, "a prompt after the phone reconnects reaches the Mac");
+
         // Removing the phone here cuts it off.
         let device = host.devices()[0].id.clone();
         host.revoke(&device).unwrap();
