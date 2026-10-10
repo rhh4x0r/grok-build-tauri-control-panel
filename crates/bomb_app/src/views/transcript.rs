@@ -217,15 +217,14 @@ impl TranscriptView {
                         .iter()
                         .any(|a| matches!(a, Activity::Tool { row, .. } if !row.is_terminal()));
                     let failed = items.iter().any(|a| matches!(a, Activity::Tool { row, .. } if row.status.contains("fail") || row.status.contains("denied")));
-                    // Closed by default, running or not: the header says what is happening. A group with a
-                    // failed step opens itself, because that is the one worth reading. The user can override.
-                    let _ = running;
+                    // Closed by default, running or not, failed steps or not: one line says what is
+                    // happening (and how many steps failed); a click opens it. Agents that try a few
+                    // things (Grok's reads outside the project are refused) would otherwise spill open.
+                    let _ = (running, failed);
                     let collapsed = if t.collapsed_groups.contains(&first_id) {
                         true
-                    } else if t.expanded.contains(&first_id) {
-                        false
                     } else {
-                        !failed
+                        !t.expanded.contains(&first_id)
                     };
                     let image_rows: Vec<Row> = if t.meta.live && i > turn_start {
                         items
@@ -694,6 +693,7 @@ impl TranscriptView {
                     }),
             )
             ;
+        let failures = items.iter().filter(|a| matches!(a, Activity::Tool { row, .. } if row.status.contains("fail") || row.status.contains("denied"))).count();
         if running {
             // What it is doing right now, with a breathing dot so a closed group still reads as alive.
             let steps = items.iter().filter(|a| matches!(a, Activity::Tool { .. })).count();
@@ -706,6 +706,10 @@ impl TranscriptView {
         } else {
             header = header.child(div().text_sm().text_color(color).child(summary));
         }
+        // Failures are counted on the closed line; the steps are a click away.
+        let header = header.when(failures > 0, |el| {
+            el.child(div().flex_shrink_0().text_size(px(crate::theme::Type::SMALL)).text_color(ui.danger).child(format!("{failures} failed")))
+        });
         // Un-collapsing a collapsed-by-default group needs the header click to
         // land in `expanded`; fix the toggle so a collapsed group opens.
         let header = header.on_click({
@@ -850,7 +854,10 @@ impl TranscriptView {
             })
             .child(Icon::from(icon))
             .into_any_element();
-        let first_line = r.args.lines().next().unwrap_or("").trim().to_string();
+        // The command, file or search, not the raw JSON some agents (Grok) send.
+        let first_line = bomb_core::summary::arg_detail(&r.args)
+            .unwrap_or_else(|| r.args.clone())
+            .lines().next().unwrap_or("").trim().to_string();
         let head = div()
             .id(("chip", id))
             .min_w_0().overflow_hidden()

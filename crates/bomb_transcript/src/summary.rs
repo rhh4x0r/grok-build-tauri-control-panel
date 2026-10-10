@@ -34,13 +34,28 @@ pub fn tool_kind(name: &str) -> &'static str {
     }
 }
 
+/// The part of a step's arguments a person would recognise (the command, the file, the search),
+/// when they arrive as JSON. Claude, Codex and Grok name these differently
+/// (`file_path` / `path` / `target_file`, `pattern` / `query` …).
+pub fn arg_detail(args: &str) -> Option<String> {
+    let v = serde_json::from_str::<serde_json::Value>(args.trim()).ok()?;
+    const KEYS: &[&str] = &[
+        "command", "cmd", "file_path", "target_file", "path", "file", "url",
+        "pattern", "query", "glob_pattern", "search_query", "target_directory", "dir_path", "directory",
+    ];
+    KEYS.iter().find_map(|k| match v.get(*k)? {
+        serde_json::Value::String(s) if !s.trim().is_empty() => Some(s.clone()),
+        // `["bash", "-lc", "npm test"]`: the last part is what was run.
+        serde_json::Value::Array(parts) => parts.last().and_then(|p| p.as_str()).map(str::to_owned),
+        _ => None,
+    })
+}
+
 /// A running step in a few words: "Running `npm test`", "Editing src/app.ts", "Reading 3 files…".
 pub fn running_label(row: &ToolRow) -> String {
     let first = row.args.lines().next().unwrap_or_default().trim();
     // Arguments often arrive as JSON; pull out the part a person would recognise.
-    let detail = serde_json::from_str::<serde_json::Value>(&row.args).ok().and_then(|v| {
-        ["command", "file_path", "path", "url", "pattern", "query"].iter().find_map(|k| v.get(*k).and_then(|x| x.as_str()).map(str::to_owned))
-    }).unwrap_or_else(|| first.to_string());
+    let detail = arg_detail(&row.args).unwrap_or_else(|| first.to_string());
     let detail: String = detail.lines().next().unwrap_or_default().chars().take(80).collect();
     let verb = match tool_kind(&row.name) { "command" => "Running", "edit" => "Editing", "read" => "Reading", "web" => "Fetching", _ => "Working on" };
     match (detail.is_empty(), tool_kind(&row.name)) {
@@ -105,5 +120,20 @@ fn plural(n: usize) -> &'static str {
         ""
     } else {
         "s"
+    }
+}
+
+#[cfg(test)]
+mod arg_detail_tests {
+    use super::arg_detail;
+
+    #[test]
+    fn grok_claude_and_codex_arguments_read_plainly() {
+        assert_eq!(arg_detail(r#"{"variant":"Bash","command":"ls -la ~/.grok"}"#).as_deref(), Some("ls -la ~/.grok"));
+        assert_eq!(arg_detail(r#"{"variant":"ReadFile","target_file":"/a/config.toml","limit":40}"#).as_deref(), Some("/a/config.toml"));
+        assert_eq!(arg_detail(r#"{"variant":"Grep","pattern":"agent.?profile"}"#).as_deref(), Some("agent.?profile"));
+        assert_eq!(arg_detail(r#"{"file_path":"src/app.ts","new_string":"x"}"#).as_deref(), Some("src/app.ts"));
+        assert_eq!(arg_detail(r#"{"command":["bash","-lc","npm test"]}"#).as_deref(), Some("npm test"));
+        assert_eq!(arg_detail("npm test"), None);
     }
 }

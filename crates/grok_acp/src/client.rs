@@ -390,6 +390,22 @@ impl AcpClient {
         if !starting {
             return;
         }
+        // Stopped moments ago: this is the agent picking the stopped task back up. Stop it again.
+        let just_stopped = self.stopped_at.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|at| at.elapsed() < STOP_HOLD);
+        if just_stopped {
+            info!("agent restarted on its own right after Stop; stopping it again");
+            if let (Some(session), Ok(transport)) = (self.session_id.read().await.clone(), self.transport().await) {
+                let _ = transport.notify("session/cancel", Some(json!({ "sessionId": session }))).await;
+            }
+            self.terminals.kill_all().await;
+            bus.emit(ControlEvent::Raw {
+                session_id: Some(sid),
+                payload: json!({ "channel": "term", "stream": "acp", "line": "← agent restarted after Stop; stopped it again" }),
+            });
+            // Let a later self-started turn (after the hold) be noticed again.
+            *self.unprompted.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            return;
+        }
         info!("agent started a turn on its own");
         bus.emit_status(sid, SessionStatus::Running).await;
         let (unprompted, prompts_open, bus) = (self.unprompted.clone(), self.open_prompts.clone(), self.event_bus.clone());
@@ -525,6 +541,8 @@ pub struct AcpClient {
     terminals: TerminalRegistry,
     /// A turn the agent started on its own, which no prompt's answer will end.
     unprompted: Arc<std::sync::Mutex<Option<UnpromptedTurn>>>,
+    /// When the person last pressed Stop (cleared by their next prompt); see `STOP_HOLD`.
+    stopped_at: std::sync::Mutex<Option<tokio::time::Instant>>,
     /// When the saved conversation was last reloaded: the adapter re-announces its old subagents
     /// right after, and those aren't new work.
     reloaded_at: std::sync::Mutex<Option<std::time::Instant>>,
@@ -554,6 +572,9 @@ struct UnpromptedTurn {
 
 /// How long an unprompted turn stays quiet, with no tool running, before it counts as finished.
 const UNPROMPTED_QUIET: Duration = Duration::from_secs(8);
+/// After Stop, a turn the agent starts on its own this soon is stopped again: Grok picks its task
+/// back up a few seconds after a cancel, so Stop didn't stop it.
+const STOP_HOLD: Duration = Duration::from_secs(30);
 /// An unprompted turn ends by this age even if a tool call never reported back.
 const UNPROMPTED_MAX: Duration = Duration::from_secs(30 * 60);
 
@@ -778,6 +799,7 @@ impl AcpClient {
             current_mode: RwLock::new(None),
             terminals: TerminalRegistry::new(default_cwd),
             unprompted: Arc::new(std::sync::Mutex::new(None)),
+            stopped_at: std::sync::Mutex::new(None),
             reloaded_at: std::sync::Mutex::new(None),
             subagents: std::sync::Mutex::new(HashMap::new()),
             grok_spawns: std::sync::Mutex::new(Default::default()),
@@ -862,6 +884,7 @@ impl AcpClient {
             current_mode: RwLock::new(None),
             terminals: TerminalRegistry::new(PathBuf::from("/tmp")),
             unprompted: Arc::new(std::sync::Mutex::new(None)),
+            stopped_at: std::sync::Mutex::new(None),
             reloaded_at: std::sync::Mutex::new(None),
             subagents: std::sync::Mutex::new(HashMap::new()),
             grok_spawns: std::sync::Mutex::new(Default::default()),
@@ -1639,6 +1662,8 @@ impl AcpClient {
     }
 
     pub async fn send_prompt_correlated(&self, prompt: &str, images: &[PromptImage], correlation: Option<String>) -> Result<()> {
+        // A new message from the person ends the hold after Stop.
+        *self.stopped_at.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let sid = self
             .session_id
             .read()
@@ -1955,6 +1980,7 @@ impl AcpClient {
     }
 
     pub async fn cancel(&self) -> Result<()> {
+        *self.stopped_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(tokio::time::Instant::now());
         self.turn_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // Cancelled turns must resolve pending permission requests (ACP spec).
@@ -2717,19 +2743,17 @@ impl AcpClient {
         }
     }
 
+    /// A file or terminal request the agent made of Bomb Code. The agent reports the same action as
+    /// its own step (Grok: "Execute `npm test`"), so this goes to the protocol log, not the step
+    /// list: listing both showed every command four or five times (create, wait, output, release).
     fn emit_host_tool(&self, tool: &str, summary: &str, status: ToolCallStatus) {
         if let Some(bus) = &self.event_bus {
-            bus.emit_tool_call(
-                self.control_session_id,
-                ToolCallEvent {
-                    id: Uuid::new_v4().to_string(),
-                    tool: tool.to_string(),
-                    args_summary: summary.to_string(),
-                    status,
-                    result_summary: None,
-                    at: Utc::now(),
-                },
-            );
+            let word = match status {
+                ToolCallStatus::Failed => " — failed",
+                _ => "",
+            };
+            let summary: String = summary.lines().next().unwrap_or_default().chars().take(160).collect();
+            Self::emit_term(bus, self.control_session_id, format!("· {tool} {summary}{word}"));
         }
     }
 
@@ -3979,6 +4003,31 @@ mod unprompted_tests {
         }
         assert_eq!(statuses, vec![SessionStatus::Running, SessionStatus::Idle]);
         assert!(completed, "the turn says it finished");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_turn_the_agent_restarts_right_after_stop_is_stopped_not_shown() {
+        let bus = Arc::new(EventBus::new());
+        let client = AcpClient::mock_for_tests("stopped", Some(bus.clone()));
+        let sid = client.control_session_id;
+        client.cancel().await.unwrap();
+        let mut events = bus.subscribe();
+        // A few seconds later the agent carries on by itself (as Grok does).
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        client.note_unprompted(&bus, sid, &json!({ "update": { "sessionUpdate": "tool_call", "toolCallId": "t9", "status": "pending" } })).await;
+        let mut running = false;
+        while let Ok(event) = events.try_recv() {
+            if matches!(event, ControlEvent::SessionStatusChanged { status: SessionStatus::Running, .. }) { running = true; }
+        }
+        assert!(!running, "a restart right after Stop isn't shown as working");
+        // Long after the Stop, a turn the agent starts itself is shown again.
+        tokio::time::sleep(STOP_HOLD).await;
+        client.note_unprompted(&bus, sid, &json!({ "update": { "sessionUpdate": "tool_call", "toolCallId": "t10", "status": "pending" } })).await;
+        let mut shown = false;
+        while let Ok(event) = events.try_recv() {
+            if matches!(event, ControlEvent::SessionStatusChanged { status: SessionStatus::Running, .. }) { shown = true; }
+        }
+        assert!(shown);
     }
 
     #[tokio::test(start_paused = true)]
