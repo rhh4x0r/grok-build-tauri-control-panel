@@ -107,6 +107,7 @@ fn main() {
         notifications.update(cx, |n, cx| n.load(cx));
         cx.set_global(models::notifications::NotificationsHandle(notifications));
         cx.set_global(models::app::AppModelHandle(model.clone()));
+        theme::load_appearance(cx);
         views::root::open_main_window(model.clone(), cx);
         smoke::maybe_run(model, cx);
         cx.activate(true);

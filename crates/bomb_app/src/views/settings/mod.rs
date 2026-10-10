@@ -125,7 +125,24 @@ fn general_page(cx: &App) -> SettingPage {
         v
     };
     SettingPage::new("General")
-        .description("Defaults for new threads and the narrator.")
+        .description("Appearance, defaults for new threads, and the narrator.")
+        .group(
+            SettingGroup::new().title("Appearance").item(
+                SettingItem::new(
+                    "Appearance",
+                    SettingField::dropdown(
+                        vec![
+                            ("auto".into(), "Auto · follow macOS".into()),
+                            ("light".into(), "Light".into()),
+                            ("dark".into(), "Dark".into()),
+                        ],
+                        |cx| crate::theme::appearance(cx).key().into(),
+                        |v, cx| crate::theme::set_appearance(crate::theme::Appearance::from_key(&v), cx),
+                    ),
+                )
+                .description("Auto switches with macOS's own light and dark setting."),
+            ),
+        )
         .group(
             SettingGroup::new()
                 .title("Sessions")

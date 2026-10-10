@@ -69,9 +69,59 @@ pub fn apply_mode(dark: bool, cx: &mut App) {
     }
 }
 
-/// Call each frame from the root view: follows macOS appearance changes.
+/// Light, dark, or whatever macOS is set to (Settings → General → Appearance).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Appearance {
+    #[default]
+    Auto,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    pub fn key(self) -> &'static str {
+        match self { Self::Auto => "auto", Self::Light => "light", Self::Dark => "dark" }
+    }
+    pub fn from_key(key: &str) -> Self {
+        match key { "light" => Self::Light, "dark" => Self::Dark, _ => Self::Auto }
+    }
+}
+
+struct AppearancePref(Appearance);
+impl Global for AppearancePref {}
+
+const APPEARANCE_KEY: &str = "appearance";
+
+pub fn appearance(cx: &App) -> Appearance {
+    cx.try_global::<AppearancePref>().map(|p| p.0).unwrap_or_default()
+}
+
+/// Choose light, dark or auto; saved for next time, applied to every window now.
+pub fn set_appearance(choice: Appearance, cx: &mut App) {
+    cx.set_global(AppearancePref(choice));
+    let state = crate::runtime::services(cx);
+    crate::runtime::spawn_service(cx, async move { bomb_core::services::kv_set(&state, APPEARANCE_KEY, choice.key()).await }, |_, _| {});
+    cx.refresh_windows();
+}
+
+/// The saved choice, at start-up.
+pub fn load_appearance(cx: &mut App) {
+    let state = crate::runtime::services(cx);
+    crate::runtime::spawn_service(cx, async move { bomb_core::services::kv_get(&state, APPEARANCE_KEY).await }, |res, cx| {
+        if let Some(saved) = res.ok().flatten() {
+            cx.set_global(AppearancePref(Appearance::from_key(&saved)));
+            cx.refresh_windows();
+        }
+    });
+}
+
+/// Call each frame from the root view: the chosen appearance, or macOS's when it's Auto.
 pub fn follow_system(window: &Window, cx: &mut App) {
-    let want_dark = window.appearance().is_dark();
+    let want_dark = match appearance(cx) {
+        Appearance::Auto => window.appearance().is_dark(),
+        Appearance::Light => false,
+        Appearance::Dark => true,
+    };
     if cx.theme().mode.is_dark() != want_dark {
         apply_mode(want_dark, cx);
     }
