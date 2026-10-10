@@ -97,6 +97,7 @@ struct ThreadScreen: View {
             // Reading belongs to the thread it came from; opening another stops it (a subagent of it doesn't).
             if subagent == nil, let playing = ReadAloud.shared.playing, playing.threadId != threadId { ReadAloud.shared.close() }
             let model = machine.open(threadId: threadId)
+            PhoneNotifications.shared.opened(threadId)
             thread = model
             if let summary = model.summary {
                 choices.mode = ["plan", "ask", "auto"].contains(summary.approvalMode ?? "") ? summary.approvalMode! : "plan"
@@ -104,7 +105,10 @@ struct ThreadScreen: View {
                 choices.model = summary.model.isEmpty ? nil : summary.model
             }
         }
-        .onDisappear { machine.close(threadId: threadId) }
+        .onDisappear {
+            machine.close(threadId: threadId)
+            if PhoneNotifications.shared.openThread == threadId { PhoneNotifications.shared.openThread = nil }
+        }
         // A thread opened right after it started has no details yet; take its agent and mode once they arrive.
         .onChange(of: thread?.summary?.backend) { _, backend in
             guard choices.backend == nil, let summary = thread?.summary, backend != nil else { return }
@@ -180,6 +184,7 @@ struct ThreadScreen: View {
         let options = PromptOptions(backend: choices.backend, model: choices.model, effort: choices.effort, approvalMode: choices.mode, images: images)
         do {
             try await thread.send(text, options: options)
+            PhoneNotifications.shared.noteUsed()
             return true
         } catch {
             self.error = describe(error)

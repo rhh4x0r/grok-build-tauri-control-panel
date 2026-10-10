@@ -12,8 +12,16 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "${ROOT}/target/release/bomb_app" "$APP/Contents/MacOS/bomb_app"
 # The dictation helper (built by crates/bomb_app/build.rs when the Swift toolchain allows).
-if [ -f "${ROOT}/target/release/bomb-dictate" ]; then
-  cp "${ROOT}/target/release/bomb-dictate" "$APP/Contents/MacOS/bomb-dictate"
+# The helpers (built by crates/bomb_app/build.rs when the Swift toolchain allows): dictation,
+# read-aloud, and the notifier, which macOS wants as an app bundle of its own.
+for helper in bomb-dictate bomb-speak; do
+  if [ -f "${ROOT}/target/release/$helper" ]; then
+    cp "${ROOT}/target/release/$helper" "$APP/Contents/MacOS/$helper"
+  fi
+done
+if [ -d "${ROOT}/target/release/Bomb Code Notifier.app" ]; then
+  mkdir -p "$APP/Contents/Helpers"
+  ditto "${ROOT}/target/release/Bomb Code Notifier.app" "$APP/Contents/Helpers/Bomb Code Notifier.app"
 fi
 cp "${ROOT}/crates/bomb_app/assets/icon.icns" "$APP/Contents/Resources/icon.icns"
 cat > "$APP/Contents/Info.plist" <<PLIST

@@ -7,6 +7,7 @@ struct BombCodeApp: App {
 
     init() {
         Theme.registerFonts()
+        _ = PhoneNotifications.shared
     }
 
     var body: some Scene {
@@ -14,9 +15,14 @@ struct BombCodeApp: App {
             RootView()
                 .environment(app)
         }
+        // Background App Refresh: catch up on threads that finished while the app was suspended.
+        .backgroundTask(.appRefresh(PhoneNotifications.refreshTask)) {
+            await PhoneNotifications.shared.backgroundCheck(app)
+        }
         .onChange(of: phase) { _, phase in
             // iOS closes sockets in the background anyway; pause cleanly and reconnect on return.
             app.setActive(phase == .active)
+            PhoneNotifications.shared.sceneChanged(active: phase == .active)
         }
     }
 }
@@ -43,6 +49,12 @@ struct RootView: View {
                 }
         }
         .tint(Theme.text)
+        // A tapped notification opens its thread.
+        .onChange(of: PhoneNotifications.shared.route) { _, route in
+            guard let route else { return }
+            path = [route]
+            PhoneNotifications.shared.route = nil
+        }
         #if DEBUG
         .task { await Smoke.run(app) { path.append($0) } }
         #endif

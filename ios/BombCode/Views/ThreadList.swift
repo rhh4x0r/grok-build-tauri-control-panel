@@ -265,6 +265,9 @@ struct ThreadList: View {
         let rest = groups.filter { !$0.pinned }
         return ScrollView {
             LazyVStack(alignment: .leading, spacing: 18) {
+                if PhoneNotifications.shared.shouldOffer {
+                    NotifyCard()
+                }
                 if show != .all {
                     FilterChip(show: show) { show = .all }
                 }
@@ -540,5 +543,37 @@ private struct EmptyThreads: View {
             }
         }
         .frame(maxWidth: .infinity)
+    }
+}
+
+/// Offered once the app has been used: notifications for when a thread finishes or needs you.
+private struct NotifyCard: View {
+    private let notifications = PhoneNotifications.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "bell.badge").font(.system(size: 17)).foregroundStyle(Theme.accent)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Get notified when a thread finishes or needs you?").font(Theme.sans(15, .semibold)).foregroundStyle(Theme.text)
+                    Text("Bomb Code tells you when work on your Mac is done, while you're doing something else.")
+                        .font(Theme.small).foregroundStyle(Theme.textMuted).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            HStack(spacing: 10) {
+                Spacer()
+                Button("Not now") { withAnimation { notifications.notNow() } }
+                    .font(Theme.sans(14, .medium)).foregroundStyle(Theme.textMuted)
+                Button { Task { await notifications.turnOn() } } label: {
+                    Text("Turn on").font(Theme.sans(14, .semibold)).foregroundStyle(Theme.onSolid)
+                        .padding(.horizontal, 14).frame(height: 32).background(Capsule().fill(Theme.solid))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: Theme.panelCorner).fill(Theme.glass))
+        .overlay(RoundedRectangle(cornerRadius: Theme.panelCorner).stroke(Theme.hairline, lineWidth: 1))
+        .padding(.horizontal, 6)
     }
 }

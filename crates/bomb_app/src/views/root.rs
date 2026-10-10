@@ -49,6 +49,8 @@ pub struct RootView {
     /// Folder whose processes were last asked for; a change triggers an immediate scan.
     process_folder: Option<String>,
     _mode_shortcut: Subscription,
+    /// Tells notifications whether Bomb Code is the app in front.
+    _activation: Subscription,
 }
 
 impl RootView {
@@ -138,8 +140,13 @@ impl RootView {
             if right && sizes.len() > 1 { this.right_width = sizes.last().copied(); }
         })
         .detach();
+        let activation = cx.observe_window_activation(window, |_, window, cx| {
+            let active = window.is_window_active();
+            if let Some(n) = crate::models::notifications::notifications(cx) { n.update(cx, |n, cx| n.set_app_active(active, cx)); }
+        });
         Self {
             _mode_shortcut: mode_shortcut,
+            _activation: activation,
             split,
             split_layout: (true, false),
             sidebar_width: None,

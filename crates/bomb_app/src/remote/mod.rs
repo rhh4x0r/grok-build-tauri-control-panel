@@ -301,7 +301,8 @@ mod tests {
 
         // Server folders are namespaced on this side, and plain paths on the server.
         let path: String = remote.call("create_project", json!({ "name": "Tetris Game!" })).await.unwrap();
-        assert!(path.ends_with("/projects/tetris-game"), "{path}");
+        // ~/projects on a Linux server; ~/Documents/BombCode when the "server" is a Mac, as here.
+        assert!(path.ends_with("/tetris-game"), "{path}");
         let root = remote.root(&path);
         assert_eq!(core.list_projects().await.unwrap(), vec![root.clone()]);
         assert_eq!(remotes.for_root(&root).unwrap().config.id, config.id);

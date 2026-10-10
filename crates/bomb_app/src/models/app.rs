@@ -1412,6 +1412,7 @@ impl AppModel {
     // ── selection ───────────────────────────────────────────────────────
 
     pub fn select(&mut self, id: Option<Uuid>, cx: &mut Context<Self>) {
+        if let Some(id) = id { self.with_notifications(cx, |n, cx| n.opened(id, cx)); }
         if self.selected == id {
             return;
         }
@@ -1605,6 +1606,12 @@ impl AppModel {
                 }
                 ControlEvent::SessionStatusChanged { session_id, status, .. } => {
                     need_refresh = true;
+                    match status {
+                        grok_events::SessionStatus::Running => self.with_notifications(cx, |n, _| n.note_busy(*session_id)),
+                        grok_events::SessionStatus::WaitingApproval => self.notify_about(*session_id, crate::models::notifications::Happened::NeedsApproval, cx),
+                        grok_events::SessionStatus::Failed => self.notify_about(*session_id, crate::models::notifications::Happened::Failed, cx),
+                        _ => {}
+                    }
                     if matches!(status, grok_events::SessionStatus::Completed | grok_events::SessionStatus::Idle) { ended.push(*session_id); }
                     if matches!(status, grok_events::SessionStatus::Cancelled | grok_events::SessionStatus::Failed) {
                         // A stopped or failed merge must not close anything.
@@ -1670,7 +1677,13 @@ impl AppModel {
         if need_refresh {
             self.refresh_threads(cx);
         }
-        for session in ended { self.turn_ended(session, cx); }
+        for session in ended {
+            // A resumed session can report idle before its turn starts; only a real end counts.
+            if !self.threads.get(&session).is_some_and(|t| t.read(cx).thread.presence.turn_active()) {
+                self.notify_about(session, crate::models::notifications::Happened::Finished, cx);
+            }
+            self.turn_ended(session, cx);
+        }
         // The agent may be free now: send what was typed while it worked.
         for session in touched { self.pump_queue(Some(session), cx); }
     }
@@ -2623,6 +2636,30 @@ impl AppModel {
     }
 
     /// A turn ended: refresh the board, and finish any pending "merge and close".
+    fn with_notifications(&self, cx: &mut Context<Self>, f: impl FnOnce(&mut crate::models::notifications::Notifications, &mut Context<crate::models::notifications::Notifications>)) {
+        if let Some(n) = crate::models::notifications::notifications(cx) { n.update(cx, f); }
+    }
+
+    /// A notification about a thread (sent only if it's worth one; see `Notifications::happened`):
+    /// titled with the thread's name, saying what its reply or error begins with.
+    fn notify_about(&mut self, session: Uuid, what: crate::models::notifications::Happened, cx: &mut Context<Self>) {
+        use crate::models::notifications::{gist, Happened};
+        let Some(thread) = self.threads.get(&session) else { return };
+        let t = thread.read(cx);
+        let title = t.title();
+        let detail = match what {
+            Happened::Finished => t.thread.entries.iter().rev()
+                .find_map(|e| match (&e.role, &e.body) {
+                    (bomb_core::transcript::Role::Agent, bomb_core::transcript::Body::Text(text)) if !text.trim().is_empty() => Some(gist(text)),
+                    _ => None,
+                })
+                .unwrap_or_default(),
+            Happened::Failed => self.last_error.as_deref().map(gist).unwrap_or_default(),
+            Happened::NeedsApproval => String::new(),
+        };
+        self.with_notifications(cx, |n, cx| n.happened(session, what, &title, &detail, cx));
+    }
+
     fn turn_ended(&mut self, session: Uuid, cx: &mut Context<Self>) {
         let Some(w) = self.workspaces.iter().find(|w| w.threads.contains(&session.to_string())).cloned() else { return; };
         if self.active_project.as_deref() == Some(&w.project_root) { self.refresh_project_overview(cx); }

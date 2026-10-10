@@ -65,6 +65,7 @@ final class MachineModel: Identifiable {
         // A thread came or went: the Mac may have archived or pinned something too.
         let changed = Set(threads.map(\.id)) != Set(self.threads.map(\.id))
         self.threads = threads
+        PhoneNotifications.shared.compare(machine: self, threads: threads)
         if changed { Task { await loadPrefs() } }
     }
 

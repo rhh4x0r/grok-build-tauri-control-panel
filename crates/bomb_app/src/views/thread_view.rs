@@ -791,7 +791,7 @@ impl Render for ThreadView {
             .map(|el| match subagent_banner(&self.model, &tid, &ui, cx) {
                 // A subagent takes no messages: say whose it is, and offer the way back.
                 Some(banner) => el.child(banner),
-                None => el.child(composer),
+                None => el.when_some(notify_card(&self.model, &tid, &ui, cx), |el, card| el.child(card)).child(composer),
             })
             .when(self.terminals_open.contains(&tid), |el| {
                 if let Some(panel) = self.terminals.get(&tid) {
@@ -818,6 +818,40 @@ impl Render for ThreadView {
             })
             .into_any_element()
     }
+}
+
+/// Once a thread has a message from you: offer notifications for when it finishes or needs you,
+/// until they're on, turned down, or put off ("Not now" asks again in a week).
+fn notify_card(model: &Entity<AppModel>, tid: &str, ui: &Ui, cx: &App) -> Option<AnyElement> {
+    let notifications = crate::models::notifications::notifications(cx)?;
+    if !notifications.read(cx).should_offer() { return None; }
+    let id = uuid::Uuid::parse_str(tid).ok()?;
+    let thread = model.read(cx).threads.get(&id)?;
+    if !thread.read(cx).thread.entries.iter().any(|e| e.role == bomb_core::transcript::Role::You) { return None; }
+    let (on, later) = (notifications.clone(), notifications);
+    Some(
+        div()
+            .mx(px(16.))
+            .mb(px(10.))
+            .px(px(14.))
+            .py(px(10.))
+            .rounded(px(14.))
+            .border_1()
+            .border_color(ui.border)
+            .bg(ui.glass)
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(div().size(px(16.)).flex_shrink_0().text_color(ui.accent).child(gpui_kit::component::Icon::from(Lucide::Bell)))
+            .child(
+                div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
+                    .child(div().text_size(px(crate::theme::Type::BODY)).text_color(ui.text).child("Get notified when a thread finishes or needs you?"))
+                    .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child("Only while you're in another app. Click one to come back to the thread.")),
+            )
+            .child(Button::new("notify-not-now").ghost().small().label("Not now").on_click(move |_, _, cx| later.update(cx, |n, cx| n.not_now(cx))))
+            .child(Button::new("notify-turn-on").primary().small().label("Turn on").on_click(move |_, _, cx| on.update(cx, |n, cx| n.turn_on(cx))))
+            .into_any_element(),
+    )
 }
 
 /// In place of the composer when a subagent is open: whose subagent it is, its task, and the way

@@ -128,11 +128,13 @@ struct VoiceSettings: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SheetHeader(title: "Voice") { EmptyView() } trailing: {
+            SheetHeader(title: "Settings") { EmptyView() } trailing: {
                 Button("Done") { reader.stopPreview(); dismiss() }.foregroundStyle(Theme.text)
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
+                    NotificationSettingsCard()
+                    SectionLabel("Voice").padding(.top, 6)
                     Footnote("Replies are read with Fish Audio voices, using your own Fish Audio API key. The key, voice and speed are shared with your Mac. Tap the speaker under a reply.")
                     keyCard
                     SectionLabel("Reading with \(reader.chosenVoiceName)").padding(.top, 6)
@@ -273,5 +275,42 @@ private struct VoiceRow: View {
     private var detail: String {
         let languages = voice.languages.map { Locale.current.localizedString(forLanguageCode: $0) ?? $0 }.joined(separator: ", ")
         return [voice.author, languages].filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+}
+
+/// Settings → Notifications: on or off, and what keeps them from arriving (with a way to fix it).
+private struct NotificationSettingsCard: View {
+    private let notifications = PhoneNotifications.shared
+
+    var body: some View {
+        GlassCard {
+            HStack {
+                Text("Notifications").font(Theme.sans(15, .semibold)).foregroundStyle(Theme.text)
+                Spacer()
+                Toggle("", isOn: Binding(
+                    get: { notifications.enabled && notifications.status != .denied },
+                    set: { on in if on { Task { await notifications.turnOn() } } else { notifications.turnOff() } }
+                ))
+                .labelsHidden()
+                .tint(Theme.accent)
+                .disabled(notifications.status == .denied)
+            }
+            Text("When a thread on your Mac finishes, needs your approval, or fails.")
+                .font(Theme.small).foregroundStyle(Theme.textMuted).fixedSize(horizontal: false, vertical: true)
+            if notifications.status == .denied {
+                note("They're turned off for Bomb Code in iOS Settings.")
+            } else if let limit = notifications.backgroundLimit {
+                note(limit)
+            }
+        }
+        .task { await notifications.refreshStatus() }
+    }
+
+    private func note(_ text: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(text).font(Theme.small).foregroundStyle(Theme.textMuted).fixedSize(horizontal: false, vertical: true)
+            Button("Open Settings") { notifications.openSettings() }.font(Theme.sans(14, .semibold))
+        }
+        .padding(.top, 2)
     }
 }

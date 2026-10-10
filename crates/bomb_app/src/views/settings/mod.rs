@@ -63,6 +63,7 @@ impl Render for SettingsView {
                         servers_page(),
                         phone_page(),
                         voice_page(),
+                        notifications_page(),
                         permissions_page(cx),
                         advanced_page(),
                     ]),
@@ -870,6 +871,46 @@ fn render_servers(cx: &mut App) -> AnyElement {
             ),
     )
     .into_any_element()
+}
+
+// ── Notifications ──────────────────────────────────────────────────
+
+fn notifications_page() -> SettingPage {
+    SettingPage::new("Notifications")
+        .description("A notification when a thread finishes, needs your approval, or fails, only while Bomb Code isn't the app in front. Click one to open the thread.")
+        .group(SettingGroup::new().item(SettingItem::render(|_, _, cx| render_notifications(cx))))
+}
+
+fn render_notifications(cx: &mut App) -> AnyElement {
+    let ui = Ui::of(cx);
+    let caption = |text: &'static str| div().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text_muted).child(text);
+    let Some(model) = crate::models::notifications::notifications(cx) else { return div().into_any_element() };
+    let (available, enabled, status) = {
+        let n = model.read(cx);
+        (n.available, n.settings.enabled, n.status.clone())
+    };
+    if !available {
+        return caption("Notifications aren't part of this build: they need Xcode's Swift tools to build.").into_any_element();
+    }
+    let blocked = status.as_deref() == Some("denied");
+    let toggle = model.clone();
+    let mut page = div().flex().flex_col().gap_3().w_full().child(
+        div().flex().items_center().gap_3()
+            .child(div().flex_1().text_color(ui.text).child("Notify me"))
+            .child(Switch::new("notifications-enabled").checked(enabled && !blocked).disabled(blocked).on_click(move |on, _, cx| {
+                toggle.update(cx, |n, cx| if *on { n.turn_on(cx) } else { n.turn_off(cx) });
+            })),
+    );
+    if blocked {
+        page = page
+            .child(caption("macOS is blocking Bomb Code's notifications. Allow them in System Settings → Notifications → Bomb Code, then come back."))
+            .child(div().flex().child(Button::new("open-notification-settings").outline().small().label("Open Notification Settings").on_click(|_, _, cx| {
+                cx.open_url("x-apple.systempreferences:com.apple.Notifications-Settings.extension");
+            })));
+    } else if enabled && status.as_deref() == Some("notDetermined") {
+        page = page.child(caption("Waiting for you to allow them in macOS's prompt."));
+    }
+    page.into_any_element()
 }
 
 // ── Voice (read-aloud) ──────────────────────────────────────────────────

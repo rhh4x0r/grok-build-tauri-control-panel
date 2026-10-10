@@ -31,6 +31,7 @@ final class AppModel {
             }
             machines.removeAll { $0.id == paired.id }
             machines.append(MachineModel(info: paired))
+            PhoneNotifications.shared.noteUsed()
         }
         return outcomes
     }

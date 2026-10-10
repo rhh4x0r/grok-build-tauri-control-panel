@@ -5,6 +5,7 @@ mod core_router;
 mod dictation;
 mod speech;
 mod models;
+mod notify;
 mod remote;
 mod runtime;
 mod smoke;
@@ -102,6 +103,9 @@ fn main() {
         let read_aloud = cx.new(|_| models::read_aloud::ReadAloud::default());
         read_aloud.update(cx, |r, cx| r.load(cx));
         cx.set_global(models::read_aloud::ReadAloudHandle(read_aloud));
+        let notifications = cx.new(|_| models::notifications::Notifications::default());
+        notifications.update(cx, |n, cx| n.load(cx));
+        cx.set_global(models::notifications::NotificationsHandle(notifications));
         cx.set_global(models::app::AppModelHandle(model.clone()));
         views::root::open_main_window(model.clone(), cx);
         smoke::maybe_run(model, cx);

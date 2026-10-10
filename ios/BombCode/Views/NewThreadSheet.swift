@@ -156,6 +156,7 @@ struct NewThreadSheet: View {
                             approvalMode: choices.mode, prompt: text, ownWorktree: ownWorktree, images: images)
         do {
             let id = try await machine.machine.startThread(new: new)
+            PhoneNotifications.shared.noteUsed()
             dismiss()
             started(ThreadRef(machineId: machine.id, threadId: id))
             return true
