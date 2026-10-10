@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 @main
 struct BombCodeApp: App {
@@ -8,6 +9,25 @@ struct BombCodeApp: App {
     init() {
         Theme.registerFonts()
         _ = PhoneNotifications.shared
+    }
+
+    /// The background time asked for when the app leaves the screen.
+    @State private var grace: UIBackgroundTaskIdentifier = .invalid
+
+    private func beginGrace() {
+        guard grace == .invalid else { return }
+        grace = UIApplication.shared.beginBackgroundTask(withName: "Hear threads finish") {
+            // Out of time: pause before iOS suspends the app.
+            app.setActive(false)
+            endGrace()
+        }
+        if grace == .invalid { app.setActive(false) }
+    }
+
+    private func endGrace() {
+        guard grace != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(grace)
+        grace = .invalid
     }
 
     var body: some Scene {
@@ -20,9 +40,20 @@ struct BombCodeApp: App {
             await PhoneNotifications.shared.backgroundCheck(app)
         }
         .onChange(of: phase) { _, phase in
-            // iOS closes sockets in the background anyway; pause cleanly and reconnect on return.
-            app.setActive(phase == .active)
-            PhoneNotifications.shared.sceneChanged(active: phase == .active)
+            switch phase {
+            case .active:
+                endGrace()
+                app.setActive(true)
+                PhoneNotifications.shared.sceneChanged(active: true)
+            case .background:
+                PhoneNotifications.shared.sceneChanged(active: false)
+                // Stay connected for the extra time iOS gives an app that's finishing something
+                // (about 30 seconds), so a thread that finishes just after you switch away still
+                // notifies; then pause cleanly (iOS would close the sockets anyway).
+                beginGrace()
+            default:
+                break
+            }
         }
     }
 }
