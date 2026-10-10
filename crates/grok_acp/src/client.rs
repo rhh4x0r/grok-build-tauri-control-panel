@@ -680,6 +680,10 @@ impl AcpClient {
         for (k, v) in &opts.extra_env {
             cmd.env(k, v);
         }
+        // Its own process group: every process of the agent (npx → adapter → agent) shares it, so a
+        // later start of the app can find the agent if this one dies without stopping it.
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         let mut child = cmd.spawn().map_err(|e| {
             AcpError::Spawn(format!(
@@ -689,6 +693,7 @@ impl AcpClient {
             ))
         })?;
 
+        if let Some(pid) = child.id() { crate::reap::note_started(pid); }
         let stdin = child
             .stdin
             .take()
@@ -3825,6 +3830,8 @@ impl AcpClient {
         let _ = self.cancel().await;
         let mut child_guard = self.child.lock().await;
         if let Some(mut child) = child_guard.take() {
+            // The whole agent (npx → adapter → agent), not just the process we started.
+            if let Some(pid) = child.id() { crate::reap::stop_agent(pid); }
             let _ = child.kill().await;
         }
         *self.transport.write().await = None;
@@ -4572,5 +4579,15 @@ mod tests {
             extract_agent_text(&update).as_deref(),
             Some("I should check tests")
         );
+    }
+}
+
+impl Drop for AcpClient {
+    /// A client dropped without `shutdown` (its thread removed) still takes its agent with it:
+    /// `kill_on_drop` alone stops only the first process of the chain.
+    fn drop(&mut self) {
+        if let Some(pid) = self.child.get_mut().as_ref().and_then(|child| child.id()) {
+            crate::reap::stop_agent(pid);
+        }
     }
 }

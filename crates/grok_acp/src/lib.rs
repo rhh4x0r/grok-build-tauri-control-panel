@@ -6,6 +6,7 @@ mod client;
 mod error;
 mod messages;
 mod provider_paths;
+pub mod reap;
 mod terminals;
 mod transport;
 

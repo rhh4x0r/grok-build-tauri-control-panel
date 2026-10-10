@@ -91,6 +91,9 @@ impl AppState {
 
     pub async fn initialize_with_paths(paths: GrokPaths) -> Result<Self> {
         let _ = paths.ensure_dirs();
+        // Agents left running by an app that crashed or was force-quit.
+        let stopped = tokio::task::spawn_blocking(grok_acp::reap::stop_orphans).await.unwrap_or(0);
+        if stopped > 0 { tracing::info!(stopped, "stopped agent processes left by an earlier run"); }
 
         // Resolve the binary against the BASE (global-only) config and save
         // that — saving the overlay-merged view would silently promote
