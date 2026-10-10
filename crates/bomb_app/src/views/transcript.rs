@@ -477,7 +477,9 @@ impl TranscriptView {
         let cwd = std::path::PathBuf::from(&self.thread.read(cx).meta.cwd);
         let link_cwd = cwd.clone();
         let videos = if streaming { Vec::new() } else { super::media::linked_videos(raw, &cwd) };
-        let body_text: AnyElement = if streaming {
+        // Formatted as it streams. A Foundry stage's reply carries markers that are only tidied
+        // once it's complete, so it streams as plain text instead.
+        let body_text: AnyElement = if streaming && raw.contains("<foundry") {
             streaming_text(id, bomb_foundry::presentation::stage_prose(raw), ui)
         } else {
             TextView::new(state)
