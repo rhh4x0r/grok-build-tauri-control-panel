@@ -806,6 +806,13 @@ impl Thread {
                 ch.push(Change::Appended(self.entries.len() - 1));
                 ch
             }
+            // A turn the agent started itself: its reply starts fresh below the line.
+            "thread" if str_at(payload, "kind").as_deref() == Some("divider") => {
+                let Some(line) = str_at(payload, "line") else { return Vec::new() };
+                let mut ch = self.close_streams();
+                ch.extend(self.note_system(&line));
+                ch
+            }
             "thread" if matches!(str_at(payload, "kind").as_deref(), Some("model_switch" | "goal")) => {
                 str_at(payload, "line")
                     .map(|line| self.note_system(&line))
@@ -1243,6 +1250,22 @@ mod tests {
         assert_eq!(t.apply(&raw(serde_json::json!({ "channel": "goal", "goal": null })), now), vec![Change::Goal]);
         assert!(t.goal.is_none());
         assert!(t.entries.is_empty(), "goal events aren't transcript lines");
+    }
+
+    #[test]
+    fn a_divider_starts_the_next_reply_on_its_own() {
+        let now = Instant::now();
+        let mut t = Thread::new();
+        let say = |text: &str| ControlEvent::AgentMessage { session_id: sid(), text: text.into(), at: Utc::now() };
+        t.apply(&say("Created 2.txt."), now);
+        t.apply(&ControlEvent::Raw { session_id: Some(sid()), payload: serde_json::json!({ "channel": "thread", "kind": "divider", "line": "Codex continued on the goal" }) }, now);
+        t.apply(&say("I'll create the next missing file."), now);
+        let bodies: Vec<_> = t.entries.iter().map(|e| (e.role, e.text().unwrap_or_default().to_string())).collect();
+        assert_eq!(bodies, vec![
+            (Role::Agent, "Created 2.txt.".to_string()),
+            (Role::System, "Codex continued on the goal".to_string()),
+            (Role::Agent, "I'll create the next missing file.".to_string()),
+        ]);
     }
 
     #[test]

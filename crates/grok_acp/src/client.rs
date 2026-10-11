@@ -577,6 +577,8 @@ pub struct AcpClient {
     goal_poke: tokio::sync::Notify,
     /// The goal watcher reads every second until then (a goal command was just sent).
     goal_fast_until: std::sync::Mutex<Option<tokio::time::Instant>>,
+    /// Codex last said its thread is working (`_meta.codex.threadStatus`).
+    codex_thread_active: std::sync::atomic::AtomicBool,
 }
 
 /// Grok's `spawn_subagent` calls: those waiting for their `subagent_spawned` (call id, prompt),
@@ -834,6 +836,7 @@ impl AcpClient {
             goal: std::sync::Mutex::new(None),
             goal_poke: tokio::sync::Notify::new(),
             goal_fast_until: std::sync::Mutex::new(None),
+            codex_thread_active: std::sync::atomic::AtomicBool::new(false),
         });
 
         client.initialize().await?;
@@ -926,6 +929,7 @@ impl AcpClient {
             goal: std::sync::Mutex::new(None),
             goal_poke: tokio::sync::Notify::new(),
             goal_fast_until: std::sync::Mutex::new(None),
+            codex_thread_active: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -2118,6 +2122,30 @@ impl AcpClient {
         });
     }
 
+    /// Codex starting a turn by itself (an active goal carrying on) gets a line in the thread, so
+    /// each turn reads on its own instead of running into the last one's reply.
+    fn note_codex_turn(&self, bus: &EventBus, sid: Uuid, params: &Value) {
+        let update = params.get("update").unwrap_or(params);
+        if update.get("sessionUpdate").and_then(Value::as_str) != Some("session_info_update") {
+            return;
+        }
+        let active = match update.pointer("/_meta/codex/threadStatus/type").and_then(Value::as_str) {
+            Some("active") => true,
+            Some("idle") => false,
+            _ => return,
+        };
+        let was_active = self.codex_thread_active.swap(active, std::sync::atomic::Ordering::SeqCst);
+        // A prompt's own turn needs no line, nor does an update to a turn already running.
+        if !active || was_active || *self.open_prompts.borrow() > 0 {
+            return;
+        }
+        let line = if self.goal().is_some_and(|g| g.status.is_live()) { "Codex continued on the goal" } else { "Codex carried on by itself" };
+        bus.emit(ControlEvent::Raw {
+            session_id: Some(sid),
+            payload: json!({ "channel": "thread", "kind": "divider", "line": line }),
+        });
+    }
+
     /// Codex answers a `/goal` it won't run with a one-line reply (`Command "/goal" requires …`);
     /// report it on the `goal` channel so the thread shows the goal didn't start.
     fn note_goal_reply(&self, bus: &EventBus, sid: Uuid, params: &Value) {
@@ -3059,6 +3087,7 @@ impl AcpClient {
                     return;
                 }
                 self.note_goal_reply(bus, sid, &params);
+                self.note_codex_turn(bus, sid, &params);
                 self.map_session_update(bus, sid, &params).await;
                 self.note_unprompted(bus, sid, &params).await;
             }
@@ -4231,6 +4260,30 @@ mod unprompted_tests {
             .filter_map(|e| match e { ControlEvent::SessionStatusChanged { status, .. } => Some(status), _ => None })
             .collect();
         assert_eq!(statuses, vec![SessionStatus::Running, SessionStatus::Idle]);
+    }
+
+    #[test]
+    fn each_turn_codex_starts_itself_gets_a_line() {
+        let bus = Arc::new(EventBus::new());
+        let mut events = bus.subscribe();
+        let client = AcpClient::mock_for_tests("goal-turns", Some(bus.clone()));
+        let sid = client.control_session_id;
+        let status = |s: &str| json!({ "update": { "sessionUpdate": "session_info_update", "_meta": { "codex": { "threadStatus": { "type": s } } } } });
+        let mut lines = || std::iter::from_fn(|| events.try_recv().ok())
+            .filter(|e| matches!(e, ControlEvent::Raw { payload, .. } if payload["kind"] == "divider"))
+            .count();
+        // The prompt's own turn: no line.
+        client.open_prompts.send_replace(1);
+        client.note_codex_turn(&bus, sid, &status("active"));
+        client.note_codex_turn(&bus, sid, &status("idle"));
+        client.open_prompts.send_replace(0);
+        assert_eq!(lines(), 0);
+        // Two turns Codex starts itself: a line each, and not again while one runs.
+        client.note_codex_turn(&bus, sid, &status("active"));
+        client.note_codex_turn(&bus, sid, &status("active"));
+        client.note_codex_turn(&bus, sid, &status("idle"));
+        client.note_codex_turn(&bus, sid, &status("active"));
+        assert_eq!(lines(), 2);
     }
 
     #[tokio::test(start_paused = true)]

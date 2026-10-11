@@ -2833,6 +2833,12 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
         Raw { session_id: Some(parent), payload } if payload["channel"] == "subagent" => {
             persist_subagent(db, *parent, payload)
         }
+        // The line before a turn the agent started itself; saved, so a reopened thread keeps
+        // that turn's reply apart from the last one's.
+        Raw { session_id: Some(session_id), payload } if payload["channel"] == "thread" && payload["kind"] == "divider" => {
+            let Some(line) = payload["line"].as_str() else { return Ok(()) };
+            db.append_message(*session_id, "system", line, Utc::now()).map(|_| ())
+        }
         Raw { session_id:Some(session_id), payload } if payload["channel"]=="policy_blocked" => {
             db.append_message(*session_id,"system",payload["message"].as_str().unwrap_or("Access was blocked by read-only policy."),Utc::now()).map(|_|())
         }
