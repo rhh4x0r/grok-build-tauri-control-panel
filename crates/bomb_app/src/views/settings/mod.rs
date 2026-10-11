@@ -188,6 +188,16 @@ fn general_page(cx: &App) -> SettingPage {
                 )
                 .item(
                     SettingItem::new(
+                        "Name branches from the task",
+                        SettingField::switch(
+                            |cx| settings(cx).read(cx).config.as_ref().map(|c| c.smart_names).unwrap_or(true),
+                            |v, cx| settings(cx).update(cx, |m, cx| m.edit_config(|c| c.smart_names = v, cx)),
+                        ),
+                    )
+                    .description("The thread’s model names a new thread’s branch and title, like bomb/fix/sidebar-drag-crash. Off, or if it takes more than 4 seconds, the first words of your message are used."),
+                )
+                .item(
+                    SettingItem::new(
                         "Max concurrent sessions",
                         SettingField::input(
                             |cx| settings(cx).read(cx).config.as_ref().map(|c| c.max_concurrent_sessions.to_string()).unwrap_or_default().into(),
