@@ -4,6 +4,7 @@
 
 mod client;
 mod error;
+pub mod goal;
 mod messages;
 mod provider_paths;
 pub mod reap;

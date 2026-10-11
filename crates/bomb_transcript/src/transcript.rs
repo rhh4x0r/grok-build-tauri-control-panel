@@ -768,7 +768,7 @@ impl Thread {
                 ch.push(Change::Appended(self.entries.len() - 1));
                 ch
             }
-            "thread" if str_at(payload, "kind").as_deref() == Some("model_switch") => {
+            "thread" if matches!(str_at(payload, "kind").as_deref(), Some("model_switch" | "goal")) => {
                 str_at(payload, "line")
                     .map(|line| self.note_system(&line))
                     .unwrap_or_default()

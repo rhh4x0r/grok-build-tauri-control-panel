@@ -951,6 +951,38 @@ pub async fn send_prompt(
             return Err("Fast mode is not exposed for this model by the connected agent. Turn Fast mode off and send again.".into());
         }
     }
+    // Codex goals: an objective over the adapter's limit is saved to a file the goal points at,
+    // and pause / clear go straight to the goal rather than becoming a turn.
+    let mut wire_prompt = prompt.clone();
+    if active.backend == grok_config::Backend::Codex {
+        use grok_acp::goal::{self, GoalCommand};
+        match goal::parse_command(&prompt) {
+            Some(GoalCommand::Set(objective)) if goal::objective_too_long(&objective) => {
+                let dir = grok_config::paths::bomb_home()
+                    .ok_or("There's no home folder to save the goal in.")?
+                    .join("goals")
+                    .join(id.to_string());
+                let objective = goal::fit_objective(&objective, &dir).map_err(|e| format!("Couldn't save the goal to a file: {e}"))?;
+                wire_prompt = format!("/goal {objective}");
+            }
+            Some(command @ (GoalCommand::Pause | GoalCommand::Clear)) => {
+                state.persistence.append_message(id, "prompt", &prompt, Utc::now()).map_err(err)?;
+                let action = command.action().unwrap_or_default();
+                let result = apply_goal_action(state, id, action).await;
+                // The message was shown as the start of a turn; with no turn running, end it.
+                let busy = state.registry.get_snapshot(id).is_ok_and(|s| matches!(s.metadata.status, grok_events::SessionStatus::Running | grok_events::SessionStatus::WaitingApproval));
+                if !busy {
+                    state.event_bus.emit(ControlEvent::Raw {
+                        session_id: Some(id),
+                        payload: serde_json::json!({ "channel": "term", "stream": "acp", "line": format!("← goal {action}"), "turn_complete": true, "stop_reason": "end_turn" }),
+                    });
+                    state.event_bus.emit_status(id, grok_events::SessionStatus::Idle).await;
+                }
+                return result;
+            }
+            _ => {}
+        }
+    }
     let prompt_len = prompt.len();
     let acp_images: Vec<grok_acp::PromptImage> = images
         .iter()
@@ -966,7 +998,7 @@ pub async fn send_prompt(
         .transpose()?;
     state
         .registry
-        .send_prompt_with_images(id, &prompt, &acp_images)
+        .send_prompt_with_images(id, &wire_prompt, &acp_images)
         .await
         .map_err(err)?;
     if let Some(w) = workspace.filter(|w| !w.inline && !w.read_only && !w.shared_checkout) {
@@ -1052,6 +1084,50 @@ pub async fn send_prompt(
     );
     persist_session(state, id).await;
     Ok(())
+}
+
+/// Codex: pause, resume or clear a thread's goal. Resume is a `/goal resume` message, so Codex's
+/// next turn on the goal streams like any other; pause and clear work while a turn runs.
+pub async fn goal_control(state: &AppState, id: String, action: String) -> Result<(), String> {
+    match action.as_str() {
+        "resume" => send_prompt(state, id, "/goal resume".into(), None, None, None, None, None, None, None, None).await,
+        "pause" | "clear" => {
+            let id = Uuid::parse_str(&id).map_err(err)?;
+            if !state.registry.is_live(id) {
+                return Err("This thread's agent isn't running. Send it a message to reconnect, then try again.".into());
+            }
+            apply_goal_action(state, id, &action).await
+        }
+        other => Err(format!("Unknown goal action: {other}")),
+    }
+}
+
+async fn apply_goal_action(state: &AppState, id: Uuid, action: &str) -> Result<(), String> {
+    state.registry.goal_control(id, action).await.map_err(err)?;
+    let line = if action == "pause" { "Goal paused." } else { "Goal cleared." };
+    state.persistence.append_message(id, "system", line, Utc::now()).map_err(err)?;
+    state.event_bus.emit(ControlEvent::Raw {
+        session_id: Some(id),
+        payload: serde_json::json!({ "channel": "thread", "kind": "goal", "line": line }),
+    });
+    Ok(())
+}
+
+/// Codex: a thread's goal. A live thread's comes from its agent; a saved one's is read from
+/// Codex's goals database under the thread's saved Codex session.
+pub async fn thread_goal(state: &AppState, id: String) -> Result<Option<grok_acp::goal::Goal>, String> {
+    let id = Uuid::parse_str(&id).map_err(err)?;
+    if state.registry.is_live(id) {
+        return Ok(state.registry.goal(id));
+    }
+    let Ok(record) = state.persistence.get_session(id) else { return Ok(None) };
+    let codex = serde_json::from_str::<serde_json::Value>(&record.metadata_json)
+        .ok()
+        .and_then(|m| m.pointer("/metadata/backend").and_then(|b| b.as_str()).map(|b| b == "codex"))
+        .unwrap_or(false);
+    let (Some(session), true) = (record.acp_session_id, codex) else { return Ok(None) };
+    let Some(home) = grok_acp::goal::codex_home(&[]) else { return Ok(None) };
+    tokio::task::spawn_blocking(move || grok_acp::goal::read(&home, &session)).await.map_err(err)
 }
 
 /// Bring a SQLite thread back online under the same id.

@@ -1058,3 +1058,25 @@ All additive; `PROTOCOL_VERSION` stays 1 and a Mac that never calls the new meth
 - Thread "last active" is real activity only: reconnecting, saving details and mode switches no longer bump it; 75 threads' times repaired from their transcripts.
 - Sidebar: threads sharing a folder (project checkout, inline) get their own rows sorted by their own time instead of hiding in "N conversations"; thread rows show the real branch.
 - Checked: helper voice list and error path; iPhone Voice sheet in the simulator against live Fish data; tests and workspace clippy. Not checked: speech with a real key.
+
+## 2026-10-11 — Codex goals: goal bar, long goals, Stop pauses the goal
+
+- Why: `/goal` in a Codex thread looked dead. codex-acp turned every attempt down (over its 4,000-character limit) with a one-line reply, and even an accepted goal showed nothing: the adapter reports goal status only to JetBrains AIR clients.
+- `grok_acp::goal`: parses `/goal` the way the adapter does, applies the UTF-16 length limit, and reads goal status from Codex's own `goals_1.sqlite` (`thread_goals`, keyed by the Codex thread id = ACP session id). Long objectives are saved to `~/.bombcode/goals/<thread>/goal-<uuid>.md`, and the goal is set to Codex CLI's own wording (`pasted text file: <path>. Read this file before continuing.`).
+- `AcpClient` (Codex only):
+  - Goal commands go out as typed: no plan preamble, memory or recovery text in front, since the adapter only sees `/goal` at the start. A goal or resume in Plan is refused with a message naming Ask first / Auto.
+  - A goal watcher reads the database every 1–10 s and emits `goal` events on change.
+  - `goal_control` sends the adapter's `_session/goal` pause or clear.
+  - Stop pauses an active goal before `session/cancel`.
+  - `Command "/goal" …` replies become a `goal` notice.
+- Self-started turns: Codex's `_meta.codex.threadStatus` active/idle now holds an unprompted turn open (Running) through a goal's automatic turns, and the 30-minute cap doesn't end it while Codex reports active.
+- Core: `services::goal_control` (resume = a `/goal resume` message) and `thread_goal` (live from the agent, saved threads straight from Codex's database); both are RPCs and on `core_router`. A typed `/goal pause|clear` acts at once instead of starting a turn, and goal notes land in the transcript.
+- App: a goal card above the composer shows the objective (a file-backed goal shows the file's first line), its status, time and tokens (out of the budget, if any), with Pause / Resume / Clear, or "Goal not started" with Codex's reason. A typed `/goal pause|clear` skips the queue.
+- Checked against the real codex-acp 2.1.1 in temp folders:
+  - a goal is stored under our session id;
+  - `_session/goal` pause and clear work for a non-JetBrains client;
+  - a 6-turn goal ran five turns on its own, reported idle→active between each;
+  - pause + cancel stopped it, with no new work 30 s later;
+  - a 4,001-character goal gets the refusal line the notice matches.
+- Also checked: workspace tests and clippy; smoke run exits cleanly.
+- Not checked: the goal card on screen; the iPhone (shows goal notes in the transcript, no card yet).

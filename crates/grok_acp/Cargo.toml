@@ -12,6 +12,7 @@ chrono.workspace = true
 futures.workspace = true
 grok_events = { path = "../grok_events" }
 grok_permissions = { path = "../grok_permissions" }
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

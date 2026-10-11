@@ -371,15 +371,31 @@ impl AcpClient {
         }
         let update = params.get("update").unwrap_or(params);
         let kind = update.get("sessionUpdate").and_then(Value::as_str).unwrap_or_default();
-        if !matches!(kind, "agent_message_chunk" | "agent_thought_chunk" | "tool_call" | "tool_call_update" | "plan") {
-            return;
+        // Codex says when its thread is working (`_meta.codex.threadStatus`), e.g. through the
+        // turns an active goal starts on its own. Active holds the turn open; idle lets it end.
+        let codex_thread = (kind == "session_info_update")
+            .then(|| update.pointer("/_meta/codex/threadStatus/type").and_then(Value::as_str))
+            .flatten();
+        match codex_thread {
+            Some("active") => {}
+            Some("idle") => {
+                if let Some(turn) = self.unprompted.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                    turn.open_tools.remove(CODEX_THREAD_ACTIVE);
+                }
+                return;
+            }
+            Some(_) => return,
+            None if !matches!(kind, "agent_message_chunk" | "agent_thought_chunk" | "tool_call" | "tool_call_update" | "plan") => return,
+            None => {}
         }
         let starting = {
             let mut guard = self.unprompted.lock().unwrap_or_else(|e| e.into_inner());
             let starting = guard.is_none();
             let turn = guard.get_or_insert_with(UnpromptedTurn::default);
             turn.last = Some(tokio::time::Instant::now());
-            if let Some(id) = update.get("toolCallId").and_then(Value::as_str) {
+            if codex_thread.is_some() {
+                turn.open_tools.insert(CODEX_THREAD_ACTIVE.to_string());
+            } else if let Some(id) = update.get("toolCallId").and_then(Value::as_str) {
                 match update.get("status").and_then(Value::as_str) {
                     Some("completed" | "failed") => { turn.open_tools.remove(id); }
                     _ => { turn.open_tools.insert(id.to_string()); }
@@ -421,7 +437,11 @@ impl AcpClient {
                     let mut guard = unprompted.lock().unwrap_or_else(|e| e.into_inner());
                     let Some(turn) = guard.as_ref() else { return };
                     let quiet = turn.last.is_none_or(|at| at.elapsed() >= UNPROMPTED_QUIET);
-                    let finished = quiet && (turn.open_tools.is_empty() || began.elapsed() >= UNPROMPTED_MAX);
+                    // A tool that never reported back gives up at UNPROMPTED_MAX; Codex saying its
+                    // thread is still working doesn't (a goal can run for hours).
+                    let finished = quiet
+                        && (turn.open_tools.is_empty()
+                            || (began.elapsed() >= UNPROMPTED_MAX && !turn.open_tools.contains(CODEX_THREAD_ACTIVE)));
                     if finished { *guard = None; }
                     finished
                 };
@@ -551,6 +571,12 @@ pub struct AcpClient {
     /// Grok: `spawn_subagent` calls waiting for their `subagent_spawned` (tool call id, prompt),
     /// and each call's child session once known, so the call's end ends the subagent.
     grok_spawns: std::sync::Mutex<GrokSpawns>,
+    /// Codex: the thread's goal as last read from Codex's goals database (see `crate::goal`).
+    goal: std::sync::Mutex<Option<crate::goal::Goal>>,
+    /// Wakes the goal watcher right after a goal command.
+    goal_poke: tokio::sync::Notify,
+    /// The goal watcher reads every second until then (a goal command was just sent).
+    goal_fast_until: std::sync::Mutex<Option<tokio::time::Instant>>,
 }
 
 /// Grok's `spawn_subagent` calls: those waiting for their `subagent_spawned` (call id, prompt),
@@ -577,6 +603,8 @@ const UNPROMPTED_QUIET: Duration = Duration::from_secs(8);
 const STOP_HOLD: Duration = Duration::from_secs(30);
 /// An unprompted turn ends by this age even if a tool call never reported back.
 const UNPROMPTED_MAX: Duration = Duration::from_secs(30 * 60);
+/// Held in an unprompted turn's open set while Codex reports its thread active.
+const CODEX_THREAD_ACTIVE: &str = "codex:thread-active";
 
 impl AcpClient {
     pub async fn connect(
@@ -803,6 +831,9 @@ impl AcpClient {
             reloaded_at: std::sync::Mutex::new(None),
             subagents: std::sync::Mutex::new(HashMap::new()),
             grok_spawns: std::sync::Mutex::new(Default::default()),
+            goal: std::sync::Mutex::new(None),
+            goal_poke: tokio::sync::Notify::new(),
+            goal_fast_until: std::sync::Mutex::new(None),
         });
 
         client.initialize().await?;
@@ -824,6 +855,10 @@ impl AcpClient {
                 death_client.report_process_death().await;
             }
         });
+
+        if client.is_codex() {
+            client.watch_goal();
+        }
 
         // Answer agent→client requests (fs + permissions). Without this the turn hangs.
         let req_client = client.clone();
@@ -888,6 +923,9 @@ impl AcpClient {
             reloaded_at: std::sync::Mutex::new(None),
             subagents: std::sync::Mutex::new(HashMap::new()),
             grok_spawns: std::sync::Mutex::new(Default::default()),
+            goal: std::sync::Mutex::new(None),
+            goal_poke: tokio::sync::Notify::new(),
+            goal_fast_until: std::sync::Mutex::new(None),
         })
     }
 
@@ -1677,9 +1715,24 @@ impl AcpClient {
             return Err(AcpError::Protocol("empty prompt".into()));
         }
 
+        // Codex reads `/goal …` only at the very start of the message, so a goal command goes
+        // as typed; saved memory and recovered history wait for the next ordinary message.
+        let goal_command = if self.is_codex() { crate::goal::parse_command(prompt) } else { None };
+        if goal_command.is_some() {
+            if matches!(goal_command, Some(crate::goal::GoalCommand::Set(_) | crate::goal::GoalCommand::Resume))
+                && self.plan_emulation.load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return Err(AcpError::Protocol(
+                    "Plan is on, so Codex can only read files and would stall on the goal. Switch to Ask first or Auto, then send the goal again.".into(),
+                ));
+            }
+            self.goal_command_sent();
+        }
+
         // History-only: prepend transcript pack once.
         let mut text = prompt.to_string();
-        if let Some(ctx) = self.pending_context.lock().await.take() {
+        let pending_context = if goal_command.is_some() { None } else { self.pending_context.lock().await.take() };
+        if let Some(ctx) = pending_context {
             text = format!(
                 "[Bomb Code session recovery — history-only mode]\n\
                  The previous ACP process died. Below is the durable transcript from this thread.\n\
@@ -1705,7 +1758,8 @@ impl AcpClient {
 
         // Durable memory: prepend once on the first prompt (before recovery
         // context so notes read as standing knowledge, not conversation).
-        if let Some(mem) = self.pending_memory.lock().await.take() {
+        let pending_memory = if goal_command.is_some() { None } else { self.pending_memory.lock().await.take() };
+        if let Some(mem) = pending_memory {
             text = format!(
                 "[Project memory — durable notes the user saved; treat as ground truth]\n{mem}\n\n{text}"
             );
@@ -1721,9 +1775,10 @@ impl AcpClient {
         // Emulated plan mode: prepend planning instructions to the message —
         // the agent's restrictive mode blocks writes, this sets the
         // investigate → clarify → propose-a-plan behavior.
-        if self
-            .plan_emulation
-            .load(std::sync::atomic::Ordering::Relaxed)
+        if goal_command.is_none()
+            && self
+                .plan_emulation
+                .load(std::sync::atomic::Ordering::Relaxed)
         {
             text = format!("{PLAN_EMULATION_PREAMBLE}\n\n{text}");
         }
@@ -1979,6 +2034,109 @@ impl AcpClient {
         settled
     }
 
+    fn is_codex(&self) -> bool {
+        self.config.backend_label == "codex"
+    }
+
+    /// Codex: the thread's goal as last read, if it has one.
+    pub fn goal(&self) -> Option<crate::goal::Goal> {
+        self.goal.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Codex: pause or clear the thread's goal through the adapter's goal request, which works
+    /// while a turn runs. Resuming is a `/goal resume` prompt, so its turn streams like any other.
+    pub async fn goal_control(&self, action: &str) -> Result<()> {
+        if !self.is_codex() {
+            return Err(AcpError::Protocol("Only Codex threads have goals.".into()));
+        }
+        if !matches!(action, "pause" | "clear") {
+            return Err(AcpError::Protocol(format!("unknown goal action: {action}")));
+        }
+        let sid = self.session_id.read().await.clone().ok_or(AcpError::SessionNotReady)?;
+        self.goal_command_sent();
+        self.request_timeout(crate::goal::CONTROL_METHOD, Some(json!({ "sessionId": sid, "action": action })))
+            .await
+            .map(|_| ())
+    }
+
+    /// A goal command just went out: read the goal every second for a minute.
+    fn goal_command_sent(&self) {
+        *self.goal_fast_until.lock().unwrap_or_else(|e| e.into_inner()) = Some(tokio::time::Instant::now() + Duration::from_secs(60));
+        self.goal_poke.notify_one();
+    }
+
+    /// Codex: follow the thread's goal in Codex's goals database and report it on the `goal`
+    /// channel whenever it changes (the adapter only tells JetBrains clients). Ends with the client.
+    fn watch_goal(self: &Arc<Self>) {
+        let Some(home) = crate::goal::codex_home(&self.config.env) else { return };
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut reported = false;
+            loop {
+                let Some(client) = weak.upgrade() else { return };
+                if client.shutting_down.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                let sid = client.session_id.read().await.clone();
+                let goal = match sid {
+                    Some(sid) => {
+                        let home = home.clone();
+                        tokio::task::spawn_blocking(move || crate::goal::read(&home, &sid)).await.ok().flatten()
+                    }
+                    None => None,
+                };
+                let changed = {
+                    let mut last = client.goal.lock().unwrap_or_else(|e| e.into_inner());
+                    let changed = !reported || *last != goal;
+                    *last = goal.clone();
+                    changed
+                };
+                if changed {
+                    reported = true;
+                    if let Some(bus) = &client.event_bus {
+                        bus.emit(ControlEvent::Raw {
+                            session_id: Some(client.control_session_id),
+                            payload: json!({ "channel": "goal", "goal": goal }),
+                        });
+                    }
+                }
+                let fast = client
+                    .goal_fast_until
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_some_and(|until| until > tokio::time::Instant::now());
+                let wait = match (fast, &goal) {
+                    (true, _) => Duration::from_secs(1),
+                    (false, Some(_)) => Duration::from_secs(2),
+                    (false, None) => Duration::from_secs(10),
+                };
+                tokio::select! {
+                    _ = client.goal_poke.notified() => {}
+                    _ = tokio::time::sleep(wait) => {}
+                }
+            }
+        });
+    }
+
+    /// Codex answers a `/goal` it won't run with a one-line reply (`Command "/goal" requires …`);
+    /// report it on the `goal` channel so the thread shows the goal didn't start.
+    fn note_goal_reply(&self, bus: &EventBus, sid: Uuid, params: &Value) {
+        if !self.is_codex() {
+            return;
+        }
+        let update = params.get("update").unwrap_or(params);
+        if update.get("sessionUpdate").and_then(Value::as_str) != Some("agent_message_chunk") {
+            return;
+        }
+        let Some(text) = extract_agent_text(update) else { return };
+        if text.trim_start().starts_with("Command \"/goal\"") {
+            bus.emit(ControlEvent::Raw {
+                session_id: Some(sid),
+                payload: json!({ "channel": "goal", "notice": text.trim() }),
+            });
+        }
+    }
+
     pub async fn cancel(&self) -> Result<()> {
         *self.stopped_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(tokio::time::Instant::now());
         self.turn_generation
@@ -1988,6 +2146,26 @@ impl AcpClient {
         // Mock / offline clients have no transport — treat cancel as local status update.
         let has_transport = self.transport.read().await.is_some();
         if has_transport {
+            // An active Codex goal starts its next turn as soon as this one ends: pause it first,
+            // so Stop stops the goal and not just the turn. Not awaited; it's on the wire first.
+            if self.goal().is_some_and(|g| g.status.is_live()) {
+                if let (Some(sid), Ok(transport)) = (self.session_id.read().await.clone(), self.transport().await) {
+                    let params = json!({ "sessionId": sid, "action": "pause" });
+                    match transport.send_request(crate::goal::CONTROL_METHOD, Some(params)).await {
+                        Ok(rx) => {
+                            self.goal_command_sent();
+                            tokio::spawn(async move {
+                                if let Ok(Ok(resp)) = tokio::time::timeout(Duration::from_secs(30), rx).await {
+                                    if let Err(e) = NdjsonTransport::unwrap_response(resp) {
+                                        warn!(error = %e, "pausing the goal on Stop failed");
+                                    }
+                                }
+                            });
+                        }
+                        Err(e) => warn!(error = %e, "pausing the goal on Stop failed"),
+                    }
+                }
+            }
             if let Some(sid) = self.session_id.read().await.clone() {
                 // ACP cancellation is a NOTIFICATION — agents don't reply to
                 // it. Sending it as a request made Stop block for the full
@@ -2880,6 +3058,7 @@ impl AcpClient {
                 if self.note_grok_spawn_call(bus, sid, &params).await {
                     return;
                 }
+                self.note_goal_reply(bus, sid, &params);
                 self.map_session_update(bus, sid, &params).await;
                 self.note_unprompted(bus, sid, &params).await;
             }
@@ -4028,6 +4207,30 @@ mod unprompted_tests {
             if matches!(event, ControlEvent::SessionStatusChanged { status: SessionStatus::Running, .. }) { shown = true; }
         }
         assert!(shown);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn codex_working_on_its_goal_stays_running_until_its_thread_goes_idle() {
+        let bus = Arc::new(EventBus::new());
+        let mut events = bus.subscribe();
+        let client = AcpClient::mock_for_tests("goal", Some(bus.clone()));
+        let sid = client.control_session_id;
+        let status = |s: &str| json!({ "update": { "sessionUpdate": "session_info_update", "_meta": { "codex": { "threadStatus": { "type": s } } } } });
+        // Idle with nothing running starts nothing (it follows every prompt's answer).
+        client.note_unprompted(&bus, sid, &status("idle")).await;
+        assert!(client.unprompted.lock().unwrap().is_none());
+        // A goal's next turn: Codex goes active with no prompt open.
+        client.note_unprompted(&bus, sid, &status("active")).await;
+        // Quiet stretches, even past the cap for a stuck tool, don't end it while Codex is working.
+        tokio::time::sleep(UNPROMPTED_MAX + Duration::from_secs(60)).await;
+        assert!(client.unprompted.lock().unwrap().is_some());
+        client.note_unprompted(&bus, sid, &status("idle")).await;
+        tokio::time::sleep(UNPROMPTED_QUIET + Duration::from_secs(2)).await;
+        assert!(client.unprompted.lock().unwrap().is_none());
+        let statuses: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(|e| match e { ControlEvent::SessionStatusChanged { status, .. } => Some(status), _ => None })
+            .collect();
+        assert_eq!(statuses, vec![SessionStatus::Running, SessionStatus::Idle]);
     }
 
     #[tokio::test(start_paused = true)]

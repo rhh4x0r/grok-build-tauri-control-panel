@@ -541,6 +541,18 @@ impl SessionRegistry {
         Some(c.image_prompts_supported().await)
     }
 
+    /// Codex: the live thread's goal as last read. `None` when not live or no goal.
+    pub fn goal(&self, id: Uuid) -> Option<grok_acp::goal::Goal> {
+        self.sessions.get(&id)?.acp_client.clone()?.goal()
+    }
+
+    /// Codex: pause or clear the live thread's goal.
+    pub async fn goal_control(&self, id: Uuid, action: &str) -> Result<()> {
+        let client = self.sessions.get(&id).ok_or(CoreError::SessionNotFound(id))?.acp_client.clone().ok_or(CoreError::NotAcp)?;
+        client.goal_control(action).await?;
+        Ok(())
+    }
+
     pub fn list_sessions(&self) -> Vec<SessionMetadata> {
         self.sessions
             .iter()

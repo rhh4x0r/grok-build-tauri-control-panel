@@ -3860,6 +3860,7 @@ dependencies = [
  "grok_events",
  "grok_permissions",
  "libc",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

@@ -20,6 +20,12 @@ pub struct ThreadModel {
     pub hydrated: bool,
     pub provider_modes: serde_json::Value,
     pub provider_commands: serde_json::Value,
+    /// Codex: the thread's goal, as its agent last read it.
+    pub goal: Option<bomb_core::goal::Goal>,
+    /// Codex turned a `/goal` down (e.g. too long); shown until the next goal or dismissal.
+    pub goal_notice: Option<String>,
+    /// The goal in one line; a long goal saved to a file shows the file's first line.
+    pub goal_summary: String,
     pub loading: bool,
     /// Markdown render state per entry id; the streaming tail gets `push_str`.
     pub markdown: HashMap<u64, Entity<TextViewState>>,
@@ -45,6 +51,9 @@ impl ThreadModel {
             hydrated: false,
             provider_modes: serde_json::Value::Null,
             provider_commands: serde_json::Value::Null,
+            goal: None,
+            goal_notice: None,
+            goal_summary: String::new(),
             loading: false,
             markdown: HashMap::new(),
             images: HashMap::new(),
@@ -141,6 +150,15 @@ impl ThreadModel {
                 self.provider_commands = payload.clone();
                 cx.notify();
             }
+            if payload.get("channel").and_then(|v| v.as_str()) == Some("goal") {
+                if let Some(goal) = payload.get("goal") {
+                    self.set_goal(serde_json::from_value(goal.clone()).ok(), cx);
+                }
+                if let Some(notice) = payload.get("notice").and_then(|v| v.as_str()) {
+                    self.goal_notice = Some(notice.to_string());
+                    cx.notify();
+                }
+            }
             if payload.get("channel").and_then(|v| v.as_str()) == Some("provider_modes") {
                 if payload.get("backend") != self.provider_modes.get("backend") {
                     self.provider_modes = payload.clone();
@@ -157,6 +175,20 @@ impl ThreadModel {
         let changes = self.thread.apply(ev, Instant::now());
         self.absorb(&changes, cx);
         changes
+    }
+
+    pub fn set_goal(&mut self, goal: Option<bomb_core::goal::Goal>, cx: &mut Context<Self>) {
+        // A new goal answers an earlier refusal.
+        if goal.as_ref().is_some_and(|g| self.goal.as_ref().is_none_or(|old| old.created_at_ms != g.created_at_ms)) {
+            self.goal_notice = None;
+        }
+        if self.goal.as_ref().map(|g| &g.objective) != goal.as_ref().map(|g| &g.objective) {
+            self.goal_summary = goal.as_ref().map(|g| goal_summary(&g.objective)).unwrap_or_default();
+        }
+        if self.goal != goal {
+            self.goal = goal;
+            cx.notify();
+        }
     }
 
     /// Record a local change set (e.g. from `note_prompt`).
@@ -233,6 +265,20 @@ impl ThreadModel {
                 break;
             }
         }));
+    }
+}
+
+/// A goal's first line. Codex words a goal saved to a file as `pasted text file: <path>. Read this
+/// file before continuing.`; that one shows the file's first line, when the file is on this Mac.
+fn goal_summary(objective: &str) -> String {
+    let first_line = |text: &str| text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default().trim_start_matches('#').trim().to_string();
+    match objective.strip_prefix("pasted text file: ").and_then(|rest| rest.strip_suffix(". Read this file before continuing.")) {
+        Some(path) => std::fs::read_to_string(path)
+            .ok()
+            .map(|text| first_line(&text))
+            .filter(|line| !line.is_empty())
+            .unwrap_or_else(|| "A long goal, saved to a file".into()),
+        None => first_line(objective),
     }
 }
 

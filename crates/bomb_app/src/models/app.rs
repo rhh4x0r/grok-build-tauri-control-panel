@@ -1544,6 +1544,14 @@ impl AppModel {
         entity.update(cx, |t, _| t.loading = true);
         let core = self.core_of_thread(id, cx);
         let remote = core.is_remote();
+        {
+            let (core, weak) = (core.clone(), entity.downgrade());
+            spawn_service(cx, async move { core.thread_goal(id.to_string()).await }, move |res, cx| {
+                if let Ok(Some(goal)) = res {
+                    let _ = weak.update(cx, |t, cx| if t.goal.is_none() { t.set_goal(Some(goal), cx) });
+                }
+            });
+        }
         let weak = entity.downgrade();
         spawn_service(
             cx,
@@ -2145,6 +2153,28 @@ impl AppModel {
         self.set_backend(backend, model, cx);
         self.set_mode("auto", cx);
         self.send_prompt("Implement the plan above. Work through it step by step and report when done.".into(), Vec::new(), cx);
+    }
+
+    /// Codex: pause or clear the thread's goal, or resume it (a `/goal resume` message, so its
+    /// turn shows like any other).
+    pub fn goal_control(&mut self, id: Uuid, action: &'static str, cx: &mut Context<Self>) {
+        if action == "resume" {
+            if self.selected == Some(id) && !self.queue_instead(cx) {
+                self.send_prompt("/goal resume".into(), Vec::new(), cx);
+            }
+            return;
+        }
+        let core = self.core_of_thread(id, cx);
+        let this = cx.entity().downgrade();
+        spawn_service(
+            cx,
+            async move { core.goal_control(id.to_string(), action.to_string()).await },
+            move |res, cx| {
+                if let Err(e) = res {
+                    let _ = this.update(cx, |m, cx| m.fail(e, cx));
+                }
+            },
+        );
     }
 
     pub fn cancel_selected(&mut self, cx: &mut Context<Self>) {
