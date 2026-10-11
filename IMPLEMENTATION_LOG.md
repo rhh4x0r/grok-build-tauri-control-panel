@@ -1093,3 +1093,12 @@ All additive; `PROTOCOL_VERSION` stays 1 and a Mac that never calls the new meth
 - Checked end to end: a separate probe copy of the app in the simulator, paired with a local `bombd` (separate data folder), started a real Codex thread with a six-file `/goal`. Codex worked through it on its own, the card showed "Goal · Done · 19.4K tokens", and the thread settled to idle. Workspace tests and clippy pass.
 - Not checked: Pause / Resume taps on the phone, the Working / Paused cards on screen, a real iPhone.
 - Seen while testing (not this change): replies from turns an agent starts by itself run together in one bubble ("Created 2.txt.I'll create…"), on the Mac and the phone alike.
+
+## 2026-10-11 — A line before each turn Codex starts itself
+
+- Why: an active goal's automatic turns ran into each other in one reply ("Created 2.txt.I'll create the next missing file."), on the Mac and the phone alike.
+- `AcpClient::note_codex_turn`: when Codex's `_meta.codex.threadStatus` goes idle → active with no prompt open, it emits `{"channel":"thread","kind":"divider","line":…}`: "Codex continued on the goal" while a goal is active, otherwise "Codex carried on by itself". There's no line for a prompt's own turn, or for a status update while a turn already runs.
+- Shared reducer: a divider closes the streaming reply and adds a system line, so the next reply starts fresh. `persist_control_event` saves it as a system row, which also keeps the saved replies apart, so a reopened thread reads the same.
+- Checked: new client and reducer tests; full workspace tests pass. Run without clippy or app builds (asked for tests only).
+  - `workspace_lifecycle_checkpoints_sharing_inline_and_archive` timed out twice while other builds loaded the machine, then passed three times in a row with this change in.
+- Not checked on screen.
