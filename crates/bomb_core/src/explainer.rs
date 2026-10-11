@@ -38,7 +38,7 @@ const MAX_PROMPT_CHARS: usize = 3000;
 const MAX_OUTPUT_CHARS: usize = 500;
 const CALL_TIMEOUT: Duration = Duration::from_secs(45);
 /// How long a new thread waits for its name before falling back to the first words.
-const NAME_TIMEOUT: Duration = Duration::from_secs(4);
+const NAME_TIMEOUT: Duration = Duration::from_secs(8);
 const NAME_KINDS: &[&str] = &["feat", "fix", "refactor", "chore", "docs", "test"];
 
 const NARRATOR_INSTRUCTIONS: &str = "You narrate a coding agent's work for a smart 12-year-old. \
@@ -405,12 +405,17 @@ impl ExplainerService {
     /// A new thread's branch type, slug and title, from the model the person picked for it.
     /// Bounded by `NAME_TIMEOUT` so creating a thread never waits long; errors mean "use the word slug".
     pub async fn suggest_name(&self, backend: &str, model: &str, prompt: &str) -> Result<ThreadName, String> {
+        let model = model.trim().trim_end_matches("[1m]");
+        // An offline mock thread has no model to ask: its reply is its own words, checked like any other.
+        if model.eq_ignore_ascii_case("mock") {
+            let reply = json!({ "type": "feat", "slug": prompt.trim(), "title": prompt.trim() }).to_string();
+            return parse_thread_name(&reply).ok_or_else(|| "unusable name".into());
+        }
         let ask = format!(
             "Name this coding task for a git branch and a thread list. Reply with one line of JSON and nothing else: \
              {{\"type\":\"feat|fix|refactor|chore|docs|test\",\"slug\":\"2-5 lowercase words joined by dashes\",\"title\":\"Short sentence-case title\"}}\n\nTask: {}",
             clip(prompt.trim(), 500)
         );
-        let model = model.trim().trim_end_matches("[1m]");
         let out = tokio::time::timeout(NAME_TIMEOUT, self.run_narrator(backend, model, &ask))
             .await
             .map_err(|_| "naming took too long".to_string())??;

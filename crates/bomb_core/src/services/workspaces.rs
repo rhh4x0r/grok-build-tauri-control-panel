@@ -994,6 +994,51 @@ mod tests {
         assert!(run_git(&root, &["rev-parse", "--verify", &format!("refs/heads/{}", w.branch)]).await.is_err());
     }
     #[tokio::test]
+    async fn a_new_thread_is_named_by_its_model_before_its_branch_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo"); std::fs::create_dir(&root).unwrap();
+        for args in [vec!["init", "-b", "main"], vec!["config", "user.name", "Test"], vec!["config", "user.email", "test@example.com"], vec!["commit", "--allow-empty", "-m", "initial"]] { run_git(&root, &args).await.unwrap(); }
+        let home = temp.path().to_path_buf(); let grok = home.join("grok"); let panel = grok.join("panel");
+        let state = AppState::initialize_with_paths(grok_config::GrokPaths {
+            home_dir: home.clone(), grok_dir: grok.clone(), bomb_dir: panel.clone(), config_file: panel.join("config.toml"),
+            grok_cli_config_file: grok.join("config.toml"), worktrees_dir: home.join("worktrees"),
+            memory_dir: panel.join("memory"), sessions_dir: panel.join("sessions"), panel_dir: panel,
+            project_config_file: None, project_root: None,
+        }).await.unwrap();
+        let start = |prompt: &str| SpawnOptions { model: Some("mock".into()), prompt: Some(prompt.into()), ..Default::default() };
+
+        // The mock model answers {"type":"feat","slug":<its words>,"title":<its words>}.
+        let session = super::super::start_session(&state, root.display().to_string(), start("Fix sidebar drag crash")).await.unwrap();
+        super::super::wait_until_idle(&state, &session.id, std::time::Duration::from_secs(5)).await.unwrap();
+        let w = list_workspaces(&state).await.unwrap()[0].clone();
+        assert_eq!(w.branch, format!("bomb/feat/fix-sidebar-drag-crash-{}", &session.id[..8]));
+        assert_eq!(w.name, "Fix sidebar drag crash");
+        assert_eq!(run_git(Path::new(&w.path), &["branch", "--show-current"]).await.unwrap().trim(), w.branch);
+        let folder = Path::new(&w.path).file_name().unwrap().to_string_lossy().to_string();
+        assert!(folder.starts_with(&format!("feat-fix-sidebar-drag-crash-{}-", &session.id[..8])), "{folder}");
+
+        // The title is the thread's name from its first prompt on, and every client is told.
+        let mut events = state.event_bus.subscribe();
+        super::super::send_prompt(&state, session.id.clone(), "Fix sidebar drag crash".into(), None, None, None, None, None, None, None, None).await.unwrap();
+        let id = Uuid::parse_str(&session.id).unwrap();
+        assert_eq!(state.registry.get_snapshot(id).unwrap().metadata.label.as_deref(), Some("Fix sidebar drag crash"));
+        let mut told = false;
+        while let Ok(event) = events.try_recv() {
+            told |= matches!(&event, grok_events::ControlEvent::Raw { session_id: Some(s), payload } if *s == id && payload["kind"] == "label" && payload["label"] == "Fix sidebar drag crash");
+        }
+        assert!(told, "the new name is announced");
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while state.workspace_turns.lock().unwrap().contains(&w.path) { tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+        }).await.unwrap();
+
+        // Switched off: the first words, as before.
+        state.config.write().await.smart_names = false;
+        let plain = super::super::start_session(&state, root.display().to_string(), start("Fix sidebar drag crash again")).await.unwrap();
+        super::super::wait_until_idle(&state, &plain.id, std::time::Duration::from_secs(5)).await.unwrap();
+        let plain_w = list_workspaces(&state).await.unwrap().into_iter().find(|x| x.threads.contains(&plain.id)).unwrap();
+        assert_eq!(plain_w.branch, format!("bomb/fix-sidebar-drag-crash-again-{}", &plain.id[..8]));
+    }
+    #[tokio::test]
     async fn workspace_lifecycle_checkpoints_sharing_inline_and_archive() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("repo"); std::fs::create_dir(&root).unwrap();

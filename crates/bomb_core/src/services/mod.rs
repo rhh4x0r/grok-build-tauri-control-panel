@@ -889,8 +889,8 @@ pub async fn send_prompt(
         .get_snapshot(id)
         .map(|s| s.metadata.label.is_none())
         .unwrap_or(false);
-    if needs_label {
-        let chosen = state.pending_titles.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    let chosen = state.pending_titles.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    if chosen.is_some() || needs_label {
         let label = chosen.unwrap_or_else(|| prompt_slug(&prompt));
         if !label.is_empty() && state.registry.set_label(id, &label).is_ok() {
             emit_thread_label(state, id, &label);

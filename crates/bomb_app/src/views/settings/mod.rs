@@ -194,7 +194,7 @@ fn general_page(cx: &App) -> SettingPage {
                             |v, cx| settings(cx).update(cx, |m, cx| m.edit_config(|c| c.smart_names = v, cx)),
                         ),
                     )
-                    .description("The thread’s model names a new thread’s branch and title, like bomb/fix/sidebar-drag-crash. Off, or if it takes more than 4 seconds, the first words of your message are used."),
+                    .description("The thread’s model names a new thread’s branch and title, like bomb/fix/sidebar-drag-crash. Off, or if it takes more than 8 seconds, the first words of your message are used."),
                 )
                 .item(
                     SettingItem::new(
