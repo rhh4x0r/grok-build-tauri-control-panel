@@ -8,55 +8,13 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
-
 /// The adapter's goal control request: `{ sessionId, action, objective? }`.
 pub const CONTROL_METHOD: &str = "_session/goal";
 
 /// The longest objective the adapter accepts, in UTF-16 code units (it measures a JS string).
 pub const OBJECTIVE_LIMIT: usize = 4000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GoalStatus {
-    Active,
-    Paused,
-    Blocked,
-    UsageLimited,
-    BudgetLimited,
-    Complete,
-}
-
-impl GoalStatus {
-    fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "active" => Self::Active,
-            "paused" => Self::Paused,
-            "blocked" => Self::Blocked,
-            "usage_limited" => Self::UsageLimited,
-            "budget_limited" => Self::BudgetLimited,
-            "complete" => Self::Complete,
-            _ => return None,
-        })
-    }
-
-    /// Codex may still start turns for it on its own.
-    pub fn is_live(self) -> bool {
-        self == Self::Active
-    }
-}
-
-/// A thread's goal as Codex last saved it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Goal {
-    pub objective: String,
-    pub status: GoalStatus,
-    pub token_budget: Option<i64>,
-    pub tokens_used: i64,
-    pub time_used_seconds: i64,
-    pub created_at_ms: i64,
-    pub updated_at_ms: i64,
-}
+pub use grok_events::goal::{Goal, GoalStatus};
 
 /// A `/goal` message, as the adapter reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,7 +73,7 @@ pub fn fit_objective(objective: &str, dir: &Path) -> std::io::Result<String> {
     std::fs::create_dir_all(dir)?;
     let path = dir.join(format!("goal-{}.md", uuid::Uuid::new_v4()));
     std::fs::write(&path, objective)?;
-    let pointer = format!("pasted text file: {}. Read this file before continuing.", path.display());
+    let pointer = format!("{FILE_PREFIX}{}{FILE_SUFFIX}", path.display());
     if objective_too_long(&pointer) {
         return Err(std::io::Error::other("the goal file's path is too long to name in a goal"));
     }
@@ -162,6 +120,7 @@ pub fn read(codex_home: &Path, thread_id: &str) -> Option<Goal> {
     .flatten()
     .and_then(|(objective, status, token_budget, tokens_used, time_used_seconds, created_at_ms, updated_at_ms)| {
         Some(Goal {
+            summary: summary(&objective),
             objective,
             status: GoalStatus::parse(&status)?,
             token_budget,
@@ -172,6 +131,25 @@ pub fn read(codex_home: &Path, thread_id: &str) -> Option<Goal> {
         })
     })
 }
+
+/// A goal's first line. A goal saved to a file (Codex's wording: `pasted text file: <path>. Read
+/// this file before continuing.`) gives the file's first line instead.
+fn summary(objective: &str) -> String {
+    let first_line = |text: &str| {
+        text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default().trim_start_matches('#').trim().to_string()
+    };
+    match objective.strip_prefix(FILE_PREFIX).and_then(|rest| rest.strip_suffix(FILE_SUFFIX)) {
+        Some(path) => std::fs::read_to_string(path)
+            .ok()
+            .map(|text| first_line(&text))
+            .filter(|line| !line.is_empty())
+            .unwrap_or_else(|| "A long goal, saved to a file".into()),
+        None => first_line(objective),
+    }
+}
+
+const FILE_PREFIX: &str = "pasted text file: ";
+const FILE_SUFFIX: &str = ". Read this file before continuing.";
 
 #[cfg(test)]
 mod tests {
@@ -199,6 +177,8 @@ mod tests {
         assert!(!objective_too_long(&pointer));
         let path = pointer.trim_start_matches("pasted text file: ").trim_end_matches(". Read this file before continuing.");
         assert_eq!(std::fs::read_to_string(path).unwrap(), long);
+        assert_eq!(summary(&pointer), long, "a file-backed goal shows the file's first line");
+        assert_eq!(summary("## Ship it\nwith tests"), "Ship it");
     }
 
     #[test]

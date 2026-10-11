@@ -853,38 +853,19 @@ fn goal_card(model: &Entity<AppModel>, thread: &Entity<crate::models::thread::Th
             .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(label_color).child(label))
             .child(div().text_size(px(crate::theme::Type::BODY)).text_color(ui.text).overflow_hidden().text_ellipsis().whitespace_nowrap().child(body))
     };
-    if let (Some(notice), true) = (t.goal_notice.clone(), t.goal.as_ref().is_none_or(|g| !g.status.is_live())) {
+    if let (Some(notice), true) = (t.thread.goal_notice.clone(), t.thread.goal.as_ref().is_none_or(|g| !g.status.is_live())) {
         let dismiss = thread.clone();
         return Some(
             card()
                 .child(div().size(px(16.)).flex_shrink_0().text_color(ui.warning).child(gpui_kit::component::Icon::from(Lucide::ShieldAlert)))
                 .child(text_col("Goal not started".into(), notice, ui.warning))
                 .child(Button::new("goal-notice-dismiss").ghost().small().icon(Lucide::X).tooltip("Dismiss").on_click(move |_, _, cx| {
-                    dismiss.update(cx, |t, cx| { t.goal_notice = None; cx.notify(); })
+                    dismiss.update(cx, |t, cx| { let ch = t.thread.dismiss_goal_notice(); t.absorb(&ch, cx); })
                 }))
                 .into_any_element(),
         );
     }
-    let goal = t.goal.as_ref()?;
-    let state = match goal.status {
-        GoalStatus::Active => "Working on it",
-        GoalStatus::Paused => "Paused",
-        GoalStatus::Blocked => "Blocked — Codex needs you",
-        GoalStatus::UsageLimited => "Stopped at your usage limit",
-        GoalStatus::BudgetLimited => "Used its token budget",
-        GoalStatus::Complete => "Done",
-    };
-    let mut label = format!("Goal · {state}");
-    if goal.time_used_seconds >= 60 {
-        let (h, m) = (goal.time_used_seconds / 3600, goal.time_used_seconds / 60 % 60);
-        label.push_str(&if h > 0 { format!(" · {h}h {m}m") } else { format!(" · {m}m") });
-    }
-    if goal.tokens_used > 0 {
-        label.push_str(&format!(" · {} tokens", compact_count(goal.tokens_used)));
-        if let Some(budget) = goal.token_budget {
-            label.push_str(&format!(" of {}", compact_count(budget)));
-        }
-    }
+    let goal = t.thread.goal.as_ref()?;
     let color = match goal.status {
         GoalStatus::Active => ui.accent,
         GoalStatus::Complete => ui.text_muted,
@@ -902,13 +883,13 @@ fn goal_card(model: &Entity<AppModel>, thread: &Entity<crate::models::thread::Th
     Some(
         card()
             .child(div().size(px(16.)).flex_shrink_0().text_color(color).child(gpui_kit::component::Icon::from(icon)))
-            .child(text_col(label, t.goal_summary.clone(), ui.text_muted))
-            .when(goal.status == GoalStatus::Active, |el| {
+            .child(text_col(goal.headline(), goal.title(), ui.text_muted))
+            .when(goal.status.can_pause(), |el| {
                 el.child(Button::new("goal-pause").ghost().small().icon(Lucide::Pause).label("Pause")
                     .tooltip("Codex finishes what it’s doing now, then waits until you resume.")
                     .on_click(move |_, _, cx| pause.update(cx, |m, cx| m.goal_control(id, "pause", cx))))
             })
-            .when(!matches!(goal.status, GoalStatus::Active | GoalStatus::Complete), |el| {
+            .when(goal.status.can_resume(), |el| {
                 el.child(Button::new("goal-resume").outline().small().icon(Lucide::Play).label("Resume")
                     .disabled(busy)
                     .tooltip("Codex picks the goal back up and keeps working until it's done.")
@@ -919,15 +900,6 @@ fn goal_card(model: &Entity<AppModel>, thread: &Entity<crate::models::thread::Th
                 .on_click(move |_, _, cx| clear.update(cx, |m, cx| m.goal_control(id, "clear", cx))))
             .into_any_element(),
     )
-}
-
-/// 1234 → "1.2K", 2300000 → "2.3M".
-fn compact_count(n: i64) -> String {
-    match n {
-        n if n >= 1_000_000 => format!("{:.1}M", n as f64 / 1e6),
-        n if n >= 1_000 => format!("{:.1}K", n as f64 / 1e3),
-        n => n.to_string(),
-    }
 }
 
 /// Once a thread has a message from you: offer notifications for when it finishes or needs you,

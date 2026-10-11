@@ -40,6 +40,7 @@ impl MachineListener for Listener {
                     if let Some(EntryView { body: EntryBody::Text { text }, .. }) = screen.entries.get_mut(index as usize) { text.push_str(&delta); }
                 }
                 ThreadPatch::Trim { count } => { screen.entries.drain(..count as usize); }
+                ThreadPatch::Goal { .. } => {}
             }
         }
     }

@@ -1080,3 +1080,16 @@ All additive; `PROTOCOL_VERSION` stays 1 and a Mac that never calls the new meth
   - a 4,001-character goal gets the refusal line the notice matches.
 - Also checked: workspace tests and clippy; smoke run exits cleanly.
 - Not checked: the goal card on screen; the iPhone (shows goal notes in the transcript, no card yet).
+
+## 2026-10-11 — The goal card on the iPhone
+
+- Goal state moved into the shared layer, so the Mac and the phone show the same card from the same events:
+  - `grok_events::goal`: `Goal` / `GoalStatus` plus how they read (`headline`, `title`, `can_pause`, `can_resume`).
+  - `Goal.summary` is filled on the machine, which has the file a long goal is saved in.
+  - `bomb_transcript::Thread` keeps `goal` / `goal_notice` from `goal` events (`Change::Goal`, `set_goal`, `dismiss_goal_notice`).
+  - The desktop card reads from there; the desktop fetches the goal with the snapshot when it loads history.
+- `bomb_mobile`: `GoalView` (kind, headline, title, which buttons) as `ThreadPatch::Goal`. A thread's goal is fetched with its snapshot (`thread_goal`) and sent after every `Reset`. `Machine::goal_control` handles pause and clear, and resume as a `/goal resume` message; `dismiss_goal_notice` is local.
+- iPhone: `GoalCard` above the status line, in the mini player's style, with Pause / Resume / ✕ (Dismiss for a refusal or a finished goal).
+- Checked end to end: a separate probe copy of the app in the simulator, paired with a local `bombd` (separate data folder), started a real Codex thread with a six-file `/goal`. Codex worked through it on its own, the card showed "Goal · Done · 19.4K tokens", and the thread settled to idle. Workspace tests and clippy pass.
+- Not checked: Pause / Resume taps on the phone, the Working / Paused cards on screen, a real iPhone.
+- Seen while testing (not this change): replies from turns an agent starts by itself run together in one bubble ("Created 2.txt.I'll create…"), on the Mac and the phone alike.

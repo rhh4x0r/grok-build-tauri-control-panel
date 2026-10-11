@@ -176,6 +176,60 @@ pub enum ThreadPatch {
     Stream { index: u64, delta: String },
     /// Drop `count` entries from the front.
     Trim { count: u64 },
+    /// The thread's goal card changed (`None`: no card).
+    Goal { goal: Option<GoalView> },
+}
+
+/// How a goal card reads at a glance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum GoalKind {
+    Working,
+    Paused,
+    /// Blocked, or stopped at a usage limit or its token budget.
+    NeedsYou,
+    Done,
+    /// Codex turned the `/goal` down; the title says why.
+    NotStarted,
+}
+
+/// A Codex thread's goal card, above the composer.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct GoalView {
+    pub kind: GoalKind,
+    /// "Goal · Working on it · 12m · 41.2K tokens", or "Goal not started".
+    pub headline: String,
+    /// The goal in one line, or why it didn't start.
+    pub title: String,
+    pub can_pause: bool,
+    pub can_resume: bool,
+    /// Clear the goal (`false`: the card only dismisses, for a refusal).
+    pub can_clear: bool,
+}
+
+impl GoalView {
+    /// The card a thread shows, the same choice the desktop makes: a refusal while there's no
+    /// running goal, else the goal.
+    pub fn of(thread: &Thread) -> Option<Self> {
+        use grok_events::goal::GoalStatus;
+        if let (Some(notice), true) = (&thread.goal_notice, thread.goal.as_ref().is_none_or(|g| !g.status.is_live())) {
+            return Some(Self { kind: GoalKind::NotStarted, headline: "Goal not started".into(), title: notice.clone(), can_pause: false, can_resume: false, can_clear: false });
+        }
+        let goal = thread.goal.as_ref()?;
+        let kind = match goal.status {
+            GoalStatus::Active => GoalKind::Working,
+            GoalStatus::Paused => GoalKind::Paused,
+            GoalStatus::Complete => GoalKind::Done,
+            GoalStatus::Blocked | GoalStatus::UsageLimited | GoalStatus::BudgetLimited => GoalKind::NeedsYou,
+        };
+        Some(Self {
+            kind,
+            headline: goal.headline(),
+            title: goal.title(),
+            can_pause: goal.status.can_pause(),
+            can_resume: goal.status.can_resume(),
+            can_clear: true,
+        })
+    }
 }
 
 /// Turn the reducer's changes into patches, merging what a view needs to redraw.
@@ -190,6 +244,7 @@ pub fn patches(thread: &Thread, changes: &[Change]) -> Vec<ThreadPatch> {
             }
             Change::Streamed { index, delta } => out.push(ThreadPatch::Stream { index: *index as u64, delta: delta.clone() }),
             Change::Trimmed { count } => out.push(ThreadPatch::Trim { count: *count as u64 }),
+            Change::Goal => out.push(ThreadPatch::Goal { goal: GoalView::of(thread) }),
             Change::Label(_) | Change::Status(_) | Change::Explain | Change::Protocol | Change::Boom | Change::Presence => {}
         }
     }
@@ -454,4 +509,30 @@ pub fn math_pieces(text: String) -> Vec<MathPiece> {
             MathPart::Display(tex) => MathPiece::Equation { tex },
         })
         .collect()
+}
+
+#[cfg(test)]
+mod goal_tests {
+    use super::*;
+    use grok_events::goal::{Goal, GoalStatus};
+
+    fn goal(status: GoalStatus) -> Goal {
+        Goal { objective: "Ship it".into(), status, token_budget: None, tokens_used: 0, time_used_seconds: 0, created_at_ms: 1, updated_at_ms: 1, summary: String::new() }
+    }
+
+    #[test]
+    fn the_card_offers_what_the_goal_allows() {
+        let mut thread = Thread::new();
+        assert_eq!(GoalView::of(&thread), None);
+        thread.set_goal(Some(goal(GoalStatus::Active)));
+        let card = GoalView::of(&thread).unwrap();
+        assert_eq!((card.kind, card.can_pause, card.can_resume, card.title.as_str()), (GoalKind::Working, true, false, "Ship it"));
+        thread.set_goal(Some(goal(GoalStatus::BudgetLimited)));
+        let card = GoalView::of(&thread).unwrap();
+        assert_eq!((card.kind, card.can_pause, card.can_resume), (GoalKind::NeedsYou, false, true));
+        // A refusal shows over a goal that isn't running, and only dismisses.
+        thread.goal_notice = Some("Command \"/goal\" requires goal text of at most 4000 characters.".into());
+        let card = GoalView::of(&thread).unwrap();
+        assert_eq!((card.kind, card.can_clear), (GoalKind::NotStarted, false));
+    }
 }

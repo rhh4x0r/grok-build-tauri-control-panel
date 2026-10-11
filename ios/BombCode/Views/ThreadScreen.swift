@@ -154,6 +154,9 @@ struct ThreadScreen: View {
                 if ReadAloud.shared.playing?.threadId == threadId {
                     MiniPlayer()
                 }
+                if subagent == nil, let goal = thread.goal {
+                    GoalCard(goal: goal, thread: thread)
+                }
                 StatusLine(thread: thread)
                 if let error { Text(error).font(Theme.caption).foregroundStyle(Theme.danger).frame(maxWidth: .infinity, alignment: .leading) }
                 if subagent != nil {

@@ -23,7 +23,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::pairing::{gateway_request, PairedMachine};
-use crate::view::{patches, BackendChoice, BackendRow, PresenceView, SidebarPrefs, ThreadPatch, ThreadRow, ThreadSummary, UsageView};
+use crate::view::{patches, BackendChoice, GoalView, BackendRow, PresenceView, SidebarPrefs, ThreadPatch, ThreadRow, ThreadSummary, UsageView};
 use crate::{on_runtime, runtime, MobileError, Result};
 
 /// Rows loaded when a thread opens, and added each time the person scrolls to the top.
@@ -426,6 +426,23 @@ impl Machine {
         Ok(answer["already_resolved"].as_bool().unwrap_or(false))
     }
 
+    /// Codex: `pause` or `clear` the thread's goal (at once, even mid-turn), or `resume` it, which
+    /// sends `/goal resume` so the turn shows like any message.
+    pub async fn goal_control(&self, thread_id: String, action: String) -> Result<()> {
+        match action.as_str() {
+            "resume" => self.send_prompt(thread_id, "/goal resume".into(), PromptOptions::default()).await,
+            "pause" | "clear" => self.request("goal_control", json!({ "id": thread_id, "action": action })).await.map(|_| ()),
+            other => Err(format!("Unknown goal action: {other}").into()),
+        }
+    }
+
+    /// Put away a "Goal not started" card.
+    pub fn dismiss_goal_notice(&self, thread_id: String) {
+        if let Ok(id) = Uuid::parse_str(&thread_id) {
+            self.shared.change_thread(id, |thread, _| thread.dismiss_goal_notice());
+        }
+    }
+
     pub async fn cancel(&self, thread_id: String) -> Result<()> {
         self.request("cancel_session", json!({ "id": thread_id })).await.map(|_| ())
     }
@@ -562,6 +579,9 @@ impl Shared {
         let pending: Vec<ControlEvent> = serde_json::from_value(snapshot["pending_approvals"].clone()).unwrap_or_default();
         let as_of = snapshot["as_of"].as_u64().unwrap_or(0);
         let has_earlier = snapshot["has_more"].as_bool().unwrap_or(false);
+        // A Codex thread's goal. A machine too old to know `thread_goal` has none to show.
+        let goal = self.request("thread_goal", json!({ "id": id.to_string() })).await.ok()
+            .and_then(|v| serde_json::from_value::<Option<grok_events::goal::Goal>>(v).ok()).flatten();
         let working = self.threads.lock().unwrap_or_else(|e| e.into_inner()).get(&id.to_string()).is_some_and(|t| t.running);
         let now = Instant::now();
         let update = {
@@ -572,6 +592,7 @@ impl Shared {
             // Saved images live on the machine; keep them as paths for the app to fetch.
             thread.keep_unreadable_images = true;
             thread.hydrate(&rows);
+            thread.set_goal(goal);
             // Saved rows drop an approval's id and choices; the machine still has them.
             for approval in &pending { thread.apply(approval, now); }
             // The agent may still be working: say so now, not at its next event.
@@ -580,11 +601,12 @@ impl Shared {
                 thread.apply(event, now);
             }
             let reset = ThreadPatch::Reset { entries: thread.entries.iter().map(Into::into).collect(), has_earlier };
+            let goal = ThreadPatch::Goal { goal: GoalView::of(&thread) };
             let presence = PresenceView::of(&thread.presence, now);
             *entry = OpenThread { thread, limit, has_earlier, as_of, held: None };
-            (reset, presence)
+            (vec![reset, goal], presence)
         };
-        self.listener.on_thread(id.to_string(), vec![update.0], update.1);
+        self.listener.on_thread(id.to_string(), update.0, update.1);
         Ok(())
     }
 

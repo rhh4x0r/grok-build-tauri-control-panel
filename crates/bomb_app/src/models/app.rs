@@ -1544,19 +1544,13 @@ impl AppModel {
         entity.update(cx, |t, _| t.loading = true);
         let core = self.core_of_thread(id, cx);
         let remote = core.is_remote();
-        {
-            let (core, weak) = (core.clone(), entity.downgrade());
-            spawn_service(cx, async move { core.thread_goal(id.to_string()).await }, move |res, cx| {
-                if let Ok(Some(goal)) = res {
-                    let _ = weak.update(cx, |t, cx| if t.goal.is_none() { t.set_goal(Some(goal), cx) });
-                }
-            });
-        }
+
         let weak = entity.downgrade();
         spawn_service(
             cx,
-            async move { core.snapshot(id.to_string()).await },
-            move |res, cx| {
+            // A Codex thread's goal comes along, read once the history is in (a reload starts afresh).
+            async move { (core.snapshot(id.to_string()).await, core.thread_goal(id.to_string()).await) },
+            move |(res, goal), cx| {
                 let _ = weak.update(cx, |t, cx| {
                     t.loading = false;
                     t.hydrated = true;
@@ -1581,6 +1575,10 @@ impl AppModel {
                             }
                         }
                         Err(e) => tracing::warn!(%id, error = %e, "transcript load failed"),
+                    }
+                    if let (Ok(Some(goal)), None) = (goal, &t.thread.goal) {
+                        let ch = t.thread.set_goal(Some(goal));
+                        t.absorb(&ch, cx);
                     }
                     cx.notify();
                 });

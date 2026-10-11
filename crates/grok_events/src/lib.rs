@@ -3,6 +3,8 @@
 //! Fans out session lifecycle, tool calls, plan updates, and system events
 //! to UI subscribers and internal services.
 
+pub mod goal;
+
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
