@@ -115,6 +115,20 @@ impl Core {
         }
     }
 
+    pub async fn goal_control(&self, id: String, action: String) -> Result<(), String> {
+        match self {
+            Self::Local(state) => services::goal_control(state, id, action).await,
+            Self::Remote(r) => r.request("goal_control", json!({ "id": id, "action": action })).await.map(|_| ()),
+        }
+    }
+
+    pub async fn thread_goal(&self, id: String) -> Result<Option<bomb_core::goal::Goal>, String> {
+        match self {
+            Self::Local(state) => services::thread_goal(state, id).await,
+            Self::Remote(r) => r.call("thread_goal", json!({ "id": id })).await,
+        }
+    }
+
     /// See [`services::wait_turn_settled`].
     pub async fn wait_turn_settled(&self, id: &str, timeout: std::time::Duration) -> Result<(), String> {
         match self {

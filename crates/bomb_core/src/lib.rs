@@ -19,6 +19,7 @@ pub mod state;
 pub mod usage;
 
 pub use bomb_transcript::{math as transcript_math, presence, speech as transcript_speech, summary, transcript};
+pub use grok_acp::goal;
 pub use grok_events::{ControlEvent, EventBus};
 pub use state::AppState;
 

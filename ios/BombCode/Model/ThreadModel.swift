@@ -8,6 +8,8 @@ final class ThreadModel {
     unowned let machine: MachineModel
     private(set) var entries: [EntryView] = []
     private(set) var presence: PresenceView?
+    /// Codex: the goal card, when the thread has one.
+    private(set) var goal: GoalView?
     private(set) var hasEarlier = false
     private(set) var loaded = false
     /// Bumped on every change, so the transcript can follow the newest line.
@@ -38,6 +40,8 @@ final class ThreadModel {
                 entries[i].body = .text(text: text + delta)
             case let .trim(count):
                 entries.removeFirst(min(Int(count), entries.count))
+            case let .goal(goal):
+                self.goal = goal
             }
         }
         self.presence = presence
@@ -56,6 +60,15 @@ final class ThreadModel {
 
     func send(_ text: String, options: PromptOptions) async throws {
         try await machine.machine.sendPrompt(threadId: id, text: text, options: options)
+    }
+
+    /// `pause`, `resume` or `clear` the goal.
+    func goalControl(_ action: String) async throws {
+        try await machine.machine.goalControl(threadId: id, action: action)
+    }
+
+    func dismissGoalNotice() {
+        machine.machine.dismissGoalNotice(threadId: id)
     }
 
     func stop() async {

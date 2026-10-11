@@ -156,6 +156,8 @@ pub enum Change {
     /// call [`Thread::settle`].
     Boom,
     Presence,
+    /// The thread's goal or goal notice changed.
+    Goal,
 }
 
 #[derive(Debug, Default)]
@@ -173,6 +175,10 @@ pub struct Thread {
     /// Keep a saved image this device can't read (a phone loading a Mac's thread) as a reference:
     /// an attachment with no data, named by its path, for the client to fetch.
     pub keep_unreadable_images: bool,
+    /// Codex: the thread's goal, as its machine last read it.
+    pub goal: Option<grok_events::goal::Goal>,
+    /// Codex turned a `/goal` down (e.g. too long); kept until a new goal or dismissal.
+    pub goal_notice: Option<String>,
     open_tools: HashSet<String>,
     next_id: u64,
 }
@@ -748,9 +754,41 @@ impl Thread {
         ch
     }
 
+    /// Set the thread's goal. A new goal answers an earlier refusal.
+    pub fn set_goal(&mut self, goal: Option<grok_events::goal::Goal>) -> Vec<Change> {
+        let mut changed = false;
+        if goal.as_ref().is_some_and(|g| self.goal.as_ref().is_none_or(|old| old.created_at_ms != g.created_at_ms)) && self.goal_notice.is_some() {
+            self.goal_notice = None;
+            changed = true;
+        }
+        if self.goal != goal {
+            self.goal = goal;
+            changed = true;
+        }
+        if changed { vec![Change::Goal] } else { Vec::new() }
+    }
+
+    pub fn dismiss_goal_notice(&mut self) -> Vec<Change> {
+        if self.goal_notice.take().is_some() { vec![Change::Goal] } else { Vec::new() }
+    }
+
+    fn on_goal(&mut self, payload: &Value) -> Vec<Change> {
+        let mut ch = Vec::new();
+        if let Some(goal) = payload.get("goal") {
+            ch.extend(self.set_goal(serde_json::from_value(goal.clone()).ok()));
+        }
+        if let Some(notice) = str_at(payload, "notice") {
+            self.goal_notice = Some(notice);
+            ch.push(Change::Goal);
+        }
+        ch.dedup();
+        ch
+    }
+
     fn on_raw(&mut self, payload: &Value, now: Instant) -> Vec<Change> {
         let channel = str_at(payload, "channel").unwrap_or_default();
         match channel.as_str() {
+            "goal" => self.on_goal(payload),
             "explain" => self.on_explain(payload),
             "plan_doc" => {
                 let Some(text) = str_at(payload, "text") else {
@@ -768,7 +806,14 @@ impl Thread {
                 ch.push(Change::Appended(self.entries.len() - 1));
                 ch
             }
-            "thread" if str_at(payload, "kind").as_deref() == Some("model_switch") => {
+            // A turn the agent started itself: its reply starts fresh below the line.
+            "thread" if str_at(payload, "kind").as_deref() == Some("divider") => {
+                let Some(line) = str_at(payload, "line") else { return Vec::new() };
+                let mut ch = self.close_streams();
+                ch.extend(self.note_system(&line));
+                ch
+            }
+            "thread" if matches!(str_at(payload, "kind").as_deref(), Some("model_switch" | "goal")) => {
                 str_at(payload, "line")
                     .map(|line| self.note_system(&line))
                     .unwrap_or_default()
@@ -1189,6 +1234,40 @@ pub fn approval_outcome_label(resolution: &str, kind: Option<&str>) -> Option<&'
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn goal_events_set_the_goal_and_a_new_goal_clears_a_refusal() {
+        let now = Instant::now();
+        let mut t = Thread::new();
+        let raw = |payload: Value| ControlEvent::Raw { session_id: Some(sid()), payload };
+        assert_eq!(t.apply(&raw(serde_json::json!({ "channel": "goal", "notice": "Command \"/goal\" requires goal text of at most 4000 characters." })), now), vec![Change::Goal]);
+        assert!(t.goal_notice.is_some());
+        let goal = serde_json::json!({ "objective": "Ship it", "status": "active", "token_budget": null, "tokens_used": 10, "time_used_seconds": 0, "created_at_ms": 1, "updated_at_ms": 1 });
+        assert_eq!(t.apply(&raw(serde_json::json!({ "channel": "goal", "goal": goal })), now), vec![Change::Goal]);
+        assert_eq!(t.goal.as_ref().map(|g| g.status), Some(grok_events::goal::GoalStatus::Active));
+        assert!(t.goal_notice.is_none());
+        // The same goal again changes nothing; clearing it does.
+        assert!(t.apply(&raw(serde_json::json!({ "channel": "goal", "goal": goal })), now).is_empty());
+        assert_eq!(t.apply(&raw(serde_json::json!({ "channel": "goal", "goal": null })), now), vec![Change::Goal]);
+        assert!(t.goal.is_none());
+        assert!(t.entries.is_empty(), "goal events aren't transcript lines");
+    }
+
+    #[test]
+    fn a_divider_starts_the_next_reply_on_its_own() {
+        let now = Instant::now();
+        let mut t = Thread::new();
+        let say = |text: &str| ControlEvent::AgentMessage { session_id: sid(), text: text.into(), at: Utc::now() };
+        t.apply(&say("Created 2.txt."), now);
+        t.apply(&ControlEvent::Raw { session_id: Some(sid()), payload: serde_json::json!({ "channel": "thread", "kind": "divider", "line": "Codex continued on the goal" }) }, now);
+        t.apply(&say("I'll create the next missing file."), now);
+        let bodies: Vec<_> = t.entries.iter().map(|e| (e.role, e.text().unwrap_or_default().to_string())).collect();
+        assert_eq!(bodies, vec![
+            (Role::Agent, "Created 2.txt.".to_string()),
+            (Role::System, "Codex continued on the goal".to_string()),
+            (Role::Agent, "I'll create the next missing file.".to_string()),
+        ]);
+    }
+
     #[test]
     fn a_saved_thread_still_running_elsewhere_shows_as_working() {
         let now = Instant::now();

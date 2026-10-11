@@ -77,6 +77,8 @@ pub async fn dispatch(state: &AppState, origin: &str, method: &str, p: Value) ->
             Ok(Value::Null)
         }
         "cancel_session" => { services::cancel_session(state, arg(&p, "id")?).await?; Ok(Value::Null) }
+        "goal_control" => { services::goal_control(state, arg(&p, "id")?, arg(&p, "action")?).await?; Ok(Value::Null) }
+        "thread_goal" => out(services::thread_goal(state, arg(&p, "id")?).await?),
         "wait_turn_settled" => {
             let id: String = arg(&p, "id")?;
             let seconds: u64 = arg::<Option<u64>>(&p, "seconds")?.unwrap_or(30).min(120);

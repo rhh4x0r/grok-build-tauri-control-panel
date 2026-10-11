@@ -752,6 +752,16 @@ impl ComposerView {
         if text.is_empty() && self.attachments.is_empty() {
             return;
         }
+        // Codex: pausing or clearing a goal acts now, even mid-turn, rather than waiting in line.
+        if let Some(action) = self.goal_action(&text, cx) {
+            let id = self.model.read(cx).selected;
+            if let Some(id) = id {
+                self.input.update(cx, |s, cx| s.set_value("", window, cx));
+                self.model.update(cx, |m, cx| m.goal_control(id, action, cx));
+                self.focus(window, cx);
+                return;
+            }
+        }
         // The agent is working or the thread is starting: the message waits for the turn to end.
         if self.model.read(cx).queue_instead(cx) {
             let (images, files) = self.take_attachments();
@@ -811,6 +821,21 @@ impl ComposerView {
         self.model
             .update(cx, |m, cx| m.send_prompt_with_files(text, images, files, cx));
         self.focus(window, cx);
+    }
+
+    /// `/goal pause` or `/goal clear` typed in a Codex thread.
+    fn goal_action(&self, text: &str, cx: &App) -> Option<&'static str> {
+        use bomb_core::goal::{parse_command, GoalCommand};
+        if !self.attachments.is_empty() {
+            return None;
+        }
+        let action = match parse_command(text)? {
+            GoalCommand::Pause => "pause",
+            GoalCommand::Clear => "clear",
+            _ => return None,
+        };
+        let thread = self.model.read(cx).selected_thread()?;
+        (thread.read(cx).meta.backend == "codex").then_some(action)
     }
 
     /// Hand the attachments over for sending: images as data, other files by path.

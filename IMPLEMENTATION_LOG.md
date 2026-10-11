@@ -1070,3 +1070,47 @@ All additive; `PROTOCOL_VERSION` stays 1 and a Mac that never calls the new meth
 - Measured from this Mac: Claude CLI ~3.5 s per naming call (Haiku and Sonnet alike, mostly start-up), Codex ~6 s. Grok not measured (not signed in from the shell).
 - Offline mock threads answer with their own words (`feat` + the prompt), so `a_new_thread_is_named_by_its_model_before_its_branch_exists` runs the whole path: branch, flat folder, workspace name, label and its event on the first prompt, and the first-words fallback with the setting off.
 - Checked: parser and flat-folder tests, workspace tests and clippy, `BOMB_SMOKE=1`. `usage_cache::caches_success_and_keeps_stale_bars_during_backoff` fails intermittently in full runs, untouched here. Not checked: creating a thread in the app on screen.
+
+## 2026-10-11 — Codex goals: goal bar, long goals, Stop pauses the goal
+
+- Why: `/goal` in a Codex thread looked dead. codex-acp turned every attempt down (over its 4,000-character limit) with a one-line reply, and even an accepted goal showed nothing: the adapter reports goal status only to JetBrains AIR clients.
+- `grok_acp::goal`: parses `/goal` the way the adapter does, applies the UTF-16 length limit, and reads goal status from Codex's own `goals_1.sqlite` (`thread_goals`, keyed by the Codex thread id = ACP session id). Long objectives are saved to `~/.bombcode/goals/<thread>/goal-<uuid>.md`, and the goal is set to Codex CLI's own wording (`pasted text file: <path>. Read this file before continuing.`).
+- `AcpClient` (Codex only):
+  - Goal commands go out as typed: no plan preamble, memory or recovery text in front, since the adapter only sees `/goal` at the start. A goal or resume in Plan is refused with a message naming Ask first / Auto.
+  - A goal watcher reads the database every 1–10 s and emits `goal` events on change.
+  - `goal_control` sends the adapter's `_session/goal` pause or clear.
+  - Stop pauses an active goal before `session/cancel`.
+  - `Command "/goal" …` replies become a `goal` notice.
+- Self-started turns: Codex's `_meta.codex.threadStatus` active/idle now holds an unprompted turn open (Running) through a goal's automatic turns, and the 30-minute cap doesn't end it while Codex reports active.
+- Core: `services::goal_control` (resume = a `/goal resume` message) and `thread_goal` (live from the agent, saved threads straight from Codex's database); both are RPCs and on `core_router`. A typed `/goal pause|clear` acts at once instead of starting a turn, and goal notes land in the transcript.
+- App: a goal card above the composer shows the objective (a file-backed goal shows the file's first line), its status, time and tokens (out of the budget, if any), with Pause / Resume / Clear, or "Goal not started" with Codex's reason. A typed `/goal pause|clear` skips the queue.
+- Checked against the real codex-acp 2.1.1 in temp folders:
+  - a goal is stored under our session id;
+  - `_session/goal` pause and clear work for a non-JetBrains client;
+  - a 6-turn goal ran five turns on its own, reported idle→active between each;
+  - pause + cancel stopped it, with no new work 30 s later;
+  - a 4,001-character goal gets the refusal line the notice matches.
+- Also checked: workspace tests and clippy; smoke run exits cleanly.
+- Not checked: the goal card on screen; the iPhone (shows goal notes in the transcript, no card yet).
+
+## 2026-10-11 — The goal card on the iPhone
+
+- Goal state moved into the shared layer, so the Mac and the phone show the same card from the same events:
+  - `grok_events::goal`: `Goal` / `GoalStatus` plus how they read (`headline`, `title`, `can_pause`, `can_resume`).
+  - `Goal.summary` is filled on the machine, which has the file a long goal is saved in.
+  - `bomb_transcript::Thread` keeps `goal` / `goal_notice` from `goal` events (`Change::Goal`, `set_goal`, `dismiss_goal_notice`).
+  - The desktop card reads from there; the desktop fetches the goal with the snapshot when it loads history.
+- `bomb_mobile`: `GoalView` (kind, headline, title, which buttons) as `ThreadPatch::Goal`. A thread's goal is fetched with its snapshot (`thread_goal`) and sent after every `Reset`. `Machine::goal_control` handles pause and clear, and resume as a `/goal resume` message; `dismiss_goal_notice` is local.
+- iPhone: `GoalCard` above the status line, in the mini player's style, with Pause / Resume / ✕ (Dismiss for a refusal or a finished goal).
+- Checked end to end: a separate probe copy of the app in the simulator, paired with a local `bombd` (separate data folder), started a real Codex thread with a six-file `/goal`. Codex worked through it on its own, the card showed "Goal · Done · 19.4K tokens", and the thread settled to idle. Workspace tests and clippy pass.
+- Not checked: Pause / Resume taps on the phone, the Working / Paused cards on screen, a real iPhone.
+- Seen while testing (not this change): replies from turns an agent starts by itself run together in one bubble ("Created 2.txt.I'll create…"), on the Mac and the phone alike.
+
+## 2026-10-11 — A line before each turn Codex starts itself
+
+- Why: an active goal's automatic turns ran into each other in one reply ("Created 2.txt.I'll create the next missing file."), on the Mac and the phone alike.
+- `AcpClient::note_codex_turn`: when Codex's `_meta.codex.threadStatus` goes idle → active with no prompt open, it emits `{"channel":"thread","kind":"divider","line":…}`: "Codex continued on the goal" while a goal is active, otherwise "Codex carried on by itself". There's no line for a prompt's own turn, or for a status update while a turn already runs.
+- Shared reducer: a divider closes the streaming reply and adds a system line, so the next reply starts fresh. `persist_control_event` saves it as a system row, which also keeps the saved replies apart, so a reopened thread reads the same.
+- Checked: new client and reducer tests; full workspace tests pass. Run without clippy or app builds (asked for tests only).
+  - `workspace_lifecycle_checkpoints_sharing_inline_and_archive` timed out twice while other builds loaded the machine, then passed three times in a row with this change in.
+- Not checked on screen.

@@ -791,7 +791,10 @@ impl Render for ThreadView {
             .map(|el| match subagent_banner(&self.model, &tid, &ui, cx) {
                 // A subagent takes no messages: say whose it is, and offer the way back.
                 Some(banner) => el.child(banner),
-                None => el.when_some(notify_card(&self.model, &tid, &ui, cx), |el, card| el.child(card)).child(composer),
+                None => el
+                    .when_some(goal_card(&self.model, &thread, &ui, cx), |el, card| el.child(card))
+                    .when_some(notify_card(&self.model, &tid, &ui, cx), |el, card| el.child(card))
+                    .child(composer),
             })
             .when(self.terminals_open.contains(&tid), |el| {
                 if let Some(panel) = self.terminals.get(&tid) {
@@ -818,6 +821,85 @@ impl Render for ThreadView {
             })
             .into_any_element()
     }
+}
+
+/// Codex: the thread's goal — what it is, how it's going, and Pause / Resume / Clear. Or, when
+/// Codex turned a `/goal` down, that it didn't start and why.
+fn goal_card(model: &Entity<AppModel>, thread: &Entity<crate::models::thread::ThreadModel>, ui: &Ui, cx: &App) -> Option<AnyElement> {
+    use bomb_core::goal::GoalStatus;
+    let t = thread.read(cx);
+    let id = Uuid::parse_str(&t.meta.id).ok()?;
+    let card = || {
+        div()
+            .mx(px(16.))
+            .mb(px(10.))
+            .px(px(14.))
+            .py(px(10.))
+            .rounded(px(14.))
+            .border_1()
+            .border_color(ui.border)
+            .bg(ui.glass)
+            .flex()
+            .items_center()
+            .gap(px(12.))
+    };
+    let text_col = |label: String, body: String, label_color: Hsla| {
+        div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(div().text_size(px(crate::theme::Type::SMALL)).text_color(label_color).child(label))
+            .child(div().text_size(px(crate::theme::Type::BODY)).text_color(ui.text).overflow_hidden().text_ellipsis().whitespace_nowrap().child(body))
+    };
+    if let (Some(notice), true) = (t.thread.goal_notice.clone(), t.thread.goal.as_ref().is_none_or(|g| !g.status.is_live())) {
+        let dismiss = thread.clone();
+        return Some(
+            card()
+                .child(div().size(px(16.)).flex_shrink_0().text_color(ui.warning).child(gpui_kit::component::Icon::from(Lucide::ShieldAlert)))
+                .child(text_col("Goal not started".into(), notice, ui.warning))
+                .child(Button::new("goal-notice-dismiss").ghost().small().icon(Lucide::X).tooltip("Dismiss").on_click(move |_, _, cx| {
+                    dismiss.update(cx, |t, cx| { let ch = t.thread.dismiss_goal_notice(); t.absorb(&ch, cx); })
+                }))
+                .into_any_element(),
+        );
+    }
+    let goal = t.thread.goal.as_ref()?;
+    let color = match goal.status {
+        GoalStatus::Active => ui.accent,
+        GoalStatus::Complete => ui.text_muted,
+        GoalStatus::Paused => ui.text_muted,
+        _ => ui.warning,
+    };
+    let icon = match goal.status {
+        GoalStatus::Complete => Lucide::Check,
+        GoalStatus::Paused => Lucide::Pause,
+        GoalStatus::Active => Lucide::Route,
+        _ => Lucide::ShieldAlert,
+    };
+    let busy = model.read(cx).queue_instead(cx);
+    let (pause, resume, clear) = (model.clone(), model.clone(), model.clone());
+    Some(
+        card()
+            .child(div().size(px(16.)).flex_shrink_0().text_color(color).child(gpui_kit::component::Icon::from(icon)))
+            .child(text_col(goal.headline(), goal.title(), ui.text_muted))
+            .when(goal.status.can_pause(), |el| {
+                el.child(Button::new("goal-pause").ghost().small().icon(Lucide::Pause).label("Pause")
+                    .tooltip("Codex finishes what it’s doing now, then waits until you resume.")
+                    .on_click(move |_, _, cx| pause.update(cx, |m, cx| m.goal_control(id, "pause", cx))))
+            })
+            .when(goal.status.can_resume(), |el| {
+                el.child(Button::new("goal-resume").outline().small().icon(Lucide::Play).label("Resume")
+                    .disabled(busy)
+                    .tooltip("Codex picks the goal back up and keeps working until it's done.")
+                    .on_click(move |_, _, cx| resume.update(cx, |m, cx| m.goal_control(id, "resume", cx))))
+            })
+            .child(Button::new("goal-clear").ghost().small().icon(Lucide::X)
+                .tooltip(if goal.status == GoalStatus::Complete { "Dismiss" } else { "Clear the goal. Codex stops working toward it." })
+                .on_click(move |_, _, cx| clear.update(cx, |m, cx| m.goal_control(id, "clear", cx))))
+            .into_any_element(),
+    )
 }
 
 /// Once a thread has a message from you: offer notifications for when it finishes or needs you,
