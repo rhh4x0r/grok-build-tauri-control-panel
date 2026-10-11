@@ -166,7 +166,8 @@ impl WorktreeManager {
         } else {
             self.worktrees_root.clone()
         };
-        let path = parent.join(format!("{}-{}", req.name, &Uuid::new_v4().to_string()[..8]));
+        // `fix/name` is a branch level, not a folder level: thread folders stay side by side.
+        let path = parent.join(format!("{}-{}", req.name.replace('/', "-"), &Uuid::new_v4().to_string()[..8]));
         let branch = format!("{THREAD_BRANCH_PREFIX}{}", req.name);
         let base = req.base_ref.as_deref().unwrap_or("HEAD");
 
@@ -530,6 +531,19 @@ locked
         assert!(!mgr.is_clean(&repo).await.unwrap());
         assert!(mgr.commit_all(&repo, "add b").await.unwrap());
         assert!(mgr.is_clean(&repo).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_typed_branch_name_keeps_its_folder_flat() {
+        let (dir, repo) = temp_repo().await;
+        let mgr = test_manager(dir.path());
+        let request = CreateWorktreeRequest { name: "fix/sidebar-drag-crash-9a177a94".into(), base_ref: None, prefer_grok_cli: false };
+        let wt = mgr.create(&repo, request).await.unwrap();
+        assert_eq!(wt.branch.as_deref(), Some("bomb/fix/sidebar-drag-crash-9a177a94"));
+        assert_eq!(mgr.current_branch(&wt.path).await.unwrap(), "bomb/fix/sidebar-drag-crash-9a177a94");
+        let folder = wt.path.file_name().unwrap().to_string_lossy().to_string();
+        assert!(folder.starts_with("fix-sidebar-drag-crash-9a177a94-"), "{folder}");
+        assert_eq!(wt.path.parent().unwrap(), std::fs::canonicalize(repo.join(".bombcode/threads")).unwrap());
     }
 
     #[tokio::test]
