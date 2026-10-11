@@ -37,6 +37,9 @@ const MAX_BUFFER_LINES: usize = 60;
 const MAX_PROMPT_CHARS: usize = 3000;
 const MAX_OUTPUT_CHARS: usize = 500;
 const CALL_TIMEOUT: Duration = Duration::from_secs(45);
+/// How long a new thread waits for its name before falling back to the first words.
+const NAME_TIMEOUT: Duration = Duration::from_secs(8);
+const NAME_KINDS: &[&str] = &["feat", "fix", "refactor", "chore", "docs", "test"];
 
 const NARRATOR_INSTRUCTIONS: &str = "You narrate a coding agent's work for a smart 12-year-old. \
 In 1-3 short sentences, explain what the agent just did or is doing, based on the activity log below. \
@@ -399,34 +402,24 @@ impl ExplainerService {
         Ok(text)
     }
 
-    /// One-shot 2-4 word title for a thread's first prompt (smart naming).
-    /// Uses the same locked-down narrator provider; errors bubble so callers
-    /// can keep the local slug.
-    pub async fn generate_title(&self, prompt: &str) -> Result<String, String> {
-        if !self.enabled.load(Ordering::Relaxed) {
-            return Err("explainer disabled".into());
+    /// A new thread's branch type, slug and title, from the model the person picked for it.
+    /// Bounded by `NAME_TIMEOUT` so creating a thread never waits long; errors mean "use the word slug".
+    pub async fn suggest_name(&self, backend: &str, model: &str, prompt: &str) -> Result<ThreadName, String> {
+        let model = model.trim().trim_end_matches("[1m]");
+        // An offline mock thread has no model to ask: its reply is its own words, checked like any other.
+        if model.eq_ignore_ascii_case("mock") {
+            let reply = json!({ "type": "feat", "slug": prompt.trim(), "title": prompt.trim() }).to_string();
+            return parse_thread_name(&reply).ok_or_else(|| "unusable name".into());
         }
-        let backend = self.backend.read().await.clone();
-        let model = self.model.read().await.clone();
         let ask = format!(
-            "Give a 2-4 word title for this coding task. Lowercase, no punctuation, no quotes, \
-             just the title.\n\nTask: {}",
-            clip(prompt, 500)
+            "Name this coding task for a git branch and a thread list. Reply with one line of JSON and nothing else: \
+             {{\"type\":\"feat|fix|refactor|chore|docs|test\",\"slug\":\"2-5 lowercase words joined by dashes\",\"title\":\"Short sentence-case title\"}}\n\nTask: {}",
+            clip(prompt.trim(), 500)
         );
-        let out = self.run_narrator(&backend, &model, &ask).await?;
-        let title: String = out
-            .trim()
-            .lines()
-            .next()
-            .unwrap_or("")
-            .trim_matches(|c: char| c == '"' || c == '\'' || c == '.')
-            .chars()
-            .take(48)
-            .collect();
-        if title.trim().is_empty() {
-            return Err("empty title".into());
-        }
-        Ok(title.trim().to_string())
+        let out = tokio::time::timeout(NAME_TIMEOUT, self.run_narrator(backend, model, &ask))
+            .await
+            .map_err(|_| "naming took too long".to_string())??;
+        parse_thread_name(&out).ok_or_else(|| "unusable name".into())
     }
 
     /// One locked-down text-only call on the chosen provider. Grok is the
@@ -497,6 +490,35 @@ impl ExplainerService {
     }
 }
 
+/// A new thread's name: branch `bomb/{kind}/{slug}-…`, and `title` in the thread list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThreadName {
+    pub kind: String,
+    pub slug: String,
+    pub title: String,
+}
+
+/// The first JSON object in a model's reply, checked: a known type (else `chore`), a git-safe
+/// slug of at most 40 characters, a one-line title of at most 60. `None` when either is empty.
+fn parse_thread_name(out: &str) -> Option<ThreadName> {
+    let (start, end) = (out.find('{')?, out.rfind('}')?);
+    let json = out.get(start..=end)?;
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let kind = v["type"].as_str().unwrap_or("").trim().to_lowercase();
+    let kind = if NAME_KINDS.contains(&kind.as_str()) { kind } else { "chore".into() };
+    let mut slug = String::new();
+    for c in v["slug"].as_str().unwrap_or("").to_lowercase().chars() {
+        let c = if c.is_ascii_alphanumeric() { c } else { '-' };
+        if !(c == '-' && (slug.is_empty() || slug.ends_with('-'))) { slug.push(c); }
+    }
+    // `fix/fix-sidebar-crash` says it twice.
+    let slug = slug.strip_prefix(&format!("{kind}-")).unwrap_or(&slug);
+    let slug: String = slug.chars().take(40).collect::<String>().trim_matches('-').to_string();
+    let title = v["title"].as_str().unwrap_or("").lines().next().unwrap_or("").trim().trim_matches(|c: char| c == '"' || c == '\'' || c == '.');
+    let title: String = title.chars().take(60).collect::<String>().trim().to_string();
+    (!slug.is_empty() && !title.is_empty()).then_some(ThreadName { kind, slug, title })
+}
+
 fn clip(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
@@ -512,6 +534,26 @@ fn narration_due(buf: &SessionBuffer, now: std::time::Instant) -> bool {
     let since = buf.last_explained_at.map(|t| now.saturating_duration_since(t)).unwrap_or(MIN_GAP);
     let unexplained = buf.pushed > buf.explained_to;
     unexplained && ((buf.milestone && since >= MIN_GAP) || since >= LOG_ONLY_AFTER)
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    #[test]
+    fn a_reply_becomes_a_checked_branch_name_and_title() {
+        let n = parse_thread_name(r#"Sure! {"type":"fix","slug":"Sidebar drag_crash!!","title":"Fix sidebar crash on project drag."}"#).unwrap();
+        assert_eq!(n, ThreadName { kind: "fix".into(), slug: "sidebar-drag-crash".into(), title: "Fix sidebar crash on project drag".into() });
+        let odd = parse_thread_name(r#"{"type":"Spike","slug":"--naïve ünïcode--","title":"Try it"}"#).unwrap();
+        assert_eq!((odd.kind.as_str(), odd.slug.as_str()), ("chore", "na-ve-n-code"));
+        let long = parse_thread_name(&format!(r#"{{"type":"feat","slug":"{}","title":"{}"}}"#, "word-".repeat(20), "T".repeat(90))).unwrap();
+        assert!(long.slug.len() <= 40 && !long.slug.ends_with('-') && long.title.chars().count() == 60);
+        let twice = parse_thread_name(r#"{"type":"fix","slug":"fix-sidebar-project-drag-crash","title":"Fix it"}"#).unwrap();
+        assert_eq!(twice.slug, "sidebar-project-drag-crash");
+        assert_eq!(parse_thread_name("no json here"), None);
+        assert_eq!(parse_thread_name(r#"{"type":"fix","slug":"!!!","title":"x"}"#), None);
+        assert_eq!(parse_thread_name(r#"{"type":"fix","slug":"ok","title":""}"#), None);
+    }
 }
 
 #[cfg(test)]

@@ -27,6 +27,8 @@ pub struct AppState {
     pub foundry: Arc<crate::foundry::FoundryService>,
     pub workspace_turns: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     pub workspace_gate: Arc<tokio::sync::Mutex<()>>,
+    /// Titles new threads' models chose for them, given with each thread's first prompt.
+    pub pending_titles: Arc<std::sync::Mutex<std::collections::HashMap<uuid::Uuid, String>>>,
     pub paths: GrokPaths,
     pub config: Arc<RwLock<GrokConfig>>,
     pub event_bus: Arc<EventBus>,
@@ -329,6 +331,7 @@ impl AppState {
             journal,
             foundry,
             workspace_turns: Arc::new(std::sync::Mutex::new(Default::default())),
+            pending_titles: Arc::new(std::sync::Mutex::new(Default::default())),
             workspace_gate: Arc::new(tokio::sync::Mutex::new(())),
             paths,
             config,

@@ -67,6 +67,8 @@ pub struct GrokConfig {
     pub worktrees_root: Option<PathBuf>,
     /// Give each new thread in a git project its own worktree by default.
     pub worktree_isolation_default: bool,
+    /// Ask the thread's model for a branch type, slug and title before creating the thread.
+    pub smart_names: bool,
     /// Right-panel ELI12 narrator (side LLM calls on the selected thread).
     pub explainer_enabled: bool,
     /// Backend for narrator calls (grok | claude | codex); None → grok.
@@ -113,6 +115,7 @@ impl Default for GrokConfig {
             sandbox_profile: SandboxProfile::Workspace,
             worktrees_root: None,
             worktree_isolation_default: true,
+            smart_names: true,
             explainer_enabled: true,
             explainer_backend: None,
             explainer_model: None,
@@ -275,6 +278,9 @@ impl GrokConfig {
         }
         if overlay.worktree_isolation_default != defaults.worktree_isolation_default {
             self.worktree_isolation_default = overlay.worktree_isolation_default;
+        }
+        if overlay.smart_names != defaults.smart_names {
+            self.smart_names = overlay.smart_names;
         }
         if overlay.explainer_enabled != defaults.explainer_enabled {
             self.explainer_enabled = overlay.explainer_enabled;

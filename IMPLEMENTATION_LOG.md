@@ -1058,3 +1058,15 @@ All additive; `PROTOCOL_VERSION` stays 1 and a Mac that never calls the new meth
 - Thread "last active" is real activity only: reconnecting, saving details and mode switches no longer bump it; 75 threads' times repaired from their transcripts.
 - Sidebar: threads sharing a folder (project checkout, inline) get their own rows sorted by their own time instead of hiding in "N conversations"; thread rows show the real branch.
 - Checked: helper voice list and error path; iPhone Voice sheet in the simulator against live Fish data; tests and workspace clippy. Not checked: speech with a real key.
+
+## 2026-10-11 — Branches and thread titles named from the task
+
+- A new thread on its own branch asks its own model (the backend and model picked for it) for a type, slug and title before the worktree exists.
+  - `ExplainerService::suggest_name`: one tools-off call through `run_narrator`, capped at 8 s (`NAME_TIMEOUT`; 4 s was too tight for real CLIs, see below). `parse_thread_name` takes the first JSON object and checks it: type in feat/fix/refactor/chore/docs/test (else chore), git-safe slug of at most 40 characters with a repeated type stripped, one-line title of at most 60.
+  - `start_session` asks before taking `workspace_gate`, so a slow answer holds up no other thread. Branch `bomb/{type}/{slug}-{id8}`, workspace name = title; the worktree folder stays flat (`/` → `-`). Not asked for reused workspaces, existing branches, shared checkouts or inline threads.
+  - The title is held in `AppState.pending_titles` and given with the thread's first prompt (where the word-slug label used to be set). The old async `generate_title` upgrade is gone: it couldn't touch the branch.
+  - No answer, a bad answer, or the setting off → the first-words slug, as before.
+- Settings → "Name branches from the task" (`smart_names`, on by default).
+- Measured from this Mac: Claude CLI ~3.5 s per naming call (Haiku and Sonnet alike, mostly start-up), Codex ~6 s. Grok not measured (not signed in from the shell).
+- Offline mock threads answer with their own words (`feat` + the prompt), so `a_new_thread_is_named_by_its_model_before_its_branch_exists` runs the whole path: branch, flat folder, workspace name, label and its event on the first prompt, and the first-words fallback with the setting off.
+- Checked: parser and flat-folder tests, workspace tests and clippy, `BOMB_SMOKE=1`. `usage_cache::caches_success_and_keeps_stale_bars_during_backoff` fails intermittently in full runs, untouched here. Not checked: creating a thread in the app on screen.

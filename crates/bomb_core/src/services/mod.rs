@@ -410,6 +410,21 @@ pub async fn start_session(
         opts.mcp_server_names = resolution.attached_names;
         mcp_skipped = resolution.skipped;
     }
+    // A new branch of its own gets a name from the thread's model, asked before the gate so a
+    // slow answer never holds up other threads. Anything short of a good answer keeps the word slug.
+    let gets_branch = opts.mode == grok_control_core::AgentMode::Acp
+        && opts.workspace_id.is_none()
+        && opts.checkout_branch.is_none()
+        && opts.isolate_worktree;
+    let smart_name = match opts.prompt.as_deref().map(without_attachment_note) {
+        Some(prompt) if gets_branch && !prompt.trim().is_empty() && state.config.read().await.smart_names => {
+            let model = opts.model.clone().unwrap_or_default();
+            state.explainer.suggest_name(opts.backend.key(), &model, &prompt).await
+                .map_err(|e| tracing::debug!(error = %e, "smart thread name unavailable; using the first words"))
+                .ok()
+        }
+        _ => None,
+    };
     let _gate = state.workspace_gate.lock().await;
     let id = Uuid::new_v4();
     let requested_cwd = cwd.clone();
@@ -442,12 +457,15 @@ pub async fn start_session(
             grok_worktree::run_git(root,&["show-ref","--verify",&format!("refs/heads/{base}")]).await.map_err(err)?;
             base.clone()
         } else { workspaces::default_branch(root).await.unwrap_or_else(|_| "HEAD".into()) };
-        let name = opts
-            .prompt
-            .as_deref()
-            .map(prompt_slug)
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "New thread".into());
+        let name = match &smart_name {
+            Some(n) => n.title.clone(),
+            None => opts
+                .prompt
+                .as_deref()
+                .map(prompt_slug)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "New thread".into()),
+        };
         let branch;
         if let Some(existing_branch)=opts.checkout_branch.clone() {
             grok_worktree::run_git(root,&["check-ref-format","--branch",&existing_branch]).await.map_err(err)?;
@@ -463,12 +481,15 @@ pub async fn start_session(
             branch=existing_branch;
             opts.worktree=Some(branch.clone());
         } else if !shared {
-            let slug: String = name
-                .to_lowercase()
-                .chars()
-                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-                .take(35)
-                .collect();
+            let slug: String = match &smart_name {
+                Some(n) => format!("{}/{}", n.kind, n.slug),
+                None => name
+                    .to_lowercase()
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                    .take(35)
+                    .collect(),
+            };
             let wt = state
                 .worktrees
                 .create(
@@ -597,6 +618,9 @@ pub async fn start_session(
     if let Some(w) = workspace_record {
         state.persistence.save_workspace(&w).map_err(err)?;
         state.persistence.attach_workspace(id, &w.id).map_err(err)?;
+    }
+    if let Some(n) = smart_name {
+        state.pending_titles.lock().unwrap_or_else(|e| e.into_inner()).insert(id, n.title);
     }
     Ok(SessionIdResponse { id: id.to_string() })
 }
@@ -858,53 +882,20 @@ pub async fn send_prompt(
         }
     }
 
-    // Smart thread naming on the FIRST prompt: instant word-slug, then an
-    // async narrator-provider title upgrade.
+    // The thread's name is given with its first prompt: the title its model chose at creation,
+    // or else its first words.
     let needs_label = state
         .registry
         .get_snapshot(id)
         .map(|s| s.metadata.label.is_none())
         .unwrap_or(false);
-    if needs_label {
-        let slug = prompt_slug(&prompt);
-        if !slug.is_empty() {
-            let _ = state.registry.set_label(id, &slug);
-            emit_thread_label(state, id, &slug);
+    let chosen = state.pending_titles.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    if chosen.is_some() || needs_label {
+        let label = chosen.unwrap_or_else(|| prompt_slug(&prompt));
+        if !label.is_empty() && state.registry.set_label(id, &label).is_ok() {
+            emit_thread_label(state, id, &label);
+            persist_session(state, id).await;
         }
-        let explainer = state.explainer.clone();
-        let registry = state.registry.clone();
-        let bus = state.event_bus.clone();
-        let persistence = state.persistence.clone();
-        let prompt_for_title = prompt.clone();
-        tokio::spawn(async move {
-            if let Ok(title) = explainer.generate_title(&prompt_for_title).await {
-                if !title.is_empty() && registry.set_label(id, &title).is_ok() {
-                    bus.emit(grok_events::ControlEvent::Raw {
-                        session_id: Some(id),
-                        payload: serde_json::json!({
-                            "channel": "thread", "kind": "label", "label": title,
-                        }),
-                    });
-                    // Persist the upgraded label into the session record.
-                    if let Ok(snap) = registry.get_snapshot(id) {
-                        let _ = persistence.upsert_session(&SessionRecord {
-                            id,
-                            cwd: snap.metadata.cwd.clone(),
-                            mode: "acp".into(),
-                            model: snap.metadata.model.clone(),
-                            status: format!("{:?}", snap.metadata.status).to_lowercase(),
-                            worktree: snap.metadata.worktree.clone(),
-                            acp_session_id: snap.metadata.acp_session_id.clone(),
-                            metadata_json: serde_json::to_string(&snap)
-                                .unwrap_or_else(|_| "{}".into()),
-                            created_at: snap.metadata.created_at,
-                            updated_at: snap.metadata.last_activity,
-                            message_count: 0,
-                        });
-                    }
-                }
-            }
-        });
     }
 
     let effort_result = if let Some(effort) = effort.as_deref() {
