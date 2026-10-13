@@ -8,7 +8,10 @@ use gpui_kit::component::{
     Icon, Sizable,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{cell::Cell, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
+
+const CELL_W: f32 = 7.2;
+const CELL_H: f32 = 16.;
 
 struct Tab {
     id: u64,
@@ -25,6 +28,11 @@ pub struct TerminalPanel {
     error: Option<String>,
     loading: bool,
     focus: FocusHandle,
+    /// Where the screen grid was last painted, to map the mouse onto cells.
+    grid_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Mouse selection as (anchor, head) screen cells; `selecting` while the button is down.
+    selection: Option<((u16, u16), (u16, u16))>,
+    selecting: bool,
     _poll: Task<()>,
 }
 impl TerminalPanel {
@@ -65,6 +73,9 @@ impl TerminalPanel {
             loading: false,
             first_command: None,
             focus: cx.focus_handle(),
+            grid_bounds: Rc::default(),
+            selection: None,
+            selecting: false,
             _poll: poll,
         };
         panel.add(cx);
@@ -130,7 +141,27 @@ impl TerminalPanel {
         }
         cx.notify();
     }
+    /// The screen cell under `position`, clamped to the grid.
+    fn cell_at(&self, position: Point<Pixels>) -> Option<(u16, u16)> {
+        let bounds = self.grid_bounds.get()?;
+        let (rows, cols) = self.active()?.session.screen().size();
+        let local = position - bounds.origin;
+        let row = (local.y / px(CELL_H)).floor().clamp(0., rows.saturating_sub(1) as f32) as u16;
+        let col = (local.x / px(CELL_W)).floor().clamp(0., cols.saturating_sub(1) as f32) as u16;
+        Some((row, col))
+    }
+    /// The selection in reading order, if it covers more than a bare click.
+    fn ordered_selection(&self) -> Option<((u16, u16), (u16, u16))> {
+        let (a, b) = self.selection?;
+        (a != b).then(|| if a <= b { (a, b) } else { (b, a) })
+    }
+    fn selected_text(&self) -> Option<String> {
+        let ((r0, c0), (r1, c1)) = self.ordered_selection()?;
+        let text = self.active()?.session.screen().contents_between(r0, c0, r1, c1 + 1);
+        Some(text.lines().map(str::trim_end).collect::<Vec<_>>().join("\n"))
+    }
     fn input(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        self.selection = None;
         if let Some(tab) = self.active() {
             if let Err(error) = tab.session.write(&bytes) {
                 self.error = Some(error);
@@ -167,6 +198,7 @@ impl Render for TerminalPanel {
                             ))
                             .on_click(cx.listener(move |panel, _, window, cx| {
                                 panel.selected = Some(id);
+                                panel.selection = None;
                                 panel.focus(window, cx);
                                 cx.notify();
                             })),
@@ -193,8 +225,26 @@ impl Render for TerminalPanel {
             .cursor_text()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|panel, _, window, cx| panel.focus(window, cx)),
+                cx.listener(|panel, event: &MouseDownEvent, window, cx| {
+                    panel.focus(window, cx);
+                    panel.selection = panel.cell_at(event.position).map(|cell| (cell, cell));
+                    panel.selecting = true;
+                    cx.notify();
+                }),
             )
+            .on_mouse_move(cx.listener(|panel, event: &MouseMoveEvent, _, cx| {
+                if !panel.selecting || !event.dragging() {
+                    return;
+                }
+                if let (Some(head), Some((anchor, _))) = (panel.cell_at(event.position), panel.selection) {
+                    if panel.selection != Some((anchor, head)) {
+                        panel.selection = Some((anchor, head));
+                        cx.notify();
+                    }
+                }
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|panel, _, _, _| panel.selecting = false))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|panel, _, _, _| panel.selecting = false))
             .capture_key_down(cx.listener(|panel, event: &KeyDownEvent, window, cx| {
                 let key = &event.keystroke;
                 if key.modifiers.platform && key.key == "v" {
@@ -202,10 +252,12 @@ impl Render for TerminalPanel {
                         panel.input(text.into_bytes(), cx);
                     }
                 } else if key.modifiers.platform && key.key == "c" {
-                    if let Some(tab) = panel.active() {
-                        cx.write_to_clipboard(ClipboardItem::new_string(
-                            tab.session.screen().contents(),
-                        ));
+                    // The highlighted text, or the whole screen when nothing is selected.
+                    let text = panel
+                        .selected_text()
+                        .or_else(|| panel.active().map(|tab| tab.session.screen().contents()));
+                    if let Some(text) = text {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
                     }
                 } else if let Some(bytes) = terminal_key(key) {
                     panel.input(bytes, cx);
@@ -219,6 +271,7 @@ impl Render for TerminalPanel {
                 if let Some(tab) = panel.active() {
                     let y = event.delta.pixel_delta(px(16.)).y;
                     tab.session.scroll(if y > px(0.) { 3 } else { -3 });
+                    panel.selection = None;
                     cx.notify();
                     cx.stop_propagation();
                 }
@@ -227,6 +280,10 @@ impl Render for TerminalPanel {
             let screen = session.screen();
             let (rows, cols) = screen.size();
             let cursor = screen.cursor_position();
+            let selection = self.ordered_selection();
+            let selected = |row: u16, col: u16| {
+                selection.is_some_and(|(start, end)| (row, col) >= start && (row, col) <= end)
+            };
             let mut grid = div()
                 .flex()
                 .flex_col()
@@ -234,7 +291,7 @@ impl Render for TerminalPanel {
                 .text_size(px(crate::theme::Type::SMALL))
                 .line_height(px(18.));
             for row in 0..rows {
-                let mut line = div().flex().h(px(16.)).flex_shrink_0();
+                let mut line = div().flex().h(px(CELL_H)).flex_shrink_0();
                 for col in 0..cols {
                     let Some(cell) = screen.cell(row, col) else {
                         continue;
@@ -254,10 +311,13 @@ impl Render for TerminalPanel {
                     {
                         std::mem::swap(&mut fg, &mut bg);
                     }
+                    if selected(row, col) {
+                        bg = ui.selected_bg();
+                    }
                     line = line.child(
                         div()
-                            .w(px(if cell.is_wide() { 14.4 } else { 7.2 }))
-                            .h(px(16.))
+                            .w(px(if cell.is_wide() { CELL_W * 2. } else { CELL_W }))
+                            .h(px(CELL_H))
                             .flex_shrink_0()
                             .text_color(fg)
                             .bg(bg)
@@ -271,12 +331,14 @@ impl Render for TerminalPanel {
                 }
                 grid = grid.child(line);
             }
+            let grid_bounds = self.grid_bounds.clone();
             body = body.child(grid).child(
                 canvas(
                     move |bounds, _, _| {
+                        grid_bounds.set(Some(bounds));
                         session.resize(
-                            (bounds.size.height / px(16.)).floor() as u16,
-                            (bounds.size.width / px(7.2)).floor() as u16,
+                            (bounds.size.height / px(CELL_H)).floor() as u16,
+                            (bounds.size.width / px(CELL_W)).floor() as u16,
                         );
                     },
                     |_, _, _, _| {},
@@ -328,7 +390,7 @@ impl Render for TerminalPanel {
                         div()
                             .text_size(px(crate::theme::Type::CAPTION))
                             .text_color(ui.text_faint)
-                            .child("⌘C copy screen · ⌘V paste · Ctrl+C interrupt"),
+                            .child("Drag to select · ⌘C copy · ⌘V paste · Ctrl+C interrupt"),
                     ),
             )
             .when_some(self.error.clone(), |el, error| {
