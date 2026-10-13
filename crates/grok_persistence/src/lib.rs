@@ -4,7 +4,7 @@
 //! `~/.bombcode/sessions/control_panel.db`
 
 pub mod workspaces;
-pub use workspaces::WorkspaceRecord;
+pub use workspaces::{MergedRecord, PrRecord, WorkspaceRecord};
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;

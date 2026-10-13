@@ -426,8 +426,14 @@ impl ThreadView {
             self.model.read(cx).workspaces.iter().find(|w| w.id == id && !w.inline && !w.shared_checkout && w.archived_at.is_none()).cloned()
         });
         let busy = self.model.read(cx).git_busy;
+        let archived_workspace = self.model.read(cx).active_workspace.clone().and_then(|id| {
+            self.model.read(cx).workspaces.iter().find(|w| w.id == id && !w.inline && w.archived_at.is_some()).map(|w| w.id.clone())
+        });
         let base = review.map(|r| r.base.clone()).unwrap_or_else(|| "main".into());
         let can_merge = review.is_some_and(|r| r.ahead > 0 || !r.dirty.is_empty());
+        let ship = review.map(|r| r.ship.clone()).unwrap_or_default();
+        let on_github = review.is_some_and(|r| r.remote);
+        let ship_default = workspace.as_ref().map(|w| self.model.read(cx).ship_default(&w.project_root, on_github)).unwrap_or("merge");
         let action = |id: &'static str, label: &str, icon: Lucide, show_label: bool| {
             Button::new(id)
                 .ghost()
@@ -489,30 +495,100 @@ impl ThreadView {
                 )
             })
             .when_some(workspace.clone(), |el, w| {
-                let merge_app = app.clone();
-                let close_app = app.clone();
-                if can_merge {
-                    let id = w.id.clone();
-                    el.child(
-                        Button::new("thread-merge-main")
-                            .primary()
-                            .small()
-                            .label(format!("Merge to {base}"))
-                            .disabled(busy)
-                            .tooltip(format!("Asks this thread’s agent to merge its work into {base} here in the chat, resolving any conflicts it finds. “Merge & close” is in the ··· menu."))
-                            .on_click(move |_, _, cx| merge_app.update(cx, |m, cx| m.merge_to_main(id.clone(), false, cx))),
-                    )
-                } else {
-                    el.child(
-                        Button::new("thread-close-feature")
-                            .outline()
-                            .small()
-                            .label("Close feature")
-                            .disabled(busy)
-                            .tooltip("Nothing left to merge. Archive this thread and tidy up its branch.")
-                            .on_click(move |_, window, cx| super::project::confirm_close(close_app.clone(), w.id.clone(), w.name.clone(), window, cx)),
-                    )
+                use bomb_core::services::ship::Ship;
+                let small = px(crate::theme::Type::SMALL);
+                // Where the thread stands, in words; a PR's opens on GitHub.
+                let status = |text: String, color: Hsla, url: Option<String>| {
+                    div().id("thread-ship-status").px_1().text_size(small).text_color(color).child(text)
+                        .when_some(url, |el, url| el.cursor_pointer().hover(|s| s.underline()).on_click(move |_, _, cx| cx.open_url(&url)))
+                };
+                let checks_color = |checks: &str| match checks { "failing" => ui.danger, "pending" => ui.warning, "passing" => ui.success, _ => ui.text_muted };
+                let close = {
+                    let (app, id, name) = (app.clone(), w.id.clone(), w.name.clone());
+                    move |label: &'static str, primary: bool| {
+                        let (app, id, name) = (app.clone(), id.clone(), name.clone());
+                        let b = Button::new("thread-close-feature").small().label(label).disabled(busy)
+                            .tooltip("Archive this thread: its folder is removed and the chat stays readable under Archived. Continue it any time.")
+                            .on_click(move |_, window, cx| super::project::confirm_close(app.clone(), id.clone(), name.clone(), window, cx));
+                        if primary { b.primary() } else { b.outline() }
+                    }
+                };
+                match ship {
+                    Ship::Ready { .. } if can_merge => {
+                        let default = ship_default;
+                        let (main_label, main_tip) = if default == "pr" {
+                            ("Open pull request".to_string(), "Saves any loose edits, pushes this branch and opens a pull request titled with the thread’s name. Merged on GitHub as one squashed commit.".to_string())
+                        } else {
+                            (format!("Merge to {base}"), format!("Asks this thread’s agent to merge its work into {base} as one squashed commit, resolving any conflicts it finds."))
+                        };
+                        let (main_app, menu_app, id) = (app.clone(), app.clone(), w.id.clone());
+                        let main = Button::new("thread-ship").primary().small().label(main_label).disabled(busy).tooltip(main_tip)
+                            .on_click(move |_, _, cx| main_app.update(cx, |m, cx| if default == "pr" { m.ship(id.clone(), "open_pr", cx) } else { m.merge_to_main(id.clone(), false, cx) }));
+                        let id = w.id.clone();
+                        let base = base.clone();
+                        let more = Button::new("thread-ship-more").primary().small().compact().icon(Icon::from(Lucide::ChevronDown).size(px(12.))).disabled(busy)
+                            .tooltip("Other ways to ship")
+                            .dropdown_menu(move |menu, _, _| {
+                                let item = |label: String, step: &'static str| {
+                                    let (app, id) = (menu_app.clone(), id.clone());
+                                    PopupMenuItem::new(label).on_click(move |_, _, cx| app.update(cx, |m, cx| match step {
+                                        "merge" => m.merge_to_main(id.clone(), false, cx),
+                                        "merge_close" => m.merge_to_main(id.clone(), true, cx),
+                                        step => m.ship(id.clone(), step, cx),
+                                    }))
+                                };
+                                let menu = if on_github {
+                                    menu.item(item("Open pull request".into(), "open_pr")).item(item("Open draft pull request".into(), "open_draft_pr"))
+                                } else { menu };
+                                menu.item(item(format!("Merge to {base}"), "merge")).item(item(format!("Merge to {base} & close"), "merge_close"))
+                            });
+                        el.child(div().flex().items_center().gap_px().child(main).child(more))
+                    }
+                    Ship::PrOpen { number, url, draft, checks, unpushed, unsaved } => {
+                        let label = format!("{}PR #{number} · {}", if draft { "Draft " } else { "" }, match checks.as_str() { "none" => "no checks".to_string(), c => format!("checks {c}") });
+                        let el = el.child(status(label, checks_color(&checks), Some(url.clone())));
+                        let (app2, id) = (app.clone(), w.id.clone());
+                        let behind = unpushed + unsaved;
+                        let primary = if behind > 0 {
+                            Button::new("thread-pr-push").primary().small().label(format!("Push to PR #{number}")).disabled(busy)
+                                .tooltip(format!("{behind} change{} here that the pull request doesn’t have yet", if behind == 1 { "" } else { "s" }))
+                                .on_click(move |_, _, cx| app2.update(cx, |m, cx| m.ship(id.clone(), "push_pr", cx)))
+                        } else {
+                            Button::new("thread-pr-merge").primary().small().label(format!("Merge PR #{number}")).disabled(busy)
+                                .tooltip(format!("Squash-merges the pull request into {base} on GitHub{}, then updates your local {base}.", if draft { " (marking the draft ready first)" } else { "" }))
+                                .on_click(move |_, _, cx| app2.update(cx, |m, cx| m.ship(id.clone(), "merge_pr", cx)))
+                        };
+                        let (menu_app, id) = (app.clone(), w.id.clone());
+                        let more = Button::new("thread-pr-more").outline().small().compact().icon(Icon::from(Lucide::ChevronDown).size(px(12.))).disabled(busy)
+                            .tooltip("More for this pull request")
+                            .dropdown_menu(move |menu, _, _| {
+                                let item = |label: &str, step: &'static str| {
+                                    let (app, id) = (menu_app.clone(), id.clone());
+                                    PopupMenuItem::new(label.to_string()).on_click(move |_, _, cx| app.update(cx, |m, cx| m.ship(id.clone(), step, cx)))
+                                };
+                                let url = url.clone();
+                                let menu = menu.item(PopupMenuItem::new("View on GitHub").on_click(move |_, _, cx| cx.open_url(&url)))
+                                    .item(item("Push latest work", "push_pr"));
+                                let menu = if draft { menu.item(item("Mark ready for review", "ready_pr")) } else { menu };
+                                menu.item(item(&format!("Merge PR #{number} (squash)"), "merge_pr"))
+                            });
+                        el.child(div().flex().items_center().gap_1().child(primary).child(more))
+                    }
+                    Ship::PrClosed { number, url } => el.child(status(format!("PR #{number} closed without merging"), ui.text_muted, Some(url))).child(close("Close feature", false)),
+                    Ship::Merged { into, pr, url } => {
+                        let label = match pr { Some(n) => format!("Merged via PR #{n}"), None => format!("Merged into {into}") };
+                        el.child(status(label, ui.success, url)).child(close("Close thread", true))
+                    }
+                    _ => el.child(close("Close feature", false)),
                 }
+            })
+            .when_some(archived_workspace, |el, id| {
+                let app = app.clone();
+                el.child(
+                    Button::new("thread-continue").primary().small().label("Continue in a new thread")
+                        .tooltip("This thread is archived. Start a new one with this conversation as context, on its branch if its work never merged.")
+                        .on_click(move |_, _, cx| app.update(cx, |m, cx| m.continue_archived(id.clone(), cx))),
+                )
             })
             .child(div().w(px(1.)).h(px(14.)).mx_1().bg(ui.border))
             // On a server thread these open a shell, files and preview on the server, streamed here.

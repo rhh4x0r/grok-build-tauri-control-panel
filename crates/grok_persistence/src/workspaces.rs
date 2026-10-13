@@ -18,6 +18,31 @@ pub struct WorkspaceRecord {
     pub read_only: bool,
     #[serde(default)]
     pub threads: Vec<String>,
+    /// The pull request opened for this thread, as last seen on GitHub.
+    #[serde(default)]
+    pub pr: Option<PrRecord>,
+    /// Set once the thread's work landed in its target branch (squashed, so Git alone can't tell later).
+    #[serde(default)]
+    pub merged: Option<MergedRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrRecord {
+    pub number: u64,
+    pub url: String,
+    pub draft: bool,
+    /// OPEN | MERGED | CLOSED
+    pub state: String,
+    /// passing | failing | pending | none
+    pub checks: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MergedRecord {
+    pub at: String,
+    /// The PR it was merged through; `None` when merged into the local branch.
+    pub pr: Option<u64>,
+    pub into: String,
 }
 
 impl Persistence {
@@ -82,7 +107,7 @@ mod tests {
             inline: false,
             shared_checkout: false,
             read_only: false,
-            threads: vec![],
+            threads: vec![], pr: None, merged: None,
         };
         db.save_workspace(&w).unwrap();
         let a = Uuid::new_v4();

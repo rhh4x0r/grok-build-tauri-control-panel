@@ -132,6 +132,19 @@ pub async fn dispatch(state: &AppState, origin: &str, method: &str, p: Value) ->
         "merge_request" => out(workspaces::merge_request(state, arg(&p, "id")?).await?),
         "is_merged" => { let id: String = arg(&p, "id")?; out(workspaces::is_merged(state, &id).await?) }
         "close_feature" => out(workspaces::close_feature(state, arg(&p, "id")?).await?),
+        "ship" => {
+            // One verb for the ship steps: open_pr | open_draft_pr | push_pr | ready_pr | merge_pr.
+            let id: String = arg(&p, "id")?;
+            out(match arg::<String>(&p, "step")?.as_str() {
+                "open_pr" => crate::services::ship::open_pr(state, id, false).await?,
+                "open_draft_pr" => crate::services::ship::open_pr(state, id, true).await?,
+                "push_pr" => crate::services::ship::push_pr(state, id).await?,
+                "ready_pr" => crate::services::ship::ready_pr(state, id).await?,
+                "merge_pr" => crate::services::ship::merge_pr(state, id).await?,
+                other => return Err(format!("unknown ship step: {other}")),
+            })
+        }
+        "refresh_prs" => { let root: String = arg(&p, "root")?; out(crate::services::ship::refresh_project_prs(state, &root).await?) }
         // Save unsaved edits in every idle thread of a project, so a sync carries the real work. Busy threads are skipped.
         "checkpoint_project" => {
             let root: String = arg(&p, "root")?;

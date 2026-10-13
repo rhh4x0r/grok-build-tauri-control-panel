@@ -32,6 +32,8 @@ const THREAD_SEEN_KEY: &str = "thread_seen";
 /// Activity before this counts as seen: threads don't all light up the first time.
 const THREAD_SEEN_SINCE_KEY: &str = "thread_seen_since";
 const PINNED_PROJECTS_KEY: &str = services::PINNED_PROJECTS_KEY;
+/// Per project, how its threads ship by default: "pr" or "merge".
+const SHIP_CHOICE_KEY: &str = "ship_choice";
 const PROJECT_INTRO_KEY: &str = "project_intro_seen";
 /// How long a queued message waits for the last turn to wind down before it goes anyway.
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -292,6 +294,8 @@ pub struct AppModel {
     dismissed_failures: bomb_core::failures::DismissedFailures,
     /// Project roots shown in the sidebar's Pinned section, in the order they were pinned.
     pub pinned_projects: Vec<String>,
+    /// Per project root: "pr" or "merge", the Ship button's main choice (last one used).
+    pub ship_choice: HashMap<String, String>,
     /// Workspaces to close once their agent finishes merging.
     pub close_after_merge: HashSet<String>,
     pub active_workspace: Option<String>,
@@ -390,6 +394,7 @@ impl AppModel {
             seen_since: None,
             dismissed_failures: Default::default(),
             pinned_projects: Vec::new(),
+            ship_choice: HashMap::new(),
             close_after_merge: HashSet::new(),
             active_workspace: None,
             source_thread: None,
@@ -1209,6 +1214,8 @@ impl AppModel {
                             m.refresh_review(cx);
                         }
                         if tick.is_multiple_of(15) { m.refresh_project_status(true, cx); }
+                        // Open pull requests move on GitHub (checks, merges): once a minute.
+                        if tick.is_multiple_of(3) { m.refresh_prs(cx); }
                     })
                     .is_err()
                 {
@@ -1494,6 +1501,23 @@ impl AppModel {
     pub fn new_thread_from(&mut self, branch: String, cx: &mut Context<Self>) {
         self.new_thread(cx);
         self.prefs.base_branch = Some(branch);
+        cx.notify();
+    }
+
+    /// Pick an archived thread back up: a new thread with its conversation as context, building on
+    /// its branch when that still exists (work that never merged), else on the latest main.
+    pub fn continue_archived(&mut self, workspace: String, cx: &mut Context<Self>) {
+        let Some(w) = self.workspaces.iter().find(|w| w.id == workspace).cloned() else { return };
+        let source = self.selected.map(|id| id.to_string()).or_else(|| w.threads.first().cloned());
+        let branch_kept = w.merged.is_none() && !w.branch.is_empty() && (crate::remote::is_server_root(&w.project_root)
+            || std::process::Command::new("git").args(["show-ref", "--verify", "--quiet", &format!("refs/heads/{}", w.branch)])
+                .current_dir(&w.project_root).status().is_ok_and(|s| s.success()));
+        self.active_project = Some(w.project_root.clone());
+        self.new_thread(cx);
+        self.source_thread = source;
+        if branch_kept { self.prefs.base_branch = Some(w.branch.clone()); }
+        let from = if branch_kept { format!("its branch {}", w.branch) } else { "the latest main".to_string() };
+        self.toast(ToastKind::Info, format!("Your next message continues “{}” in a new thread, with its conversation as context, starting from {from}.", w.name));
         cx.notify();
     }
 
@@ -2380,6 +2404,7 @@ impl AppModel {
             let intro = services::kv_get(&state, PROJECT_INTRO_KEY).await.ok().flatten();
             let recent = services::kv_get(&state, RECENT_WINDOW_KEY).await.ok().flatten();
             let seen = services::kv_get(&state, THREAD_SEEN_KEY).await.ok().flatten();
+            let ship = services::kv_get(&state, SHIP_CHOICE_KEY).await.ok().flatten();
             let since = match services::kv_get(&state, THREAD_SEEN_SINCE_KEY).await.ok().flatten() {
                 Some(since) => since,
                 None => {
@@ -2388,9 +2413,10 @@ impl AppModel {
                     now
                 }
             };
-            (sort, pinned, intro, recent, seen, since)
-        }, move |(sort, pinned, intro, recent, seen, since), cx| {
+            (sort, pinned, intro, recent, seen, since, ship)
+        }, move |(sort, pinned, intro, recent, seen, since, ship), cx| {
             let _ = this.update(cx, |m, cx| {
+                if let Some(ship) = ship.and_then(|raw| serde_json::from_str::<HashMap<String, String>>(&raw).ok()) { m.ship_choice = ship; }
                 if let Some(seen) = seen.and_then(|raw| serde_json::from_str::<HashMap<Uuid, chrono::DateTime<chrono::Utc>>>(&raw).ok()) {
                     for (id, at) in seen { m.seen.entry(id).and_modify(|t| *t = (*t).max(at)).or_insert(at); }
                 }
@@ -2699,7 +2725,65 @@ impl AppModel {
     }
 
     /// Ask the thread's own agent to do the merge in its chat. With `then_close`, the feature is closed once the merge has landed.
+    /// How this project's threads ship by default: the last choice, else a PR when it's on GitHub.
+    pub fn ship_default(&self, root: &str, on_github: bool) -> &'static str {
+        match self.ship_choice.get(root).map(String::as_str) {
+            Some("pr") => "pr",
+            Some("merge") => "merge",
+            _ if on_github => "pr",
+            _ => "merge",
+        }
+    }
+
+    fn remember_ship_choice(&mut self, workspace: &str, choice: &str, cx: &mut Context<Self>) {
+        let Some(root) = self.workspaces.iter().find(|w| w.id == workspace).map(|w| w.project_root.clone()) else { return };
+        if self.ship_choice.get(&root).map(String::as_str) == Some(choice) { return; }
+        self.ship_choice.insert(root, choice.to_string());
+        let raw = serde_json::to_string(&self.ship_choice).unwrap_or_default();
+        let state = svc(cx);
+        spawn_service(cx, async move { services::kv_set(&state, SHIP_CHOICE_KEY, &raw).await }, |_, _| {});
+    }
+
+    /// A ship step: open_pr | open_draft_pr | push_pr | ready_pr | merge_pr.
+    pub fn ship(&mut self, workspace: String, step: &'static str, cx: &mut Context<Self>) {
+        if self.git_busy { return; }
+        self.git_busy = true;
+        if step.starts_with("open") { self.remember_ship_choice(&workspace, "pr", cx); }
+        cx.notify();
+        let core = self.core_of_workspace(&workspace, cx);
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move { core.ship(workspace, step).await }, move |res, cx| {
+            let _ = this.update(cx, |m, cx| {
+                m.git_busy = false;
+                match res {
+                    Ok(note) if step.starts_with("open") => m.toast(ToastKind::Success, format!("Pull request opened: {note}")),
+                    Ok(note) => m.toast(ToastKind::Success, note),
+                    Err(e) => m.fail(e, cx),
+                }
+                m.refresh_workspaces(cx);
+                m.refresh_review(cx);
+                m.refresh_project_overview(cx);
+                cx.notify();
+            });
+        });
+    }
+
+    /// Refresh the open PRs of the project in view, so badges follow GitHub.
+    pub fn refresh_prs(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.active_project.clone() else { return };
+        let open = self.workspaces.iter().any(|w| w.project_root == root && w.pr.as_ref().is_some_and(|pr| pr.state == "OPEN"));
+        if !open { return; }
+        let core = crate::runtime::core_for_root(cx, &root);
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move { core.refresh_prs(root).await }, move |res, cx| {
+            if matches!(res, Ok(n) if n > 0) {
+                let _ = this.update(cx, |m, cx| { m.refresh_workspaces(cx); m.refresh_review(cx); });
+            }
+        });
+    }
+
     pub fn merge_to_main(&mut self, workspace: String, then_close: bool, cx: &mut Context<Self>) {
+        self.remember_ship_choice(&workspace, "merge", cx);
         let core = self.core_of_workspace(&workspace, cx);
         let this = cx.entity().downgrade();
         let id = workspace.clone();

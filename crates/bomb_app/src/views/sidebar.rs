@@ -654,6 +654,18 @@ impl SidebarView {
         // The branch, as the worktree row shows it; the worktree's folder name only when the
         // thread's workspace isn't known.
         let id_text = id.to_string();
+        // Where its work stands, at a glance: PR #12 (coloured by its checks), merged, closed.
+        let ship_badge = self.model.read(cx).workspaces.iter().find(|w| w.threads.contains(&id_text)).and_then(|w| {
+            if w.merged.is_some() { return Some(("Merged".to_string(), ui.success)); }
+            let pr = w.pr.as_ref()?;
+            match pr.state.as_str() {
+                "OPEN" => Some((format!("{}#{}", if pr.draft { "Draft " } else { "PR " }, pr.number), match pr.checks.as_str() {
+                    "failing" => ui.danger, "pending" => ui.warning, "passing" => ui.success, _ => ui.text_muted,
+                })),
+                "CLOSED" => Some(("PR closed".to_string(), ui.text_faint)),
+                _ => None,
+            }
+        });
         let branch = self.model.read(cx).workspaces.iter()
             .find(|w| w.threads.contains(&id_text))
             .map(|w| w.branch.clone())
@@ -784,7 +796,10 @@ impl SidebarView {
                         .line_height(px(16.))
                         .text_color(ui.subline())
                         .child(div().size(px(13.)).flex_shrink_0().child(Icon::from(Lucide::GitBranch)))
-                        .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(b)),
+                        .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(b))
+                        .when_some(ship_badge, |el, (text, color)| el.child(
+                            div().flex_shrink_0().px(px(5.)).rounded(px(4.)).bg(color.opacity(0.12)).text_color(color).child(text),
+                        )),
                 )
             })
             .child(model_history_stack(&history, &current, ui))

@@ -26,6 +26,9 @@ pub struct WorkspaceReview {
     pub pr: Option<String>,
     pub pr_url: Option<String>,
     pub conflicts: Vec<String>,
+    /// Where the thread stands: ready, PR open, merged…
+    #[serde(default)]
+    pub ship: super::ship::Ship,
 }
 
 pub async fn default_branch(root: &Path) -> Result<String, String> {
@@ -134,7 +137,7 @@ pub async fn list_workspaces(state: &AppState) -> Result<Vec<WorkspaceRecord>, S
                 inline,
                 shared_checkout: inline,
                 read_only: inline,
-                threads: vec![],
+                threads: vec![], pr: None, merged: None,
             };
             state.persistence.save_workspace(&w).map_err(err)?;
             let id = w.id.clone();
@@ -257,6 +260,9 @@ pub async fn review_workspace(state: &AppState, id: String) -> Result<WorkspaceR
     let sync=if let Some(upstream)=&upstream {run_git(path,&["rev-list","--left-right","--count",&format!("{upstream}...HEAD")]).await.unwrap_or_default()}else{String::new()};
     let sync:Vec<usize>=sync.split_whitespace().filter_map(|n|n.parse().ok()).collect();
     let main_unpushed=run_git(Path::new(&w.project_root),&["rev-list","--count",&format!("origin/{default_branch}..{default_branch}")]).await.ok().and_then(|s|s.trim().parse().ok()).unwrap_or(0);
+    let ahead = *counts.get(1).unwrap_or(&0);
+    let unpushed = *sync.get(1).unwrap_or(&0);
+    let ship = super::ship::status(state, &mut w.clone(), ahead, dirty.len(), unpushed).await;
     Ok(WorkspaceReview {
         branch: state.worktrees.current_branch(path).await.map_err(err)?,
         default_branch,
@@ -276,6 +282,7 @@ pub async fn review_workspace(state: &AppState, id: String) -> Result<WorkspaceR
         pr,
         pr_url,
         conflicts,
+        ship,
     })
 }
 
@@ -446,12 +453,12 @@ pub async fn merge_request(state: &AppState, id: String) -> Result<String, Strin
                 ensure_idle(state, other).map_err(|_| format!("Another thread is working on {base} right now. Let it finish, then merge again."))?;
             }
             format!(
-"3. When this branch is healthy, go to the folder at {folder}, which should have {base} checked out, and run `git merge --no-ff {branch}` there.
-4. If that folder is not on {base} or has uncommitted edits to tracked files, stop and tell me instead of stashing, resetting or discarding anything. Untracked files there are fine to leave alone.", branch = w.branch)
+"3. When this branch is healthy, go to the folder at {folder}, which should have {base} checked out, and land it there as one commit: `git merge --squash {branch}`, then `git commit -m \"{title}\"`.
+4. If that folder is not on {base} or has uncommitted edits to tracked files, stop and tell me instead of stashing, resetting or discarding anything. Untracked files there are fine to leave alone.", branch = w.branch, title = w.name.replace('"', "'"))
         }
         None => format!(
-"3. {base} is not checked out in any folder, so once step 2 is done this branch already contains it. From this folder run `git fetch . {branch}:{base}` to move {base} forward to this branch.
-4. If that command refuses because it is not a fast-forward, stop and tell me instead of forcing it.", branch = w.branch),
+"3. {base} is not checked out in any folder, so once step 2 is done this branch already contains it. Land it on {base} as one commit from this folder: `git update-ref refs/heads/{base} $(git commit-tree {branch}^{{tree}} -p {base} -m \"{title}\") {base}`.
+4. If that command refuses because {base} moved meanwhile, stop and tell me instead of forcing it.", branch = w.branch, title = w.name.replace('"', "'")),
     };
     Ok(format!(
 "Merge this thread's work into {base}, the branch it started from.
@@ -465,13 +472,20 @@ Finish with a short plain-English summary: what went into {base}, any conflicts 
         branch = w.branch))
 }
 
-/// True when the thread's target branch already contains everything on its branch and nothing is left unsaved.
+/// True when the thread's target branch already has everything on its branch and nothing is left
+/// unsaved: Git history says so, or (after a squash) the target's files match the branch's. A
+/// squash is recorded, since the target moving on hides it from Git afterwards.
 pub async fn is_merged(state: &AppState, id: &str) -> Result<bool, String> {
-    let w = workspace(state, id)?;
+    let mut w = workspace(state, id)?;
+    if w.merged.is_some() { return Ok(true); }
     let root = Path::new(&w.project_root);
     let base = merge_target(&w).await?;
     if Path::new(&w.path).exists() && !state.worktrees.is_clean(Path::new(&w.path)).await.map_err(err)? { return Ok(false); }
-    Ok(run_git(root, &["merge-base", "--is-ancestor", &format!("refs/heads/{}", w.branch), &format!("refs/heads/{base}")]).await.is_ok())
+    let (branch, target) = (format!("refs/heads/{}", w.branch), format!("refs/heads/{base}"));
+    if run_git(root, &["merge-base", "--is-ancestor", &branch, &target]).await.is_ok() { return Ok(true); }
+    let squashed = run_git(root, &["diff", "--quiet", &target, &branch, "--"]).await.is_ok();
+    if squashed { super::ship::record_local_merge(state, &mut w, &base)?; }
+    Ok(squashed)
 }
 
 /// Save any loose work, archive the thread, and delete its branch only when its target branch already contains it.
@@ -490,7 +504,12 @@ pub async fn close_feature(state: &AppState, id: String) -> Result<String, Strin
     let base = merge_target(&w).await?;
     // Delete only after Git confirms the target contains the branch, so unmerged work is never lost.
     // `-D` because `-d` compares with whatever the project folder has checked out, not with the target.
-    let contained = run_git(root, &["merge-base", "--is-ancestor", &format!("refs/heads/{}", w.branch), &format!("refs/heads/{base}")]).await.is_ok();
+    let contained = w.merged.is_some()
+        || run_git(root, &["merge-base", "--is-ancestor", &format!("refs/heads/{}", w.branch), &format!("refs/heads/{base}")]).await.is_ok();
+    // Merged through a PR: the GitHub copy of the branch has done its job too (best effort).
+    if w.merged.as_ref().is_some_and(|m| m.pr.is_some()) {
+        let _ = run_git(root, &["push", "origin", "--delete", &w.branch]).await;
+    }
     // Threads built on this one now build on what it merged into.
     let restacked = if contained { restack_children(state, &w, &base).await.unwrap_or_default() } else { Vec::new() };
     let removed = w.branch != base && contained && run_git(root, &["branch", "-D", &w.branch]).await.is_ok();
@@ -1158,7 +1177,7 @@ mod tests {
         let record = |base: &str| WorkspaceRecord {
             id: "w".into(), project_root: root.display().to_string(), name: "Thread".into(), branch: "thread".into(),
             path: root.display().to_string(), base_ref: base.into(), created_at: String::new(), archived_at: None,
-            inline: false, shared_checkout: false, read_only: false, threads: vec![],
+            inline: false, shared_checkout: false, read_only: false, threads: vec![], pr: None, merged: None,
         };
         assert_eq!(merge_target(&record("develop")).await.unwrap(), "develop");
         // Unusable bases fall back to the default branch rather than failing.
@@ -1192,15 +1211,15 @@ mod tests {
         assert_eq!(w.base_ref, "develop");
         assert_eq!(review_workspace(&state, w.id.clone()).await.unwrap().base, "develop");
 
-        // develop is not checked out anywhere: the agent is told to fast-forward it from the thread's folder.
+        // develop is not checked out anywhere: the agent lands the thread on it as one commit from the thread's folder.
         let request = merge_request(&state, w.id.clone()).await.unwrap();
-        assert!(request.contains("into develop") && request.contains(&format!("git fetch . {}:develop", w.branch)), "{request}");
+        assert!(request.contains("into develop") && request.contains(&format!("git update-ref refs/heads/develop $(git commit-tree {}^{{tree}} -p develop", w.branch)), "{request}");
         assert!(!request.contains("git merge --no-ff"));
 
         // develop checked out in the project folder: the agent is sent there instead.
         run_git(&root, &["checkout", "develop"]).await.unwrap();
         let request = merge_request(&state, w.id.clone()).await.unwrap();
-        assert!(request.contains(&format!("git merge --no-ff {}", w.branch)), "{request}");
+        assert!(request.contains(&format!("git merge --squash {}", w.branch)), "{request}");
         assert!(request.contains(root.canonicalize().unwrap().to_str().unwrap()) || request.contains(root.to_str().unwrap()), "{request}");
 
         // Merged into main only is not "merged" for a thread that started from develop.
@@ -1289,5 +1308,46 @@ mod tests {
         let status = project_status(root.to_str().unwrap()).await.unwrap();
         assert_eq!(status.branch, "main");
         assert!(!status.dirty);
+    }
+
+    #[tokio::test]
+    async fn a_squash_merge_counts_as_merged_and_lets_close_remove_the_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo"); std::fs::create_dir(&root).unwrap();
+        for args in [vec!["init", "-b", "main"], vec!["config", "user.name", "Test"], vec!["config", "user.email", "test@example.com"], vec!["commit", "--allow-empty", "-m", "initial"]] { run_git(&root, &args).await.unwrap(); }
+        let home = temp.path().to_path_buf(); let grok = home.join("grok"); let panel = grok.join("panel");
+        let state = AppState::initialize_with_paths(grok_config::GrokPaths {
+            home_dir: home.clone(), grok_dir: grok.clone(), bomb_dir: panel.clone(), config_file: panel.join("config.toml"),
+            grok_cli_config_file: grok.join("config.toml"), worktrees_dir: home.join("worktrees"),
+            memory_dir: panel.join("memory"), sessions_dir: panel.join("sessions"), panel_dir: panel,
+            project_config_file: None, project_root: None,
+        }).await.unwrap();
+        let options = SpawnOptions { model: Some("mock".into()), prompt: Some("Add a readme".into()), ..Default::default() };
+        let session = super::super::start_session(&state, root.display().to_string(), options).await.unwrap();
+        super::super::wait_until_idle(&state, &session.id, std::time::Duration::from_secs(5)).await.unwrap();
+        let w = list_workspaces(&state).await.unwrap()[0].clone();
+        let path = Path::new(&w.path);
+        for (file, msg) in [("a.txt", "first"), ("b.txt", "second")] {
+            std::fs::write(path.join(file), msg).unwrap();
+            run_git(path, &["add", "."]).await.unwrap();
+            run_git(path, &["commit", "-m", msg]).await.unwrap();
+        }
+        assert!(!is_merged(&state, &w.id).await.unwrap(), "nothing landed yet");
+
+        // What the merge request asks for when main isn't checked out… here it is, so squash in the project folder.
+        run_git(&root, &["merge", "--squash", &w.branch]).await.unwrap();
+        run_git(&root, &["commit", "-m", "Add a readme"]).await.unwrap();
+        assert_eq!(run_git(&root, &["rev-list", "--count", "main"]).await.unwrap().trim(), "2", "one commit for the whole thread");
+        assert!(is_merged(&state, &w.id).await.unwrap(), "the squash is recognised");
+        assert!(workspace(&state, &w.id).unwrap().merged.is_some(), "and remembered");
+
+        // main moves on: Git alone could no longer tell, the record still does.
+        std::fs::write(root.join("later.txt"), "later").unwrap();
+        run_git(&root, &["add", "."]).await.unwrap();
+        run_git(&root, &["commit", "-m", "later"]).await.unwrap();
+        assert!(is_merged(&state, &w.id).await.unwrap());
+        let note = close_feature(&state, w.id.clone()).await.unwrap();
+        assert!(note.contains("branch was removed"), "{note}");
+        assert!(run_git(&root, &["show-ref", "--verify", &format!("refs/heads/{}", w.branch)]).await.is_err());
     }
 }

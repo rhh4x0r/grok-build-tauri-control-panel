@@ -1159,3 +1159,19 @@ All additive; `PROTOCOL_VERSION` stays 1 and a Mac that never calls the new meth
   - Question card: choices, typed answers (secure field for secret questions), Send answers, Skip.
   - `Machine::answer_plan` / `answer_question`.
 - Checked: workspace clippy and tests (new: questions parse/content); `scripts/build-ios.sh release`; iOS simulator build. Not checked: a live Codex question or plan in the app, the phone on a device.
+
+## 2026-10-12 — Ship a thread: pull requests, squash merges, one clear status
+
+- `WorkspaceRecord` remembers `pr` (number, url, draft, state, checks) and `merged` (when, via which PR, into what). A squash leaves no ancestry for Git to follow, so "merged" is recorded at the moment it's seen.
+- `services::ship` (RPC `ship` with step open_pr | open_draft_pr | push_pr | ready_pr | merge_pr, and `refresh_prs`):
+  - Open PR: saves loose edits, pushes, `gh pr create` against the thread's base, titled with the thread's name, the body listing its commits. Refused for stacked threads, projects without origin, or a base that isn't on GitHub.
+  - Merge PR: pushes new work first, marks a draft ready, `gh pr merge --squash`, records the merge, fetches, and fast-forwards the local base when that's clean and safe.
+  - `Ship` status in `WorkspaceReview`: Nothing / Ready / PrOpen (checks, unpushed, unsaved) / PrClosed / Merged.
+- Local "Merge to main" squashes too: `git merge --squash` + commit in the folder holding the target, or `git commit-tree <branch>^{tree} -p <base>` + `update-ref` when it's checked out nowhere. `is_merged` also accepts matching files after a squash (recording it), and `close_feature` trusts the record. Closing a PR-merged thread deletes its GitHub branch (best effort).
+- Mac header:
+  - Ready: Ship button with the project's default (a PR when it's on GitHub, else Merge; the last choice is remembered per project in kv `ship_choice`). Its ▾ menu: Open pull request, Open draft pull request, Merge to base, Merge & close.
+  - PR open: "PR #n · checks …" (opens GitHub), then Push to PR when there's new work, else Merge PR (squash), with a menu for View on GitHub / Push latest work / Mark ready / Merge.
+  - Merged: "Merged via PR #n" with Close thread (closing waits for your click).
+  - Archived threads: Continue in a new thread, which carries the conversation as context and builds on the old branch if its work never merged.
+- Sidebar: a badge on each thread's branch line: PR #n (coloured by checks), Draft #n, PR closed, Merged. Open PRs refresh from GitHub once a minute for the project in view.
+- Checked: workspace clippy and tests (new: squash merge recognised and remembered, close removes the branch after main moves on; checks summary). The commit-tree squash command was verified in a scratch repo. `usage_cache::caches_success_and_keeps_stale_bars_during_backoff` failed once (known flaky). Not checked: a real `gh pr create`/`merge` against GitHub, the header and badges on screen. Phone: no ship UI yet.

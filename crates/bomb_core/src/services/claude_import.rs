@@ -129,7 +129,7 @@ pub(super) fn attach_folder_workspace(
                 inline: false,
                 shared_checkout: true,
                 read_only: false,
-                threads: Vec::new(),
+                threads: Vec::new(), pr: None, merged: None,
             };
             persistence.save_workspace(&w)?;
             let id = w.id.clone();

@@ -245,6 +245,30 @@ impl Core {
         }
     }
 
+    /// A ship step for a thread: open_pr | open_draft_pr | push_pr | ready_pr | merge_pr.
+    pub async fn ship(&self, id: String, step: &str) -> Result<String, String> {
+        use services::ship;
+        match self {
+            Self::Local(state) => match step {
+                "open_pr" => ship::open_pr(state, id, false).await,
+                "open_draft_pr" => ship::open_pr(state, id, true).await,
+                "push_pr" => ship::push_pr(state, id).await,
+                "ready_pr" => ship::ready_pr(state, id).await,
+                "merge_pr" => ship::merge_pr(state, id).await,
+                other => Err(format!("unknown ship step: {other}")),
+            },
+            Self::Remote(r) => r.call("ship", json!({ "id": id, "step": step })).await,
+        }
+    }
+
+    /// Refresh the project's open PRs from GitHub; returns how many changed.
+    pub async fn refresh_prs(&self, root: String) -> Result<usize, String> {
+        match self {
+            Self::Local(state) => services::ship::refresh_project_prs(state, &root).await,
+            Self::Remote(r) => r.call("refresh_prs", json!({ "root": root })).await,
+        }
+    }
+
     pub async fn close_feature(&self, id: String) -> Result<String, String> {
         match self {
             Self::Local(state) => services::workspaces::close_feature(state, id).await,

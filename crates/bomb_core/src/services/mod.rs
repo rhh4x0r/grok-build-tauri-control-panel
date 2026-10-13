@@ -9,6 +9,7 @@ pub mod project_sync;
 pub mod thread_setup;
 pub mod prompt_sources;
 pub mod workspaces;
+pub mod ship;
 pub mod git_ui;
 pub mod media;
 
@@ -543,7 +544,7 @@ pub async fn start_session(
             inline,
             shared_checkout: shared,
             read_only: opts.read_only,
-            threads: vec![],
+            threads: vec![], pr: None, merged: None,
         }));
     }
     if opts.read_only {
