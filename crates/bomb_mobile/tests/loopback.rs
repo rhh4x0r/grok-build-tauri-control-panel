@@ -197,6 +197,20 @@ async fn a_paired_phone_starts_a_thread_watches_it_and_answers_an_approval() {
     state.event_bus.emit(grok_events::ControlEvent::ApprovalResolved { session_id, request_id: "r1".into(), option_id: Some("allow".into()), cancelled: false, at: chrono::Utc::now() });
     until(&screen, "the card to close", |s| s.entries.iter().any(|e| matches!(&e.body, EntryBody::Approval { resolution: Some(r), .. } if r == "allow"))).await;
 
+    // An @ mention from the phone: the note names the thread (only the one written after the @),
+    // the phone's bubble shows just what was typed, and this thread's agent may now hand off to it.
+    let other = uuid::Uuid::new_v4();
+    let mention = |title: &str, thread: uuid::Uuid| bomb_mobile::view::MentionRef { title: title.into(), thread_id: thread.to_string(), detail: "pocket-game".into(), other_machine: false };
+    let text = bomb_mobile::view::with_mention_note("send this to @Other thread".into(), vec![mention("Other thread", other), mention("Unrelated", uuid::Uuid::new_v4())]);
+    assert!(text.contains(&format!("thread id {other}")) && !text.contains("Unrelated"), "{text}");
+    assert!(bomb_core::handoff::send_from_agent(&state, session_id, other, "test".into()).is_err(), "not mentioned yet");
+    machine.send_prompt(id.clone(), text, PromptOptions { backend: None, model: None, effort: None, approval_mode: None, images: vec![] }).await.unwrap();
+    until(&screen, "the mention message", |s| texts(s, EntryRole::You).iter().any(|t| t == "send this to @Other thread")).await;
+    assert!(!texts(&screen.lock().unwrap(), EntryRole::You).iter().any(|t| t.contains("thread id")), "the note stays out of the bubble");
+    assert!(bomb_core::handoff::send_from_agent(&state, session_id, other, "test".into()).is_ok(), "mentioned from the phone, so it may send");
+    until(&screen, "the Sent card", |s| texts(s, EntryRole::System).iter().any(|t| t.starts_with("Sent to"))).await;
+    bomb_core::services::wait_turn_settled(&state, &id, Duration::from_secs(20)).await.unwrap();
+
     // A prompt from the Mac shows up on the phone.
     state.event_bus.emit(grok_events::ControlEvent::UserMessage { session_id, text: "from the mac".into(), origin: "some-mac".into(), at: chrono::Utc::now() });
     until(&screen, "the Mac's prompt", |s| texts(s, EntryRole::You).contains(&"from the mac".to_string())).await;
