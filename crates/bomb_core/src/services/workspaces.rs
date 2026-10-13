@@ -669,21 +669,15 @@ pub async fn workspace_action(
             }
             let current=state.worktrees.current_branch(path).await.map_err(err)?;
             if current == base {return Err("This thread is already on the target branch".into());}
-            match state
-                .worktrees
-                .merge(root, &current, &format!("Merge {}", w.name))
-                .await
-                .map_err(err)?
-            {
-                grok_worktree::MergeOutcome::Merged => format!("Merged into local {base} · Not pushed"),
-                grok_worktree::MergeOutcome::Conflicts { .. } => {
-                    state.worktrees.merge_abort(root).await;
-                    return Err(
-                        "Merge conflicts: Update the thread and resolve conflicts there first"
-                            .into(),
-                    );
-                }
+            // One commit for the whole thread, like a squash-merged pull request.
+            if run_git(root, &["merge", "--squash", &current]).await.is_err() {
+                let _ = run_git(root, &["reset", "--merge"]).await;
+                return Err("Merge conflicts: Update the thread and resolve conflicts there first".into());
             }
+            run_git(root, &["commit", "-m", &w.name]).await.map_err(err)?;
+            let mut record = w.clone();
+            super::ship::record_local_merge(state, &mut record, &base)?;
+            format!("Merged into local {base} as one commit · Not pushed")
         }
         "revert-file" => {
             let review = review_workspace(state, id.clone()).await?;

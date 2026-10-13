@@ -489,7 +489,7 @@ impl ReviewPanel {
             footer=footer.child(Button::new("push-merged-main").primary().label(format!("Push {base} to origin…")).on_click(move|_,window,cx|confirm_action(app.clone(),id.clone(),"push-main",String::new(),format!("Publish local {base} to origin/{base}."),window,cx)));
         } else if can_edit && !r.remote && r.branch!=r.default_branch && r.ahead>0 {
             let(app,id,base,branch)=(self.model.clone(),id.clone(),r.default_branch.clone(),r.branch.clone());
-            footer=footer.child(Button::new("merge-local").primary().label(format!("Merge into {base}…")).on_click(move|_,window,cx|confirm_action(app.clone(),id.clone(),"merge",String::new(),format!("Merge {branch} → local {base}. Nothing will be pushed."),window,cx)));
+            footer=footer.child(Button::new("merge-local").primary().label(format!("Merge into {base}…")).on_click(move|_,window,cx|confirm_action(app.clone(),id.clone(),"merge",String::new(),format!("Merge {branch} → local {base} as one commit. Nothing will be pushed."),window,cx)));
         } else if can_edit && r.remote && (r.upstream.is_none() || r.unpushed > 0) {
             let (app, id, branch) = (self.model.clone(), id.clone(), r.branch.clone());
             footer = footer.child(
@@ -568,7 +568,7 @@ impl ReviewPanel {
             let weak=weak.clone();menu=menu.item(PopupMenuItem::new("Commit history").on_click(move|_,_,cx|{let _=weak.update(cx,|v,cx|{v.history = !v.history;cx.notify();});}));
             if can_edit{
                 if remote && branch!=base {let(app,id,branch,base)=(app.clone(),wid.clone(),branch.clone(),base.clone());menu=menu.item(PopupMenuItem::new("Create pull request…").on_click(move|_,window,cx|pr_dialog(app.clone(),id.clone(),branch.clone(),base.clone(),window,cx)));}
-                if branch!=base{let(app,id,base,branch)=(app.clone(),wid.clone(),base.clone(),branch.clone());menu=menu.item(PopupMenuItem::new(format!("Merge into {base} locally…")).on_click(move|_,window,cx|confirm_action(app.clone(),id.clone(),"merge",String::new(),format!("Merge {branch} → local {base}. Both working copies must be clean. Nothing will be pushed."),window,cx)));}
+                if branch!=base{let(app,id,base,branch)=(app.clone(),wid.clone(),base.clone(),branch.clone());menu=menu.item(PopupMenuItem::new(format!("Merge into {base} locally…")).on_click(move|_,window,cx|confirm_action(app.clone(),id.clone(),"merge",String::new(),format!("Merge {branch} → local {base} as one commit. Both working copies must be clean. Nothing will be pushed."),window,cx)));}
                 if remote{let(app,id,base)=(app.clone(),wid.clone(),base.clone());menu=menu.item(PopupMenuItem::new(format!("Push {base} to origin…")).on_click(move|_,window,cx|confirm_action(app.clone(),id.clone(),"push-main",String::new(),format!("Publish commits on local {base} to origin/{base}."),window,cx)));}
                 let(app2,id2,base2)=(app.clone(),wid.clone(),base.clone());menu=menu.item(PopupMenuItem::new(format!("Update from {base}…")).on_click(move|_,window,cx|confirm_action(app2.clone(),id2.clone(),"update",String::new(),format!("Fetch and merge the latest {base2} into this thread."),window,cx)));
                 if !shared&&count>1{let(app,id)=(app.clone(),wid.clone());menu=menu.item(PopupMenuItem::new("Squash local commits…").on_click(move|_,window,cx|text_action(app.clone(),id.clone(),"squash","Squash unpublished commits (backup kept)","Complete thread changes".into(),window,cx)));}

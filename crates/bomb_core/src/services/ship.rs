@@ -271,4 +271,68 @@ mod tests {
         // Commit statuses (not check runs) report `state`.
         assert_eq!(checks_of(&json!([{"state": "PENDING"}])), "pending");
     }
+
+    /// Seeds `$DEMO_HOME` with a project whose threads stand in every shipping state, for looking at
+    /// the project map: `DEMO_HOME=… cargo test -p bomb_core seed_project_map_demo -- --ignored`,
+    /// then run the app with `BOMBCODE_HOME=$DEMO_HOME/home BOMB_OPEN_PROJECT=$DEMO_HOME/map-demo`.
+    /// Keep `DEMO_HOME` short (e.g. `/tmp/bmap`): the app's sockets live under it and macOS caps
+    /// socket paths near 104 characters.
+    #[tokio::test]
+    #[ignore]
+    async fn seed_project_map_demo() {
+        let demo = std::path::PathBuf::from(std::env::var("DEMO_HOME").expect("set DEMO_HOME"));
+        let root = demo.join("map-demo");
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| { let root = root.clone(); let args: Vec<String> = args.iter().map(|s| s.to_string()).collect(); async move { run_git(&root, &args.iter().map(String::as_str).collect::<Vec<_>>()).await.unwrap() } };
+        for args in [vec!["init", "-b", "main"], vec!["config", "user.name", "Demo"], vec!["config", "user.email", "demo@example.com"]] { git(&args).await; }
+        std::fs::write(root.join("README.md"), "# Map demo\n").unwrap();
+        git(&["add", "-A"]).await; git(&["commit", "-m", "initial"]).await;
+        let mut paths = grok_config::GrokPaths::discover(None).unwrap();
+        let home = demo.join("home");
+        paths.bomb_dir = home.clone(); paths.panel_dir = home.clone(); paths.config_file = home.join("config.toml");
+        paths.worktrees_dir = home.join("worktrees"); paths.memory_dir = home.join("memory"); paths.sessions_dir = home.join("sessions");
+        let state = AppState::initialize_with_paths(paths).await.unwrap();
+        super::super::add_project(&state, root.display().to_string()).await.unwrap();
+        let start = |prompt: &str, base: Option<String>| SpawnOptions { model: Some("mock".into()), prompt: Some(prompt.into()), base_ref: base, isolate_worktree: true, ..Default::default() };
+        let mut made = Vec::new();
+        for (prompt, files, base) in [
+            ("Explore caching", 0, None),
+            ("Onboarding copy", 1, None),
+            ("Add dark mode", 3, None),
+            ("Fix login crash", 2, None),
+            ("Payment page", 4, None),
+        ] {
+            let s = super::super::start_session(&state, root.display().to_string(), start(prompt, base)).await.unwrap();
+            super::super::wait_until_idle(&state, &s.id, std::time::Duration::from_secs(5)).await.unwrap();
+            let w = state.persistence.workspace_for_session(Uuid::parse_str(&s.id).unwrap()).unwrap().unwrap();
+            for i in 0..files {
+                std::fs::write(Path::new(&w.path).join(format!("{}-{i}.txt", w.branch.replace('/', "-"))), prompt).unwrap();
+                run_git(Path::new(&w.path), &["add", "-A"]).await.unwrap();
+                run_git(Path::new(&w.path), &["commit", "-m", &format!("{prompt}: step {}", i + 1)]).await.unwrap();
+            }
+            made.push(w);
+        }
+        // A thread that builds on "Payment page".
+        let s = super::super::start_session(&state, root.display().to_string(), start("Payment tests", Some(made[4].branch.clone()))).await.unwrap();
+        super::super::wait_until_idle(&state, &s.id, std::time::Duration::from_secs(5)).await.unwrap();
+        let child = state.persistence.workspace_for_session(Uuid::parse_str(&s.id).unwrap()).unwrap().unwrap();
+        std::fs::write(Path::new(&child.path).join("payment-tests.txt"), "tests").unwrap();
+        run_git(Path::new(&child.path), &["add", "-A"]).await.unwrap();
+        run_git(Path::new(&child.path), &["commit", "-m", "Payment tests"]).await.unwrap();
+        // Onboarding landed (squashed); login and payment have PRs open.
+        git(&["merge", "--squash", &made[1].branch]).await; git(&["commit", "-m", "Onboarding copy"]).await;
+        std::fs::write(root.join("CHANGELOG.md"), "main moved on\n").unwrap();
+        git(&["add", "-A"]).await; git(&["commit", "-m", "Changelog"]).await;
+        let mut w = made[1].clone(); record_local_merge(&state, &mut w, "main").unwrap();
+        let pr = |number: u64, draft: bool, checks: &str| Some(PrRecord { number, url: format!("https://github.com/demo/map-demo/pull/{number}"), draft, state: "OPEN".into(), checks: checks.into() });
+        let mut w = made[3].clone(); w.pr = pr(12, false, "passing"); state.persistence.save_workspace(&w).unwrap();
+        let mut w = made[4].clone(); w.pr = pr(14, true, "failing"); state.persistence.save_workspace(&w).unwrap();
+        // The thread list hides offline "mock" threads; label them as ordinary Claude threads.
+        for mut rec in state.persistence.list_sessions().unwrap() {
+            rec.model = "opus".into();
+            rec.metadata_json = rec.metadata_json.replace(r#""model":"mock""#, r#""model":"opus""#).replace(r#""backend":"grok""#, r#""backend":"claude""#);
+            state.persistence.upsert_session(&rec).unwrap();
+        }
+        println!("seeded {}", root.display());
+    }
 }

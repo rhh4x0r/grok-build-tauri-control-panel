@@ -162,6 +162,16 @@ pub struct QuestionInfo {
     pub other_choice: Option<String>,
     #[serde(default)]
     pub secret: bool,
+    /// The form needs an answer to this one; optional ones (a free "Other" note) never block sending.
+    #[serde(default = "answer_required")]
+    pub required: bool,
+    /// Several choices may be picked.
+    #[serde(default)]
+    pub multi: bool,
+}
+
+fn answer_required() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -1124,31 +1124,39 @@ impl TranscriptView {
                         .child(if open { "Question" } else if card.resolution.as_deref() == Some("declined") { "Question · skipped" } else { "Question · answered" })),
             );
         for (qi, q) in card.questions.iter().enumerate() {
-            let picked = picks.iter().find(|(qid, _)| *qid == q.id).map(|(_, v)| v.clone());
-            let answered = card.answers.iter().flatten().find(|(qid, _)| *qid == q.id).map(|(_, a)| a.clone());
+            let picked: Vec<String> = picks.iter().filter(|(qid, _)| *qid == q.id).map(|(_, v)| v.clone()).collect();
+            let answered = Some(card.answers.iter().flatten().filter(|(qid, _)| *qid == q.id).map(|(_, a)| a.clone()).collect::<Vec<_>>().join(", ")).filter(|a| !a.is_empty());
             let mut block = div().flex().flex_col().gap_1()
                 .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(ui.text).child(q.title.clone()))
                 .when_some(q.description.clone().filter(|d| *d != q.title), |el, d| el.child(div().text_size(small).text_color(ui.text_muted).child(d)));
             if open {
                 let mut choices = div().flex().flex_wrap().gap_2();
                 for (ci, choice) in q.choices.iter().enumerate() {
-                    let selected = picked.as_deref() == Some(choice.value.as_str());
-                    let (rid, qid, value) = (card.request_id.clone(), q.id.clone(), choice.value.clone());
+                    let selected = picked.contains(&choice.value);
+                    let (rid, qid, value, multi) = (card.request_id.clone(), q.id.clone(), choice.value.clone(), q.multi);
                     let model = model.clone();
                     let mut b = Button::new(("question-choice", id as usize * 1000 + qi * 50 + ci)).label(choice.label.clone()).small().compact();
                     b = if selected { b.primary() } else { b.outline() };
                     if let Some(d) = choice.description.clone() { b = b.tooltip(d); }
                     choices = choices.child(b.on_click(move |_, _, cx| model.update(cx, |t, cx| {
+                        // One choice per question, or several for a multi-select; clicking again un-picks.
                         let picks = t.question_picks.entry(rid.clone()).or_default();
                         let was = picks.iter().position(|(q, v)| *q == qid && *v == value);
-                        picks.retain(|(q, _)| *q != qid);
-                        if was.is_none() { picks.push((qid.clone(), value.clone())); }
+                        match (was, multi) {
+                            (Some(i), _) => { picks.remove(i); }
+                            (None, true) => picks.push((qid.clone(), value.clone())),
+                            (None, false) => { picks.retain(|(q, _)| *q != qid); picks.push((qid.clone(), value.clone())); }
+                        }
                         cx.notify();
                     })));
                 }
                 if !q.choices.is_empty() { block = block.child(choices); }
                 if q.choices.is_empty() || q.note_id.is_some() {
-                    block = block.child(div().text_size(small).text_color(ui.text_muted).child(if q.choices.is_empty() { "Type your answer below." } else { "Or type your own answer below." }));
+                    block = block.child(div().text_size(small).text_color(ui.text_muted).child(match (q.choices.is_empty(), q.multi) {
+                        (true, _) => "Type your answer below and press Enter.",
+                        (false, true) => "Pick any that apply, or type your own below and press Enter.",
+                        (false, false) => "Pick one, or type your own answer below and press Enter (with a pick, it goes along as a note).",
+                    }));
                 }
             } else if let Some(a) = answered {
                 let shown = if q.secret { "••••".to_string() } else { a };
@@ -1157,7 +1165,9 @@ impl TranscriptView {
             body = body.child(block);
         }
         if let (true, Some(thread_id)) = (open, thread_id) {
-            let complete = card.questions.iter().all(|q| picks.iter().any(|(qid, _)| *qid == q.id));
+            // Every required question has a pick; optional ones (a free "Other") never block.
+            let answered = |q: &grok_events::QuestionInfo| picks.iter().any(|(qid, _)| *qid == q.id);
+            let complete = card.questions.iter().filter(|q| q.required).all(answered) && card.questions.iter().any(answered);
             let (rid, rid2, answers) = (card.request_id.clone(), card.request_id.clone(), picks.clone());
             let mut send = Button::new(("question-send", id)).label("Send answers").small().compact().primary();
             send = if complete {

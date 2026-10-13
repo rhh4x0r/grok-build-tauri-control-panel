@@ -523,7 +523,7 @@ impl ThreadView {
                         };
                         let (main_app, menu_app, id) = (app.clone(), app.clone(), w.id.clone());
                         let main = Button::new("thread-ship").primary().small().label(main_label).disabled(busy).tooltip(main_tip)
-                            .on_click(move |_, _, cx| main_app.update(cx, |m, cx| if default == "pr" { m.ship(id.clone(), "open_pr", cx) } else { m.merge_to_main(id.clone(), false, cx) }));
+                            .on_click(move |_, window, cx| super::project::confirm_ship(main_app.clone(), id.clone(), if default == "pr" { "open_pr" } else { "merge" }, window, cx));
                         let id = w.id.clone();
                         let base = base.clone();
                         let more = Button::new("thread-ship-more").primary().small().compact().icon(Icon::from(Lucide::ChevronDown).size(px(12.))).disabled(busy)
@@ -531,11 +531,7 @@ impl ThreadView {
                             .dropdown_menu(move |menu, _, _| {
                                 let item = |label: String, step: &'static str| {
                                     let (app, id) = (menu_app.clone(), id.clone());
-                                    PopupMenuItem::new(label).on_click(move |_, _, cx| app.update(cx, |m, cx| match step {
-                                        "merge" => m.merge_to_main(id.clone(), false, cx),
-                                        "merge_close" => m.merge_to_main(id.clone(), true, cx),
-                                        step => m.ship(id.clone(), step, cx),
-                                    }))
+                                    PopupMenuItem::new(label).on_click(move |_, window, cx| super::project::confirm_ship(app.clone(), id.clone(), step, window, cx))
                                 };
                                 let menu = if on_github {
                                     menu.item(item("Open pull request".into(), "open_pr")).item(item("Open draft pull request".into(), "open_draft_pr"))
@@ -556,7 +552,7 @@ impl ThreadView {
                         } else {
                             Button::new("thread-pr-merge").primary().small().label(format!("Merge PR #{number}")).disabled(busy)
                                 .tooltip(format!("Squash-merges the pull request into {base} on GitHub{}, then updates your local {base}.", if draft { " (marking the draft ready first)" } else { "" }))
-                                .on_click(move |_, _, cx| app2.update(cx, |m, cx| m.ship(id.clone(), "merge_pr", cx)))
+                                .on_click(move |_, window, cx| super::project::confirm_ship(app2.clone(), id.clone(), "merge_pr", window, cx))
                         };
                         let (menu_app, id) = (app.clone(), w.id.clone());
                         let more = Button::new("thread-pr-more").outline().small().compact().icon(Icon::from(Lucide::ChevronDown).size(px(12.))).disabled(busy)
@@ -564,7 +560,7 @@ impl ThreadView {
                             .dropdown_menu(move |menu, _, _| {
                                 let item = |label: &str, step: &'static str| {
                                     let (app, id) = (menu_app.clone(), id.clone());
-                                    PopupMenuItem::new(label.to_string()).on_click(move |_, _, cx| app.update(cx, |m, cx| m.ship(id.clone(), step, cx)))
+                                    PopupMenuItem::new(label.to_string()).on_click(move |_, window, cx| super::project::confirm_ship(app.clone(), id.clone(), step, window, cx))
                                 };
                                 let url = url.clone();
                                 let menu = menu.item(PopupMenuItem::new("View on GitHub").on_click(move |_, _, cx| cx.open_url(&url)))
@@ -652,8 +648,8 @@ impl ThreadView {
                             if let Some(w) = workspace.clone().filter(|_| can_merge) {
                                 let app = app.clone();
                                 let merge_base = base.clone();
-                                menu = menu.item(PopupMenuItem::new(format!("Merge to {merge_base} & close")).on_click(move |_, _, cx| {
-                                    app.update(cx, |m, cx| m.merge_to_main(w.id.clone(), true, cx))
+                                menu = menu.item(PopupMenuItem::new(format!("Merge to {merge_base} & close")).on_click(move |_, window, cx| {
+                                    super::project::confirm_ship(app.clone(), w.id.clone(), "merge_close", window, cx)
                                 }));
                             }
                             if let Some(w) = workspace.clone() {

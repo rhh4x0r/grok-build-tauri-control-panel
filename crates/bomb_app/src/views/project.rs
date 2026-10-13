@@ -476,7 +476,7 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                                     .label(format!("Merge to {}", b.base))
                                     .disabled(busy)
                                     .tooltip(format!("Opens the chat and asks its agent to merge this work into {}, resolving any conflicts it finds.", b.base))
-                                    .on_click(move |_, _, cx| merge_app.update(cx, |m, cx| m.merge_to_main(merge_id.clone(), false, cx))),
+                                    .on_click(move |_, window, cx| confirm_ship(merge_app.clone(), merge_id.clone(), "merge", window, cx)),
                             )
                             .child(
                                 Button::new(SharedString::from(format!("feature-merge-close-{}", w.id)))
@@ -485,7 +485,7 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
                                     .label("Merge & close")
                                     .disabled(busy)
                                     .tooltip(format!("Same merge in the chat, then closes this feature once its work is confirmed in {}.", b.base))
-                                    .on_click(move |_, _, cx| both_app.update(cx, |m, cx| m.merge_to_main(both_id.clone(), true, cx))),
+                                    .on_click(move |_, window, cx| confirm_ship(both_app.clone(), both_id.clone(), "merge_close", window, cx)),
                             )
                         })
                         .when(!working, |el| {
@@ -513,7 +513,7 @@ pub fn project_page(model: Entity<AppModel>, ui: &Ui, cx: &App) -> AnyElement {
         }
         board = board.child(column);
     }
-    page = page.child(board);
+    page = page.child(crate::views::project_map::map_or_list(model.clone(), overview, &root, board.into_any_element(), ui, cx));
     // The same project's other copy has threads of its own; list them here so nothing feels lost.
     if let Some(other) = m.linked_project(&root) {
         let other_server = crate::runtime::servers(cx).for_root(&other).map(|s| s.config.name.clone());
@@ -687,3 +687,50 @@ pub fn confirm_close(app: Entity<AppModel>, id: String, name: String, window: &m
             })
     });
 }
+
+/// Run a ship step after a confirmation that says exactly what will happen; merges and opening a
+/// pull request change shared history or show up on GitHub, so a stray click never does them.
+/// Steps: open_pr | open_draft_pr | merge_pr | merge | merge_close; push_pr and ready_pr only add
+/// to a PR already open and run at once.
+pub fn confirm_ship(app: Entity<AppModel>, workspace: String, step: &'static str, window: &mut Window, cx: &mut App) {
+    use gpui_kit::component::WindowExt;
+    let run = {
+        let (app, workspace) = (app.clone(), workspace.clone());
+        move |cx: &mut App| app.update(cx, |m, cx| match step {
+            "merge" => m.merge_to_main(workspace.clone(), false, cx),
+            "merge_close" => m.merge_to_main(workspace.clone(), true, cx),
+            step => m.ship(workspace.clone(), step, cx),
+        })
+    };
+    let m = app.read(cx);
+    let Some(w) = m.workspaces.iter().find(|w| w.id == workspace) else { return };
+    let name = w.name.clone();
+    // The branch it lands in: what the review measured against, else where the thread started.
+    let base = m.review.as_ref().filter(|_| m.active_workspace.as_deref() == Some(workspace.as_str())).map(|r| r.base.clone())
+        .unwrap_or_else(|| w.base_ref.trim_start_matches("origin/").to_string());
+    let base = if base.is_empty() || base == "HEAD" { "main".to_string() } else { base };
+    let pr = w.pr.as_ref().map(|pr| pr.number);
+    let (title, description) = match step {
+        "open_pr" | "open_draft_pr" => (
+            format!("Open a {}pull request for “{name}”?", if step == "open_draft_pr" { "draft " } else { "" }),
+            format!("Saves any unsaved edits as a commit, pushes this thread's branch to GitHub and opens a pull request into {base}, titled “{name}”. Anyone with access to the repository can see it.{}",
+                if step == "open_draft_pr" { " As a draft it can't be merged until it's marked ready." } else { "" }),
+        ),
+        "merge_pr" => (
+            format!("Merge PR #{} into {base}?", pr.unwrap_or_default()),
+            format!("Squash-merges the pull request on GitHub as one commit{} and updates your local {base}. This changes {base} for everyone who uses the repository.",
+                if w.pr.as_ref().is_some_and(|pr| pr.draft) { ", marking the draft ready first," } else { "" }),
+        ),
+        "merge" | "merge_close" => (
+            format!("Merge “{name}” into {base}?"),
+            format!("This thread's agent merges its work into your local {base} as one commit, resolving any conflicts in the chat. Nothing is pushed to GitHub.{}",
+                if step == "merge_close" { " Once the merge is confirmed, the thread is closed: its chat moves to the archive." } else { "" }),
+        ),
+        _ => return run(cx),
+    };
+    window.open_alert_dialog(cx, move |d, _, _| {
+        let run = run.clone();
+        d.confirm().title(title.clone()).description(description.clone()).on_ok(move |_, _, cx| { run(cx); true })
+    });
+}
+

@@ -111,6 +111,16 @@ fn main() {
         theme::load_appearance(cx);
         math::start(cx);
         views::root::open_main_window(model.clone(), cx);
+        // Development: open straight onto a project's page (screenshots, demos).
+        // After startup settles: loading threads and projects picks a page of its own first.
+        if let Ok(root) = std::env::var("BOMB_OPEN_PROJECT") {
+            let model = model.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+                model.update(cx, |m, cx| m.set_active_project(root, cx));
+            })
+            .detach();
+        }
         smoke::maybe_run(model, cx);
         cx.activate(true);
     });

@@ -256,6 +256,8 @@ pub struct AppModel {
     pub project_intro_seen: bool,
     /// Projects whose "In main" column is showing every card.
     pub show_all_merged: HashSet<String>,
+    /// The project page's map: view, camera and selection.
+    pub project_map: crate::views::project_map::MapState,
     /// Lists as each core last reported them; the combined lists below are rebuilt from these,
     /// so a server that is briefly offline keeps its projects and threads on screen.
     local_threads: Vec<ThreadDto>,
@@ -373,6 +375,7 @@ impl AppModel {
             overview_branch: None,
             project_intro_seen: false,
             show_all_merged: HashSet::new(),
+            project_map: Default::default(),
             local_threads: Vec::new(),
             threads_loaded: false,
             just_started: HashSet::new(),
@@ -3448,14 +3451,15 @@ mod mode_shortcut_tests {
 /// can't fill the gaps (a question with choices only, still unpicked).
 fn typed_answers(thread: &crate::models::thread::ThreadModel, text: &str) -> Option<(String, Vec<(String, String)>)> {
     let card = thread.thread.open_questions().next()?;
-    let picks = thread.question_picks.get(&card.request_id).cloned().unwrap_or_default();
-    let mut answers = Vec::new();
-    for q in &card.questions {
-        match picks.iter().find(|(id, _)| *id == q.id) {
-            Some(pick) => answers.push(pick.clone()),
-            None if q.choices.is_empty() || q.note_id.is_some() => answers.push((q.id.clone(), text.trim().to_string())),
-            None => return None,
-        }
+    let mut answers = thread.question_picks.get(&card.request_id).cloned().unwrap_or_default();
+    let picked = |answers: &Vec<(String, String)>, q: &grok_events::QuestionInfo| answers.iter().any(|(id, _)| *id == q.id);
+    let typeable = |q: &&grok_events::QuestionInfo| q.choices.is_empty() || q.note_id.is_some();
+    // The words answer the first question still open to them, else ride along as a note on one.
+    let target = card.questions.iter().filter(typeable).find(|q| !picked(&answers, q))
+        .or_else(|| card.questions.iter().find(|q| q.note_id.is_some()));
+    if let (Some(q), false) = (target, text.trim().is_empty()) {
+        answers.push((q.id.clone(), text.trim().to_string()));
     }
-    Some((card.request_id.clone(), answers))
+    let complete = card.questions.iter().filter(|q| q.required).all(|q| picked(&answers, q)) && !answers.is_empty();
+    complete.then(|| (card.request_id.clone(), answers))
 }

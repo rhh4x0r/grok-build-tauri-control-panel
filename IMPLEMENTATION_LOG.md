@@ -1175,3 +1175,34 @@ All additive; `PROTOCOL_VERSION` stays 1 and a Mac that never calls the new meth
   - Archived threads: Continue in a new thread, which carries the conversation as context and builds on the old branch if its work never merged.
 - Sidebar: a badge on each thread's branch line: PR #n (coloured by checks), Draft #n, PR closed, Merged. Open PRs refresh from GitHub once a minute for the project in view.
 - Checked: workspace clippy and tests (new: squash merge recognised and remembered, close removes the branch after main moves on; checks summary). The commit-tree squash command was verified in a scratch repo. `usage_cache::caches_success_and_keeps_stale_bars_during_backoff` failed once (known flaky). Not checked: a real `gh pr create`/`merge` against GitHub, the header and badges on screen. Phone: no ship UI yet.
+
+## 2026-10-12 — Project map
+
+- The project page opens on a map (`views/project_map.rs`), with a Map / List toggle; List is the old three columns, unchanged.
+  - The default branch runs across the top as a trunk, with an arrowhead and a dot where each thread forked.
+  - Each thread is a card branching off the trunk on a curve, oldest on the left. A stacked thread hangs below the thread it builds on; siblings take new columns (`layout`, tested). Merged threads have a dashed curve back into the trunk.
+  - Line weight grows with the commits a thread carries. Colour is the stage: agent working (accent, breathing border), ready to ship (amber), pull request (accent), merged (green, faded), no saved work / branch without a thread (muted).
+  - Cards show the title, one headline (Agent working, "3 changes to merge", "Draft PR #14 · failing", "Merged via PR #12"), and model · files · "N newer on main".
+- Hovering a card lights its path back to the trunk and dims everything else. A card fades in again when its stage changes.
+- Clicking a card opens a side panel with every action the list's cards had, plus the new ones:
+  - Open chat; Open pull request / draft; Merge to main / Merge & close; Merge PR, Push latest work, Mark ready, View on GitHub; "Ship X first" for a stacked thread.
+  - Bring in latest main; New thread from here; Close / Close thread; Start a thread from a branch that has none.
+  - The panel also lists the latest commits and changed files.
+- The toolbar has a legend, Show/Hide merged (merged are hidden by default), zoom −/+, and Reset view. Drag the background to pan; scroll pans; ⌘/Ctrl-scroll zooms.
+- Dev: `BOMB_OPEN_PROJECT=<folder>` opens straight onto a project page. `bomb_core` has an ignored test, `seed_project_map_demo`, that seeds `$DEMO_HOME` with a project in every state; run the app with `BOMBCODE_HOME=$DEMO_HOME/home`.
+- Cards are pinned with a fixed height, so lines meet their edges. Their fade-in is opacity-only: `motion::fade_in` makes an element `relative`, which pulled the absolute cards back into flow, so they stacked and slid off their lines when panned.
+- Pull requests have their own colour (cyan), apart from agent working (accent).
+- A 3D "space" view (perspective camera, depth lanes per stage) was tried and removed at Max's request.
+- The demo seeder labels its threads as Claude threads (the thread list hides offline "mock" threads, which also left the page on the first-run screen). Keep `DEMO_HOME` short: sockets live under it and macOS caps their paths near 104 characters.
+- Checked: clippy, layout tests; Max reviewed the map in the demo copy.
+
+## 2026-10-13 — Confirm before shipping; Claude's questions
+
+- `project::confirm_ship`: one confirmation for every merge and every new pull request, wherever the button is (header Ship button and ▾ menu, PR buttons, the ··· menu's "Merge & close", map side panel, list cards). It says what will happen: pushed and visible on GitHub, squash-merged for everyone, or merged locally with nothing pushed. Push latest work and Mark ready add to an open PR and run at once. The review panel already confirmed its own buttons.
+- The review panel's direct local merge now squashes too (`merge --squash` + commit, merge recorded), like every other merge.
+- Questions: Claude's AskUserQuestion arrives as an `elicitation/create` form too (the client advertises forms).
+  - The card showed only its header ("server.env"): the question text is the form's message (one question) or the field's description (several).
+  - Its `question_<n>_custom` "Other" box was taken for a required question of its own, so Send answers never enabled.
+  - Multi-select questions (`array` of `anyOf` items) were declined outright.
+  - Now: the "Other" box is the question's note (typed text goes there; with a pick it rides along as a note), multi-select is supported (Mac and phone), and only questions the form marks required must be answered.
+- Checked: workspace clippy and tests (new: Claude lone, several and multi-select forms; optional fields), iOS bindings and simulator build. `bomb_server` `a_phone_streams_only_the_thread_it_has_open…` failed once in a full parallel run and passed 3/3 alone (timing). Not checked: a live Claude question on the new build.

@@ -82,6 +82,10 @@ pub struct QuestionView {
     /// A typed answer is also accepted next to the choices ("Other").
     pub allows_typing: bool,
     pub secret: bool,
+    /// Optional questions (a free "Other") don't block sending.
+    pub required: bool,
+    /// Several choices may be picked.
+    pub multi: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -157,6 +161,8 @@ impl From<&Entry> for EntryView {
                     choices: q.choices.iter().map(|c| QuestionChoiceView { value: c.value.clone(), label: c.label.clone(), description: c.description.clone() }).collect(),
                     allows_typing: q.choices.is_empty() || q.note_id.is_some(),
                     secret: q.secret,
+                    required: q.required,
+                    multi: q.multi,
                 }).collect(),
                 answers: card.answers.iter().flatten().map(|(question_id, answer)| QuestionAnswer { question_id: question_id.clone(), answer: answer.clone() }).collect(),
                 resolution: card.resolution.clone(),

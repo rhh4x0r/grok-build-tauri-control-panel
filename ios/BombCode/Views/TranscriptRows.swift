@@ -265,7 +265,7 @@ struct ApprovalCard: View {
 struct QuestionCard: View {
     let entry: EntryView
     let thread: ThreadModel
-    @State private var picks: [String: String] = [:]
+    @State private var picks: [String: Set<String>] = [:]
     @State private var typed: [String: String] = [:]
     @State private var sending = false
     @State private var note: String?
@@ -277,8 +277,9 @@ struct QuestionCard: View {
                     Label(resolution == "declined" ? "Question skipped" : "Question answered", systemImage: resolution == "declined" ? "xmark.circle" : "checkmark.circle")
                         .font(Theme.sans(13, .medium)).foregroundStyle(Theme.textFaint)
                     ForEach(questions, id: \.id) { q in
-                        if let a = answers.first(where: { $0.questionId == q.id }) {
-                            Text("\(q.title): \(q.secret ? "••••" : a.answer)").font(Theme.caption).foregroundStyle(Theme.textFaint)
+                        let given = answers.filter { $0.questionId == q.id }.map(\.answer)
+                        if !given.isEmpty {
+                            Text("\(q.title): \(q.secret ? "••••" : given.joined(separator: ", "))").font(Theme.caption).foregroundStyle(Theme.textFaint)
                         }
                     }
                 }
@@ -295,18 +296,22 @@ struct QuestionCard: View {
                             if let d = q.description, d != q.title { Text(d).font(Theme.small).foregroundStyle(Theme.textMuted) }
                             ForEach(q.choices, id: \.value) { choice in
                                 Button {
-                                    picks[q.id] = picks[q.id] == choice.value ? nil : choice.value
-                                    if picks[q.id] != nil { typed[q.id] = nil }
+                                    // One choice, or several for a multi-select; tapping again un-picks.
+                                    var chosen = picks[q.id] ?? []
+                                    if chosen.contains(choice.value) { chosen.remove(choice.value) }
+                                    else if q.multi { chosen.insert(choice.value) }
+                                    else { chosen = [choice.value] }
+                                    picks[q.id] = chosen
                                 } label: {
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(choice.label).lineLimit(2)
                                         if let d = choice.description { Text(d).font(Theme.caption).lineLimit(2) }
                                     }
                                 }
-                                .buttonStyle(BombButtonStyle(prominent: picks[q.id] == choice.value, tint: nil))
+                                .buttonStyle(BombButtonStyle(prominent: picks[q.id]?.contains(choice.value) == true, tint: nil))
                             }
                             if q.allowsTyping {
-                                let field = Binding(get: { typed[q.id] ?? "" }, set: { typed[q.id] = $0; if !$0.isEmpty { picks[q.id] = nil } })
+                                let field = Binding(get: { typed[q.id] ?? "" }, set: { typed[q.id] = $0 })
                                 Group {
                                     if q.secret { SecureField(q.choices.isEmpty ? "Your answer" : "Or your own answer", text: field) }
                                     else { TextField(q.choices.isEmpty ? "Your answer" : "Or your own answer", text: field, axis: .vertical).lineLimit(1...4) }
@@ -333,19 +338,20 @@ struct QuestionCard: View {
         }
     }
 
-    private func answer(for q: QuestionView) -> String? {
-        if let pick = picks[q.id] { return pick }
+    /// What answers a question: its picks, plus any typed words (a note when something is picked).
+    private func answers(for q: QuestionView) -> [String] {
         let text = (typed[q.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        return text.isEmpty ? nil : text
+        return (picks[q.id].map { Array($0) } ?? []) + (text.isEmpty ? [] : [text])
     }
 
+    /// Every required question answered; optional ones (a free "Other") never block.
     private func complete(_ questions: [QuestionView]) -> Bool {
-        questions.allSatisfy { answer(for: $0) != nil }
+        questions.filter(\.required).allSatisfy { !answers(for: $0).isEmpty } && questions.contains { !answers(for: $0).isEmpty }
     }
 
     private func send(_ requestId: String, _ questions: [QuestionView]) async {
-        let answers = questions.compactMap { q in answer(for: q).map { QuestionAnswer(questionId: q.id, answer: $0) } }
-        await submit(requestId, answers)
+        let all = questions.flatMap { q in answers(for: q).map { QuestionAnswer(questionId: q.id, answer: $0) } }
+        await submit(requestId, all)
     }
 
     private func skip(_ requestId: String) async {
