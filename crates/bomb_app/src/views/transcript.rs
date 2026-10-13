@@ -407,6 +407,11 @@ impl TranscriptView {
                     images.iter().enumerate().map(|(ix, im)| {
                         div()
                             .id(("user-image", id * 64 + ix as u64))
+                            .cursor_pointer()
+                            .on_click({
+                                let source = super::image_actions::Source::Attachment(im.clone());
+                                move |_, _, cx| super::image_actions::open(source.clone(), cx)
+                            })
                             .context_menu({
                                 let source = super::image_actions::Source::Attachment(im.clone());
                                 move |menu, _, _| super::image_actions::menu(menu, source.clone())
@@ -588,6 +593,11 @@ impl TranscriptView {
                         let im = im.clone();
                         div()
                             .id(("att-img", id * 64 + ix as u64))
+                            .cursor_pointer()
+                            .on_click({
+                                let source = super::image_actions::Source::Attachment(im.clone());
+                                move |_, _, cx| super::image_actions::open(source.clone(), cx)
+                            })
                             .context_menu({
                                 let source = super::image_actions::Source::Attachment(im.clone());
                                 move |menu, _, _| super::image_actions::menu(menu, source.clone())
@@ -619,7 +629,7 @@ impl TranscriptView {
                             .border_1()
                             .border_color(ui.border)
                             .cursor_pointer()
-                            .on_click(move |_, _, _| open_path(&path))
+                            .on_click(move |_, _, cx| super::image_actions::open(super::image_actions::Source::File(path.clone()), cx))
                             .context_menu({
                                 let source = super::image_actions::Source::File(p.clone());
                                 move |menu, _, _| super::image_actions::menu(menu, source.clone())

@@ -258,6 +258,8 @@ pub struct AppModel {
     pub show_all_merged: HashSet<String>,
     /// The project page's map: view, camera and selection.
     pub project_map: crate::views::project_map::MapState,
+    /// The image shown large over the window, if any.
+    pub lightbox: Option<crate::views::image_actions::Source>,
     /// Lists as each core last reported them; the combined lists below are rebuilt from these,
     /// so a server that is briefly offline keeps its projects and threads on screen.
     local_threads: Vec<ThreadDto>,
@@ -376,6 +378,7 @@ impl AppModel {
             project_intro_seen: false,
             show_all_merged: HashSet::new(),
             project_map: Default::default(),
+            lightbox: None,
             local_threads: Vec::new(),
             threads_loaded: false,
             just_started: HashSet::new(),
@@ -1588,14 +1591,17 @@ impl AppModel {
                             // Entries that streamed in before this loaded are in the saved rows as well.
                             let had_live = !t.thread.entries.is_empty();
                             if !had_live || rows.len() >= t.thread.entries.len() {
+                                // A turn under way keeps its status line: the saved rows don't carry it.
+                                let live = Some(t.thread.presence.clone()).filter(|p| p.turn_active());
                                 if had_live { t.thread = bomb_core::transcript::Thread::new(); }
                                 t.thread.hydrate(&rows);
+                                if let Some(presence) = live { t.thread.presence = presence; }
                                 t.after_hydrate(cx);
                                 // Saved rows drop an approval's id and choices; the thread may be waiting
                                 // on one asked before this Mac connected, or before the thread was opened.
                                 if remote || had_live { for approval in &snapshot.pending_approvals { t.apply(approval, cx); } }
                                 // The agent may still be working: say so now, not at its next event.
-                                if (remote || had_live) && (t.meta.status == "running" || t.meta.status.contains("wait")) {
+                                if (remote || had_live) && (matches!(t.meta.status.as_str(), "running" | "starting") || t.meta.status.contains("wait")) {
                                     let ch = t.thread.resume_in_progress(std::time::Instant::now());
                                     t.absorb(&ch, cx);
                                 }

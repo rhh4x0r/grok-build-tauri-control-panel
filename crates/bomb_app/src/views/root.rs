@@ -307,7 +307,8 @@ impl Render for RootView {
         }
         // Whatever covers or replaces the preview pane (Changes, Settings, Foundry, a closed pane), the
         // native browser view must not stay painted over it.
-        let preview_showing = self.preview_open && !self.model.read(cx).review_open && !self.settings_open && !self.foundry_open;
+        let preview_showing = self.preview_open && !self.model.read(cx).review_open && !self.settings_open && !self.foundry_open
+            && self.model.read(cx).lightbox.is_none();
         if !preview_showing { self.preview.update(cx, |p, cx| p.hidden(cx)); }
         // Below this width the thread needs the room more than the list does.
         let narrow = window.viewport_size().width < px(NARROW_WINDOW);
@@ -353,6 +354,13 @@ impl Render for RootView {
         div()
             .id("root")
             .track_focus(&self.focus)
+            // Escape closes an open image before anything else sees it.
+            .capture_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                if e.keystroke.key == "escape" && this.model.read(cx).lightbox.is_some() {
+                    crate::views::image_actions::close(cx);
+                    cx.stop_propagation();
+                }
+            }))
             .on_action(cx.listener(move |_, _: &NewMockSession, _, cx| {
                 model.update(cx, |m, cx| m.new_mock_session(cx));
             }))
@@ -532,6 +540,8 @@ impl Render for RootView {
                     }),
             ))),
             )
+            // An image opened large from a thread sits over everything but dialogs.
+            .children(crate::views::image_actions::lightbox_layer(self.model.read(cx).lightbox.clone()))
             // Root owns overlay state, but the application view must render it.
             .children(Root::render_sheet_layer(window, cx))
             .children(Root::render_dialog_layer(window, cx))

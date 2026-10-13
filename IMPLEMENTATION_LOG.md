@@ -1222,3 +1222,16 @@ All additive; `PROTOCOL_VERSION` stays 1 and a Mac that never calls the new meth
 - Question parsing: the longer of a field's title and description is the question, the shorter its label (Codex puts the question in the title, Claude in the description). A lone question's form message replaces only a short label-like title.
 - Mac and phone: restored cards say Bomb Code restarted and that the answer goes as a message; retired ones read "The conversation moved on".
 - Checked: workspace clippy and tests (new: restore and retire, the live question taking over, answers in words); iOS bindings and simulator build. Not checked: a real restart with a question waiting.
+
+## 2026-10-13 — Image lightbox; status line during a reload
+
+- Clicking an image in a thread opens it large over the window (`image_actions::lightbox_layer`, `AppModel.lightbox`). It applies to generated images, images attached to replies, and your own attachments.
+  - A top bar has Copy image, Reveal in Finder and Reveal in file tree. Right-click on the picture keeps the same menu.
+  - Escape (captured at the root), ✕, or a click outside the picture closes it.
+  - The Preview pane's native web view hides while it's open; it would paint over it.
+  - `image_actions::run` is the shared action behind the menu and the bar. Generated images used to open in macOS Preview on click.
+- Status line: loading a thread's history during a turn replaced the transcript and reset `Presence`. Typically this was right after a new thread's first prompt. The turn was only resumed when the saved status already read "running", and it often still read "starting". So the sidebar said working while the status line was blank until the next event.
+  - Hydration now keeps a turn-active presence.
+  - "starting" counts as in progress for the resume.
+  - A reducer-level "Running starts presence" net was tried and dropped: once a finished turn has settled, a late Running ack can't be told from a new turn.
+- Checked: clippy, transcript tests. Not checked on screen (app not restarted at Max's request).
