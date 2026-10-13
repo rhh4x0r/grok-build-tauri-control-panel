@@ -150,6 +150,48 @@ pub struct QuestionCard {
 /// and for threads on another machine a little of their conversation). Bubbles leave it out.
 pub const MENTION_NOTE: &str = "[Threads mentioned — Bomb Code]";
 
+/// A thread a message @-mentions, for its note.
+#[derive(Debug, Clone)]
+pub struct Mentioned {
+    pub title: String,
+    pub id: String,
+    /// "Project · on Server · working".
+    pub detail: String,
+    /// `Some` when it runs on another machine (whose agent can't read it): its latest messages,
+    /// newest first, if they're at hand.
+    pub elsewhere: Option<Vec<String>>,
+}
+
+/// The note sent with a message about the threads it mentions (those whose `@Title` it still
+/// contains): each one's id for the agent's tools, and for one on another machine its latest
+/// messages. `None` when it mentions none.
+pub fn mention_note(text: &str, mentioned: &[Mentioned]) -> Option<String> {
+    let in_text = |m: &&Mentioned| !m.title.is_empty() && text.contains(&format!("@{}", m.title));
+    let found: Vec<&Mentioned> = mentioned.iter().filter(in_text).collect();
+    // "@Fix login crash" also contains "@Fix login": only the longer name was meant.
+    let mut picked: Vec<&Mentioned> = found.iter().copied()
+        .filter(|m| !found.iter().any(|o| o.title.len() > m.title.len() && o.title.starts_with(&m.title)
+            && text.matches(&format!("@{}", m.title)).count() <= text.matches(&format!("@{}", o.title)).count()))
+        .collect();
+    picked.dedup_by(|a, b| a.id == b.id);
+    if picked.is_empty() {
+        return None;
+    }
+    let mut note = format!("{MENTION_NOTE}\nThe person @-mentioned these threads. Use the bomb tools read_thread and send_to_thread with their ids when the request involves them.");
+    for m in picked {
+        note.push_str(&format!("\n- @{}: thread id {} · {}", m.title, m.id, m.detail));
+        match &m.elsewhere {
+            None => {}
+            Some(said) if said.is_empty() => note.push_str("\n  (It runs on another machine, and its conversation isn't at hand: read_thread can't reach it, but send_to_thread can.)"),
+            Some(said) => {
+                note.push_str("\n  It runs on another machine, so read_thread can't reach it; its latest messages, newest first:");
+                for line in said { note.push_str(&format!("\n  > {}", line.replace('\n', " "))); }
+            }
+        }
+    }
+    Some(note)
+}
+
 /// A message as its writer typed it: without its mention note.
 pub fn without_mention_note(text: &str) -> &str {
     match text.find(&format!("\n\n{MENTION_NOTE}")) {
@@ -868,6 +910,9 @@ impl Thread {
                 self.sweep_tools("cancelled", &mut ch);
                 self.end_turn(Phase::Error, "Cancelled", now);
             }
+            // A sent prompt still on its way: a thread that wasn't live reconnects first and says
+            // Idle as it connects. That isn't the turn ending; its Running follows.
+            SessionStatus::Idle if self.presence.phase == Phase::Send => {}
             SessionStatus::Idle | SessionStatus::Completed => {
                 ch.extend(self.close_streams());
                 // The turn is over: anything still "running" finished without
@@ -1809,6 +1854,34 @@ mod tests {
         assert_eq!(t.presence.phase, Phase::Think);
         assert_eq!(t.presence.label(now), "Thinking");
         assert!(!t.presence.waking);
+    }
+
+    #[test]
+    fn mentions_are_found_by_name_and_the_longest_name_wins() {
+        let m = |title: &str, id: &str| Mentioned { title: title.into(), id: id.into(), detail: "p".into(), elsewhere: None };
+        let all = [m("Fix login", "a"), m("Fix login crash", "b"), m("Payment page", "c")];
+        let note = mention_note("send this to @Fix login crash please", &all).unwrap();
+        assert!(note.contains("thread id b") && !note.contains("thread id a") && !note.contains("thread id c"), "{note}");
+        let both = mention_note("@Fix login and @Fix login crash", &all).unwrap();
+        assert!(both.contains("thread id a") && both.contains("thread id b"));
+        assert!(mention_note("no mentions here", &all).is_none());
+        assert_eq!(without_mention_note(&format!("hi\n\n{note}")), "hi");
+    }
+
+    #[test]
+    fn a_thread_that_reconnects_for_a_prompt_still_shows_it_working() {
+        let now = Instant::now();
+        let mut t = Thread::new();
+        t.note_prompt("we got cut off, respond", vec![], now);
+        // Not live after a restart: the agent starts, connects (Idle), then takes the prompt.
+        for s in [SessionStatus::Starting, SessionStatus::Idle, SessionStatus::Running] {
+            t.apply(&status(s), now);
+            assert!(t.presence.turn_active(), "still working after {s:?}");
+        }
+        assert_eq!(t.presence.phase, Phase::Think);
+        t.apply(&msg("Here's the rest."), now);
+        t.apply(&ControlEvent::Raw { session_id: Some(sid()), payload: serde_json::json!({"channel":"term","line":"complete","turn_complete":true}) }, now);
+        assert_eq!(t.presence.phase, Phase::Done, "and the turn still ends");
     }
 
     #[test]

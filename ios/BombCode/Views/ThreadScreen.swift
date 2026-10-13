@@ -168,7 +168,7 @@ struct ThreadScreen: View {
                 } else {
                     Composer(machine: machine, busy: thread.turnActive, choices: $choices, send: { text, images in
                         await send(thread, text, images)
-                    }, stop: { await thread.stop() })
+                    }, stop: { await thread.stop() }, threadId: threadId)
                 }
             }
             .padding(.horizontal, 12)

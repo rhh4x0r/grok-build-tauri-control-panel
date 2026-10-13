@@ -72,6 +72,30 @@ pub enum EntryBody {
     },
 }
 
+/// A thread @-mentioned in a message written on the phone.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct MentionRef {
+    pub title: String,
+    pub thread_id: String,
+    /// "Project · on Machine".
+    pub detail: String,
+    /// It runs on a different machine from the thread the message goes to.
+    pub other_machine: bool,
+}
+
+/// `text` with the note about the threads it @-mentions (ids for the agent's tools), the same
+/// note the Mac sends. Unchanged when it mentions none.
+#[uniffi::export]
+pub fn with_mention_note(text: String, mentions: Vec<MentionRef>) -> String {
+    let mentioned: Vec<bomb_transcript::transcript::Mentioned> = mentions.into_iter().map(|m| bomb_transcript::transcript::Mentioned {
+        title: m.title, id: m.thread_id, detail: m.detail, elsewhere: m.other_machine.then(Vec::new),
+    }).collect();
+    match bomb_transcript::transcript::mention_note(&text, &mentioned) {
+        Some(note) => format!("{text}\n\n{note}"),
+        None => text,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct QuestionView {
     pub id: String,

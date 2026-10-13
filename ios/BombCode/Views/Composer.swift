@@ -17,6 +17,10 @@ struct Composer: View {
     var placeholder = "Message"
     let send: (String, [ImageUpload]) async -> Bool
     let stop: () async -> Void
+    /// The thread this writes to, left out of the @ list.
+    var threadId: String? = nil
+
+    @Environment(AppModel.self) private var app
 
     @State private var text = ""
     @State private var images: [ImageUpload] = []
@@ -47,6 +51,9 @@ struct Composer: View {
                         }
                     }
                 }
+            }
+            if !mentionMatches.isEmpty {
+                MentionList(threads: mentionMatches, detail: detail) { pick in choose(pick) }
             }
             if let dictationError {
                 Text(dictationError).font(Theme.caption).foregroundStyle(Theme.danger).padding(.horizontal, 4)
@@ -141,10 +148,55 @@ struct Composer: View {
         text += gap + words
     }
 
+    // MARK: @ mentions
+
+    /// The @ being typed at the end, and the words after it: not once it names a thread already,
+    /// past a line break, or longer than a thread's name.
+    private var mentionQuery: (at: String.Index, query: String)? {
+        guard let at = text.lastIndex(of: "@") else { return nil }
+        if at > text.startIndex, !text[text.index(before: at)].isWhitespace { return nil }
+        let query = String(text[text.index(after: at)...])
+        if query.contains("\n") || query.count > 48 { return nil }
+        if app.threads.contains(where: { t in t.label.map { !$0.isEmpty && query.hasPrefix($0) } ?? false }) { return nil }
+        return (at, query)
+    }
+
+    /// Threads in any project, on any paired machine, matching what follows the @.
+    private var mentionMatches: [ThreadSummary] {
+        guard let (_, query) = mentionQuery else { return [] }
+        let words = query.lowercased().split(separator: " ").map(String.init)
+        return app.threads.filter { t in
+            guard t.id != threadId, let title = t.label, !title.isEmpty else { return false }
+            let hay = "\(title) \(detail(t))".lowercased()
+            return words.allSatisfy { hay.contains($0) }
+        }.prefix(6).map { $0 }
+    }
+
+    /// "Project · on Machine".
+    private func detail(_ t: ThreadSummary) -> String {
+        let project = URL(fileURLWithPath: t.projectRoot).lastPathComponent
+        let where_ = app.machine(id: t.machineId)?.name
+        return [project, where_.map { "on \($0)" }].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    private func choose(_ t: ThreadSummary) {
+        guard let (at, _) = mentionQuery, let title = t.label else { return }
+        text = String(text[..<at]) + "@" + title + " "
+    }
+
+    /// The message with its mention note: every thread named after an @ (picked or typed), with
+    /// its id for the agent. The same note the Mac sends.
+    private func withMentions(_ text: String) -> String {
+        let refs = app.threads.compactMap { t in
+            t.label.map { MentionRef(title: $0, threadId: t.id, detail: detail(t), otherMachine: t.machineId != machine.id) }
+        }
+        return withMentionNote(text: text, mentions: refs)
+    }
+
     private func submit() async {
         await stopDictation()
         sending = true
-        let sent = await send(text, images)
+        let sent = await send(withMentions(text), images)
         sending = false
         if sent { text = ""; images = [] }
     }
@@ -155,6 +207,33 @@ struct Composer: View {
             images.append(upload)
         }
         picks = []
+    }
+}
+
+/// Threads to mention, above the text box while an @ is being typed.
+private struct MentionList: View {
+    let threads: [ThreadSummary]
+    let detail: (ThreadSummary) -> String
+    let pick: (ThreadSummary) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Threads in any project").font(Theme.caption).foregroundStyle(Theme.textFaint).padding(.horizontal, 6)
+            ForEach(threads, id: \.id) { t in
+                Button { pick(t) } label: {
+                    HStack(spacing: 8) {
+                        Circle().fill(t.running ? Theme.accent : Theme.hairline).frame(width: 7, height: 7)
+                        Text(t.label ?? "").font(Theme.sans(14)).foregroundStyle(Theme.text).lineLimit(1)
+                        Spacer(minLength: 4)
+                        Text(detail(t)).font(Theme.caption).foregroundStyle(Theme.textMuted).lineLimit(1)
+                    }
+                    .padding(.horizontal, 6).padding(.vertical, 7)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.bottom, 2)
     }
 }
 

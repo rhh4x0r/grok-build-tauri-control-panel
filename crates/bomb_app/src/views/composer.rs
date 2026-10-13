@@ -544,31 +544,27 @@ impl ComposerView {
             Some(id) => m.core_of_thread(id, cx),
             None => crate::runtime::core_for_root(cx, m.active_project.as_deref().unwrap_or_default()),
         };
-        let picked: Vec<&(String, uuid::Uuid)> = self.mentions.iter().filter(|(title, _)| text.contains(&format!("@{title}"))).collect();
-        if picked.is_empty() {
-            return None;
-        }
+        // Every thread named after an @, picked from the list or typed out.
         let all = super::thread_picker::choices(m, None, cx);
-        let mut note = format!("{}\nThe person @-mentioned these threads. Use the bomb tools read_thread and send_to_thread with their ids when the request involves them.", bomb_core::transcript::MENTION_NOTE);
-        for (title, id) in picked {
-            let detail = all.iter().find(|c| c.id == *id).map(|c| c.detail()).unwrap_or_default();
-            note.push_str(&format!("\n- @{title}: thread id {id} · {detail}"));
-            if !m.core_of_thread(*id, cx).same_as(&here) {
-                let said: Vec<String> = m.threads.get(id).map(|t| t.read(cx).thread.entries.iter().rev()
-                    .filter_map(|e| match (&e.role, &e.body) {
-                        (bomb_core::transcript::Role::You, bomb_core::transcript::Body::Text(t)) => Some(format!("person: {}", clip(bomb_core::transcript::without_mention_note(t), 600))),
-                        (bomb_core::transcript::Role::Agent, bomb_core::transcript::Body::Text(t)) if !t.trim().is_empty() => Some(format!("agent: {}", clip(t, 600))),
-                        _ => None,
-                    }).take(8).collect()).unwrap_or_default();
-                if said.is_empty() {
-                    note.push_str("\n  (It runs on another machine, and its conversation isn't loaded here: read_thread can't reach it, but send_to_thread can.)");
-                } else {
-                    note.push_str("\n  It runs on another machine, so read_thread can't reach it; its latest messages, newest first:");
-                    for line in said { note.push_str(&format!("\n  > {}", line.replace('\n', " "))); }
-                }
-            }
+        let mut named: Vec<(String, uuid::Uuid)> = all.iter().filter(|c| text.contains(&format!("@{}", c.title))).map(|c| (c.title.clone(), c.id)).collect();
+        for picked in &self.mentions {
+            if !named.iter().any(|(_, id)| *id == picked.1) { named.push(picked.clone()); }
         }
-        Some(note)
+        let mentioned: Vec<bomb_core::transcript::Mentioned> = named.iter().map(|(title, id)| {
+            let elsewhere = (!m.core_of_thread(*id, cx).same_as(&here)).then(|| m.threads.get(id).map(|t| t.read(cx).thread.entries.iter().rev()
+                .filter_map(|e| match (&e.role, &e.body) {
+                    (bomb_core::transcript::Role::You, bomb_core::transcript::Body::Text(t)) => Some(format!("person: {}", clip(bomb_core::transcript::without_mention_note(t), 600))),
+                    (bomb_core::transcript::Role::Agent, bomb_core::transcript::Body::Text(t)) if !t.trim().is_empty() => Some(format!("agent: {}", clip(t, 600))),
+                    _ => None,
+                }).take(8).collect()).unwrap_or_default());
+            bomb_core::transcript::Mentioned {
+                title: title.clone(),
+                id: id.to_string(),
+                detail: all.iter().find(|c| c.id == *id).map(|c| c.detail()).unwrap_or_default(),
+                elsewhere,
+            }
+        }).collect();
+        bomb_core::transcript::mention_note(text, &mentioned)
     }
 
     fn mention_menu(&self, ui: &Ui, cx: &mut Context<Self>) -> Option<AnyElement> {

@@ -1248,3 +1248,13 @@ All additive; `PROTOCOL_VERSION` stays 1 and a Mac that never calls the new meth
 - "Send to thread…" on a reply's footer: a searchable dialog (`thread_picker::open_send_to`) forwards that reply word for word (`handoff_send`).
 - Phone: handoff cards show as a line; the mention note is hidden. No @ picker or Send to thread on the phone yet.
 - Checked: workspace clippy and tests (new: the mention guardrail; a real handoff between two threads starts the receiver and leaves both cards), iOS bindings and simulator build. Not checked on screen.
+
+## 2026-10-13 — Mentions by name, the phone's @ picker, and the status line on a reconnect
+
+- Mentions: the mention note was missing from sent messages (seen twice, local and server targets). The composer only noted threads it remembered picking, and that memory wasn't reliable.
+  - Now any `@<thread name>` in the text counts, picked or typed (`transcript::mention_note` over every thread); the longer name wins when one is the start of another.
+  - The note's wording lives in `bomb_transcript` for both the Mac and the phone.
+- Phone: typing `@` lists threads from every paired machine (title, project, machine, a dot when working). The message goes out with the same note (`with_mention_note`, uniffi), hidden in the bubble.
+- Status line: sending to a thread that isn't live (after a restart, or idle) reconnects its agent first. The agent says Idle as it connects, which ended the just-sent turn, so the status line stayed blank all turn while the sidebar said Working. An Idle while the prompt is still in `Send` is now ignored (test reproduces Starting → Idle → Running).
+- Known gap: delivering a handoff into a server thread needs the server's `bombd` updated (`handoff_deliver` RPC). Until then a relay to a server fails with a toast.
+- Checked: workspace clippy and tests (new: mentions by name and longest wins; reconnect keeps the status line), iOS bindings and simulator build.
