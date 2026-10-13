@@ -10,6 +10,7 @@
 
 pub mod devserver;
 pub mod explainer;
+pub mod plan_review;
 pub mod failures;
 pub mod journal;
 pub mod queue;

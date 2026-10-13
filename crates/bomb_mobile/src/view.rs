@@ -60,6 +60,41 @@ pub enum EntryBody {
         /// The chosen option id, "cancelled" or "restored"; `None` while it is waiting for an answer.
         resolution: Option<String>,
     },
+    /// The agent asks something (Codex's clarifying questions). Answer with `Machine::answer_question`.
+    Question {
+        request_id: String,
+        message: String,
+        questions: Vec<QuestionView>,
+        /// Question id → answer, once answered.
+        answers: Vec<QuestionAnswer>,
+        /// "answered" | "declined"; `None` while waiting.
+        resolution: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct QuestionView {
+    pub id: String,
+    pub title: String,
+    pub description: Option<String>,
+    /// Empty: a typed answer.
+    pub choices: Vec<QuestionChoiceView>,
+    /// A typed answer is also accepted next to the choices ("Other").
+    pub allows_typing: bool,
+    pub secret: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct QuestionChoiceView {
+    pub value: String,
+    pub label: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct QuestionAnswer {
+    pub question_id: String,
+    pub answer: String,
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -110,6 +145,20 @@ impl From<&Entry> for EntryView {
                 options: card.options.iter().map(|o| ApprovalChoice { id: o.id.clone(), kind: o.kind.clone(), label: o.label.clone() }).collect(),
                 plan_approval: card.plan_approval,
                 allow_pattern: card.allow_pattern.clone(),
+                resolution: card.resolution.clone(),
+            },
+            Body::Question(card) => EntryBody::Question {
+                request_id: card.request_id.clone(),
+                message: card.message.clone(),
+                questions: card.questions.iter().map(|q| QuestionView {
+                    id: q.id.clone(),
+                    title: q.title.clone(),
+                    description: q.description.clone(),
+                    choices: q.choices.iter().map(|c| QuestionChoiceView { value: c.value.clone(), label: c.label.clone(), description: c.description.clone() }).collect(),
+                    allows_typing: q.choices.is_empty() || q.note_id.is_some(),
+                    secret: q.secret,
+                }).collect(),
+                answers: card.answers.iter().flatten().map(|(question_id, answer)| QuestionAnswer { question_id: question_id.clone(), answer: answer.clone() }).collect(),
                 resolution: card.resolution.clone(),
             },
         };

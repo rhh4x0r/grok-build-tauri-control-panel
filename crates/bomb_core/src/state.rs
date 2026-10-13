@@ -276,15 +276,8 @@ impl AppState {
         // ELI12 narrator for the right panel (selected-thread side LLM calls).
         let explainer = {
             let cfg = config.read().await;
-            // Unless the person chose a narrator, use the cheapest capable one that is signed in:
-            // Claude's Haiku. Grok's default is its top model, which burns credits on summaries.
-            let (backend, model) = match (&cfg.explainer_backend, &cfg.explainer_model) {
-                (None, None) => {
-                    let claude_ready = grok_cli_wrapper::backend_auth::all(&cfg).await.iter().any(|a| a.backend == "claude" && a.logged_in && a.runnable);
-                    if claude_ready { (Some("claude".to_string()), Some(crate::explainer::CHEAP_CLAUDE_NARRATOR.to_string())) } else { (None, None) }
-                }
-                (b, m) => (b.clone(), m.clone()),
-            };
+            // Unless the person chose a narrator, it narrates on the focused thread's own backend and model.
+            let (backend, model) = (cfg.explainer_backend.clone(), cfg.explainer_model.clone());
             ExplainerService::start(
                 grok_cli.clone(),
                 config.clone(),
@@ -309,7 +302,7 @@ impl AppState {
                 if let Some(grok) = cfg.backends.get_mut("grok") {
                     if grok.default_model.as_deref().is_some_and(|m| !offered(m)) { grok.default_model = None; changed = true; }
                 }
-                let narrator_on_grok = cfg.explainer_backend.as_deref().is_none_or(|b| b == "grok");
+                let narrator_on_grok = cfg.explainer_backend.as_deref() == Some("grok");
                 if narrator_on_grok && cfg.explainer_model.as_deref().is_some_and(|m| !offered(m)) {
                     cfg.explainer_model = None;
                     explainer.set_provider(None, Some(String::new())).await;

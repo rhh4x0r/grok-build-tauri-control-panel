@@ -5,6 +5,7 @@
 pub mod model;
 
 use crate::views::button::Button;
+use bomb_core::explainer::NARRATE_ON_THREAD;
 use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::input::{Input, Textarea};
@@ -234,7 +235,7 @@ fn general_page(cx: &App) -> SettingPage {
         .group(
             SettingGroup::new()
                 .title("Explainer")
-                .description("A cheap side model narrates what the agent is doing, in plain English, under the status line.")
+                .description("A side model narrates what the agent is doing, in plain English, under the status line. By default it's the thread's own backend and model.")
                 .item(SettingItem::new(
                     "Enabled",
                     SettingField::switch(
@@ -245,8 +246,8 @@ fn general_page(cx: &App) -> SettingPage {
                 .item(SettingItem::new(
                     "Narrator backend",
                     SettingField::dropdown(
-                        backends,
-                        |cx| settings(cx).read(cx).config.as_ref().and_then(|c| c.explainer_backend.clone()).unwrap_or_else(|| "grok".into()).into(),
+                        std::iter::once((NARRATE_ON_THREAD.into(), "Same as thread".into())).chain(backends.iter().cloned()).collect(),
+                        |cx| settings(cx).read(cx).config.as_ref().and_then(|c| c.explainer_backend.clone()).unwrap_or_else(|| NARRATE_ON_THREAD.into()).into(),
                         |v, cx| settings(cx).update(cx, |m, cx| {
                             let model = m.config.as_ref().and_then(|c| c.explainer_model.clone());
                             m.set_explainer_provider(Some(v.to_string()), model, cx)
@@ -254,7 +255,7 @@ fn general_page(cx: &App) -> SettingPage {
                     ),
                 ))
                 .item(SettingItem::new(
-                    "Narrator model",
+                    "Narrator model (not used with Same as thread)",
                     SettingField::input(
                         |cx| settings(cx).read(cx).config.as_ref().and_then(|c| c.explainer_model.clone()).unwrap_or_default().into(),
                         |v, cx| settings(cx).update(cx, |m, cx| {

@@ -103,6 +103,25 @@ pub enum Body {
     Tool(ToolRow),
     Plan(PlanDoc),
     Approval(ApprovalCard),
+    Question(QuestionCard),
+}
+
+/// The agent asking the person something mid-turn (Codex's clarifying questions).
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuestionCard {
+    pub request_id: String,
+    pub message: String,
+    pub questions: Vec<grok_events::QuestionInfo>,
+    /// What was answered (question id → answer), once answered.
+    pub answers: Option<Vec<(String, String)>>,
+    /// "answered", "declined", or `None` while open.
+    pub resolution: Option<String>,
+}
+
+impl QuestionCard {
+    pub fn is_open(&self) -> bool {
+        self.resolution.is_none()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -186,6 +205,14 @@ pub struct Thread {
 impl Thread {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Unanswered question cards, oldest first.
+    pub fn open_questions(&self) -> impl Iterator<Item = &QuestionCard> {
+        self.entries.iter().filter_map(|e| match &e.body {
+            Body::Question(q) if q.is_open() => Some(q),
+            _ => None,
+        })
     }
 
     /// Unresolved approval cards, oldest first.
@@ -502,6 +529,31 @@ impl Thread {
                     now,
                 );
                 ch.push(Change::Presence);
+                ch
+            }
+            ControlEvent::QuestionAsked { request_id, message, questions, at, .. } => {
+                let mut ch = self.close_streams();
+                let card = QuestionCard { request_id: request_id.clone(), message: message.clone(), questions: questions.clone(), answers: None, resolution: None };
+                self.push(Role::Approval, Body::Question(card), *at);
+                ch.push(Change::Appended(self.entries.len() - 1));
+                self.presence.signal(Phase::Wait, Patch { note: Some(message.clone()), ..Default::default() }, now);
+                ch.push(Change::Presence);
+                ch
+            }
+            ControlEvent::QuestionAnswered { request_id, answers, .. } => {
+                let mut ch = Vec::new();
+                let found = self.entries.iter().rposition(|e| matches!(&e.body, Body::Question(q) if q.request_id == *request_id));
+                if let Some(i) = found {
+                    if let Body::Question(q) = &mut self.entries[i].body {
+                        q.resolution = Some(if answers.is_some() { "answered" } else { "declined" }.into());
+                        q.answers = answers.clone();
+                    }
+                    ch.push(Change::Updated(i));
+                }
+                if self.presence.turn_active() {
+                    self.presence.signal(Phase::Think, Patch { note: Some("Answered".into()), ..Default::default() }, now);
+                    ch.push(Change::Presence);
+                }
                 ch
             }
             ControlEvent::ApprovalResolved {

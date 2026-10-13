@@ -67,6 +67,18 @@ fn which(bin: &str) -> Option<PathBuf> {
     which::which(bin).ok()
 }
 
+/// A provider's own CLI (`claude`, `codex`), not its ACP adapter: PATH, then the usual install
+/// folders, which an app opened from Finder may not have on its PATH.
+pub fn cli_path(bin: &str) -> Option<PathBuf> {
+    which(bin).or_else(|| {
+        let home = std::env::var_os("HOME").map(PathBuf::from)?;
+        [home.join(".local/bin"), home.join(".claude/local"), "/opt/homebrew/bin".into(), "/usr/local/bin".into()]
+            .into_iter()
+            .map(|dir| dir.join(bin))
+            .find(|path| path.is_file())
+    })
+}
+
 fn env_key(name: &str) -> bool {
     std::env::var(name).is_ok_and(|v| !v.trim().is_empty())
 }

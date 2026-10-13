@@ -80,6 +80,17 @@ final class ThreadModel {
         !(try await machine.machine.respondApproval(threadId: id, requestId: requestId, optionId: optionId))
     }
 
+    /// A plan card: "auto" / "ask" implement it, "keep" keeps planning (with optional feedback).
+    /// Returns false when another device answered first.
+    func answerPlan(requestId: String, choice: String, feedback: String? = nil) async throws -> Bool {
+        !(try await machine.machine.answerPlan(threadId: id, requestId: requestId, choice: choice, feedback: feedback))
+    }
+
+    /// The agent's question; an empty list skips it. Returns false when another device answered first.
+    func answerQuestion(requestId: String, answers: [QuestionAnswer]) async throws -> Bool {
+        !(try await machine.machine.answerQuestion(threadId: id, requestId: requestId, answers: answers))
+    }
+
     var rows: [TranscriptRow] { TranscriptRow.build(entries) }
 
     /// The reply that closes each turn (its last text before the next prompt): it gets the footer.
@@ -109,13 +120,14 @@ enum TranscriptRow: Identifiable {
     case activity(first: UInt64, items: [EntryView])
     case plan(EntryView)
     case approval(EntryView)
+    case question(EntryView)
     case line(EntryView)
     /// A subagent this thread started; it opens its own transcript.
     case subagent(EntryView)
 
     var id: UInt64 {
         switch self {
-        case let .user(e), let .agent(e), let .plan(e), let .approval(e), let .line(e), let .subagent(e): e.id
+        case let .user(e), let .agent(e), let .plan(e), let .approval(e), let .question(e), let .line(e), let .subagent(e): e.id
         case let .activity(first, _): first
         }
     }
@@ -145,6 +157,7 @@ enum TranscriptRow: Identifiable {
             case (.agent, .text): rows.append(.agent(entry))
             case (_, .plan): rows.append(.plan(entry))
             case (_, .approval): rows.append(.approval(entry))
+            case (_, .question): rows.append(.question(entry))
             default: rows.append(.line(entry))
             }
         }

@@ -23,7 +23,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::pairing::{gateway_request, PairedMachine};
-use crate::view::{patches, BackendChoice, GoalView, BackendRow, PresenceView, SidebarPrefs, ThreadPatch, ThreadRow, ThreadSummary, UsageView};
+use crate::view::{patches, BackendChoice, GoalView, BackendRow, PresenceView, QuestionAnswer, SidebarPrefs, ThreadPatch, ThreadRow, ThreadSummary, UsageView};
 use crate::{on_runtime, runtime, MobileError, Result};
 
 /// Rows loaded when a thread opens, and added each time the person scrolls to the top.
@@ -423,6 +423,22 @@ impl Machine {
     /// Answer an approval card. Returns `true` when another device answered it first.
     pub async fn respond_approval(&self, thread_id: String, request_id: String, option_id: String) -> Result<bool> {
         let answer = self.request("respond_approval", json!({ "id": thread_id, "request_id": request_id, "option_id": option_id })).await?;
+        Ok(answer["already_resolved"].as_bool().unwrap_or(false))
+    }
+
+    /// Answer a plan card: `choice` is "auto" or "ask" (implement it, edits auto-accepted or asked
+    /// about) or "keep" (keep planning; `feedback`, if given, goes as the next message once the turn
+    /// ends). Returns `true` when another device answered it first.
+    pub async fn answer_plan(&self, thread_id: String, request_id: String, choice: String, feedback: Option<String>) -> Result<bool> {
+        let answer = self.request("answer_plan", json!({ "id": thread_id, "request_id": request_id, "choice": choice, "feedback": feedback })).await?;
+        Ok(answer["already_resolved"].as_bool().unwrap_or(false))
+    }
+
+    /// Answer the agent's question (each answer is a choice's value or typed text), or skip it
+    /// with an empty list. Returns `true` when another device answered it first.
+    pub async fn answer_question(&self, thread_id: String, request_id: String, answers: Vec<QuestionAnswer>) -> Result<bool> {
+        let answers: Option<Vec<(String, String)>> = (!answers.is_empty()).then(|| answers.into_iter().map(|a| (a.question_id, a.answer)).collect());
+        let answer = self.request("answer_question", json!({ "id": thread_id, "request_id": request_id, "answers": answers })).await?;
         Ok(answer["already_resolved"].as_bool().unwrap_or(false))
     }
 

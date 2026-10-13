@@ -145,6 +145,22 @@ impl Core {
         }
     }
 
+    /// See [`services::answer_plan`].
+    pub async fn answer_plan(&self, id: String, request_id: String, choice: String, feedback: Option<String>) -> Result<(), String> {
+        match self {
+            Self::Local(state) => services::answer_plan(state, id, request_id, choice, feedback).await,
+            Self::Remote(r) => r.request("answer_plan", json!({ "id": id, "request_id": request_id, "choice": choice, "feedback": feedback })).await.map(|_| ()),
+        }
+    }
+
+    /// See [`services::answer_question`].
+    pub async fn answer_question(&self, id: String, request_id: String, answers: Option<Vec<(String, String)>>) -> Result<(), String> {
+        match self {
+            Self::Local(state) => services::answer_question(state, id, request_id, answers).await,
+            Self::Remote(r) => r.request("answer_question", json!({ "id": id, "request_id": request_id, "answers": answers })).await.map(|_| ()),
+        }
+    }
+
     pub async fn add_session_allow_rule(&self, id: String, pattern: String) -> Result<(), String> {
         match self {
             Self::Local(state) => services::add_session_allow_rule(state, id, pattern).await,

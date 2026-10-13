@@ -7,6 +7,7 @@ mod error;
 pub mod goal;
 mod messages;
 mod provider_paths;
+pub mod questions;
 pub mod reap;
 mod terminals;
 mod transport;

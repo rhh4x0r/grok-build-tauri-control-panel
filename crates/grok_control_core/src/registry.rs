@@ -783,6 +783,31 @@ impl SessionRegistry {
         Ok(())
     }
 
+    /// The options an open permission request offers (to answer a plan by intent).
+    pub async fn pending_options(&self, id: Uuid, request_id: &str) -> Result<Option<Vec<grok_events::PermissionOptionInfo>>> {
+        Ok(self.client_of(id)?.pending_options(request_id).await)
+    }
+
+    /// Answer a permission request with `option_id`, recorded as `shown` (see `AcpClient::respond_approval_shown`).
+    pub async fn respond_approval_shown(&self, id: Uuid, request_id: &str, option_id: &str, shown: Option<&str>) -> Result<()> {
+        self.client_of(id)?.respond_approval_shown(request_id, Some(option_id), shown).await?;
+        if let Some(mut entry) = self.sessions.get_mut(&id) {
+            entry.metadata.status = SessionStatus::Running;
+            entry.touch();
+        }
+        Ok(())
+    }
+
+    /// Answer an agent's question, or decline it (`None`).
+    pub async fn respond_question(&self, id: Uuid, request_id: &str, answers: Option<Vec<(String, String)>>) -> Result<()> {
+        self.client_of(id)?.respond_question(request_id, answers).await?;
+        Ok(())
+    }
+
+    fn client_of(&self, id: Uuid) -> Result<std::sync::Arc<grok_acp::AcpClient>> {
+        self.sessions.get(&id).ok_or(CoreError::SessionNotFound(id))?.acp_client.clone().ok_or(CoreError::NotAcp)
+    }
+
     /// Retire an idle provider during a model switch without cancelling the new UI turn.
     pub async fn retire_session(&self, id: Uuid) -> Result<()> {
         if let Some((_, handle)) = self.sessions.remove(&id) {

@@ -131,6 +131,9 @@ pub struct ClientCapabilities {
     /// `subagent_state_update`). Without it, adapters fold subagent work into the parent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagents: Option<serde_json::Value>,
+    /// `{ "form": {} }`: the agent may ask the person questions (`elicitation/create`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elicitation: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

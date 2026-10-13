@@ -1654,6 +1654,13 @@ impl AppModel {
                 ControlEvent::Raw { payload, session_id: Some(id) }
                     if payload.get("channel").and_then(|c| c.as_str()) == Some("thread") =>
                 {
+                    // A plan was approved (here or on another device): the thread left plan mode.
+                    if payload.get("kind").and_then(|v| v.as_str()) == Some("approval_mode") {
+                        if let Some(mode) = payload.get("mode").and_then(|v| v.as_str()) {
+                            if let Some(t) = self.threads.get(id) { t.update(cx, |t, cx| { t.meta.approval_mode = Some(mode.to_owned()); cx.notify(); }); }
+                            if self.selected == Some(*id) { self.prefs.mode = mode.to_owned(); cx.notify(); }
+                        }
+                    }
                     if self.selected == Some(*id) && payload.get("kind").and_then(|v| v.as_str()) == Some("model_switch") {
                         if payload.get("backend").and_then(|v|v.as_str()) == Some(self.prefs.backend.as_str()) {
                             if let Some(model) = payload.get("model").and_then(|v|v.as_str()) { self.prefs.model = Some(model.to_owned()); }
@@ -1979,6 +1986,21 @@ impl AppModel {
 
     /// Hold a message for the thread in view until its agent is free.
     pub fn enqueue(&mut self, text: String, images: Vec<ImageInput>, files: Vec<(PathBuf, u64)>, cx: &mut Context<Self>) {
+        if let Some(id) = self.selected {
+            // A reply to an open question is its answer (with any choices already clicked).
+            if images.is_empty() && files.is_empty() {
+                if let Some((request_id, answers)) = self.threads.get(&id).and_then(|t| typed_answers(t.read(cx), &text)) {
+                    self.answer_question(id, request_id, Some(answers), cx);
+                    cx.notify();
+                    return;
+                }
+            }
+            // A reply while a plan waits for approval is feedback on it: keep planning, then send it.
+            let open_plan = self.threads.get(&id).and_then(|t| {
+                t.read(cx).thread.open_approvals().find(|(_, a)| a.plan_approval).map(|(_, a)| a.request_id.clone())
+            });
+            if let Some(request_id) = open_plan { self.keep_planning(id, request_id, cx); }
+        }
         let images = images.into_iter().map(|i| ImageAttachment { mime_type: i.mime_type, data: i.data, name: i.name }).collect();
         self.queues.entry(self.selected).or_default().push(text, images, files);
         cx.notify();
@@ -2188,6 +2210,40 @@ impl AppModel {
                 }
             },
         );
+    }
+
+    /// "Implement" on a plan card: approve it so the agent implements in `mode` ("auto" or "ask").
+    /// The core answers each agent its own way and switches the thread's mode (`answer_plan`).
+    pub fn implement_plan(&mut self, id: Uuid, request_id: String, mode: &'static str, cx: &mut Context<Self>) {
+        self.answer_plan(id, request_id, mode, cx);
+    }
+
+    /// "Keep planning" on a plan card: the agent stays in plan mode for your next message.
+    pub fn keep_planning(&mut self, id: Uuid, request_id: String, cx: &mut Context<Self>) {
+        // Claude ends that turn as cancelled; that end must not hold back queued feedback.
+        self.queues.entry(Some(id)).or_default().plan_answered();
+        self.answer_plan(id, request_id, "keep", cx);
+    }
+
+    fn answer_plan(&mut self, id: Uuid, request_id: String, choice: &'static str, cx: &mut Context<Self>) {
+        let core = self.core_of_thread(id, cx);
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move { core.answer_plan(id.to_string(), request_id, choice.into(), None).await }, move |res, cx| {
+            if let Err(e) = res {
+                let _ = this.update(cx, |m, cx| m.fail(format!("Couldn't answer the plan: {e}"), cx));
+            }
+        });
+    }
+
+    /// Answer the agent's open question; `None` skips it.
+    pub fn answer_question(&mut self, id: Uuid, request_id: String, answers: Option<Vec<(String, String)>>, cx: &mut Context<Self>) {
+        let core = self.core_of_thread(id, cx);
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move { core.answer_question(id.to_string(), request_id, answers).await }, move |res, cx| {
+            if let Err(e) = res {
+                let _ = this.update(cx, |m, cx| m.fail(format!("Couldn't send your answer: {e}"), cx));
+            }
+        });
     }
 
     pub fn set_mode(&mut self, mode: &str, cx: &mut Context<Self>) {
@@ -3301,4 +3357,21 @@ mod mode_shortcut_tests {
         assert_eq!(super::next_shortcut_mode("auto"), "plan");
         assert_eq!(super::next_shortcut_mode("yolo"), "plan");
     }
+}
+
+/// The answers to the thread's open question with `text` typed for whatever has no choice clicked,
+/// when that answers every question. `None` when there's no open question, or the typed text
+/// can't fill the gaps (a question with choices only, still unpicked).
+fn typed_answers(thread: &crate::models::thread::ThreadModel, text: &str) -> Option<(String, Vec<(String, String)>)> {
+    let card = thread.thread.open_questions().next()?;
+    let picks = thread.question_picks.get(&card.request_id).cloned().unwrap_or_default();
+    let mut answers = Vec::new();
+    for q in &card.questions {
+        match picks.iter().find(|(id, _)| *id == q.id) {
+            Some(pick) => answers.push(pick.clone()),
+            None if q.choices.is_empty() || q.note_id.is_some() => answers.push((q.id.clone(), text.trim().to_string())),
+            None => return None,
+        }
+    }
+    Some((card.request_id.clone(), answers))
 }

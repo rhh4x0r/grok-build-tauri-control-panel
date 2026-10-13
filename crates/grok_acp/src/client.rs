@@ -200,6 +200,12 @@ struct PendingPermission {
     options: Vec<PermissionOptionInfo>,
 }
 
+/// An `elicitation/create` waiting for the person's answers.
+struct PendingQuestion {
+    rpc_id: Value,
+    questions: Vec<grok_events::QuestionInfo>,
+}
+
 /// The thread id of a subagent: the same child session always maps to the same thread.
 pub fn subagent_thread_id(parent: Uuid, child_session: &str) -> Uuid {
     Uuid::new_v5(&parent, child_session.as_bytes())
@@ -526,6 +532,7 @@ pub struct AcpClient {
     approval_mode: RwLock<ApprovalMode>,
     /// Permission requests parked until the user answers via respond_approval.
     pending_permissions: Mutex<HashMap<String, PendingPermission>>,
+    pending_questions: Mutex<HashMap<String, PendingQuestion>>,
     /// Set during deliberate shutdown so process death isn't reported as failure.
     shutting_down: std::sync::atomic::AtomicBool,
     /// True while `session/load` replays a saved conversation. The thread
@@ -810,6 +817,7 @@ impl AcpClient {
             always_approve: std::sync::atomic::AtomicBool::new(opts.always_approve),
             approval_mode: RwLock::new(opts.approval_mode),
             pending_permissions: Mutex::new(HashMap::new()),
+            pending_questions: Mutex::new(HashMap::new()),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
             replaying_history: std::sync::atomic::AtomicBool::new(false),
             plan_emulation: std::sync::atomic::AtomicBool::new(false),
@@ -903,6 +911,7 @@ impl AcpClient {
             always_approve: std::sync::atomic::AtomicBool::new(false),
             approval_mode: RwLock::new(ApprovalMode::Ask),
             pending_permissions: Mutex::new(HashMap::new()),
+            pending_questions: Mutex::new(HashMap::new()),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
             replaying_history: std::sync::atomic::AtomicBool::new(false),
             plan_emulation: std::sync::atomic::AtomicBool::new(false),
@@ -973,6 +982,8 @@ impl AcpClient {
                 },
                 terminal: true,
                 subagents: Some(json!({})),
+                // Forms only (Codex's clarifying questions); we never open URLs for an agent.
+                elicitation: Some(json!({ "form": {} })),
             },
         );
         let result = self
@@ -2312,11 +2323,24 @@ impl AcpClient {
         };
         self.capture_modes(&result).await;
         self.capture_config_options(&result).await;
-        // Plan requested but the agent only has a restrictive mode (codex/grok
-        // ACP adapters advertise read-only/agent/agent-full-access, no plan):
+        // Codex keeps planning apart from its approval presets: a `collaboration_mode` option
+        // (default | plan). Its plan mode asks before implementing, so it needs no emulation.
+        let native_plan = self
+            .config_option_values(COLLABORATION_MODE)
+            .await
+            .is_some_and(|values| values.iter().any(|v| v.eq_ignore_ascii_case("plan")));
+        if native_plan {
+            let wanted = if mode == "plan" { "plan" } else { "default" };
+            let current = self.config_current.read().await.get(COLLABORATION_MODE).cloned();
+            if !current.is_some_and(|c| c.eq_ignore_ascii_case(wanted)) {
+                self.set_config_option(COLLABORATION_MODE, wanted).await?;
+            }
+        }
+        // Plan requested but the agent only has a restrictive mode (grok 0.2.x
+        // advertises read-only/agent/agent-full-access, no plan):
         // emulate by also injecting planning instructions into each prompt.
         self.plan_emulation.store(
-            mode == "plan" && !is_plan_like(&mode_id),
+            mode == "plan" && !is_plan_like(&mode_id) && !native_plan,
             std::sync::atomic::Ordering::Relaxed,
         );
         let applied_mode = self.current_mode.read().await.clone().unwrap_or(mode_id);
@@ -2333,11 +2357,42 @@ impl AcpClient {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Answer a parked question: `answers` (question id → choice or typed text), or decline.
+    pub async fn respond_question(&self, request_id: &str, answers: Option<Vec<(String, String)>>) -> Result<()> {
+        let pending = self.pending_questions.lock().await.remove(request_id)
+            .ok_or_else(|| AcpError::Protocol(format!("no pending question: {request_id}")))?;
+        let reply = match &answers {
+            Some(answers) => json!({ "action": "accept", "content": crate::questions::content(&pending.questions, answers) }),
+            None => json!({ "action": "decline" }),
+        };
+        if let Some(transport) = self.transport.read().await.clone() {
+            transport.send_response(pending.rpc_id, reply).await?;
+        }
+        if let Some(bus) = &self.event_bus {
+            bus.emit(ControlEvent::QuestionAnswered { session_id: self.control_session_id, request_id: request_id.to_string(), answers, at: Utc::now() });
+            if self.pending_permissions.lock().await.is_empty() && self.pending_questions.lock().await.is_empty() {
+                bus.emit_status(self.control_session_id, SessionStatus::Running).await;
+            }
+        }
+        Ok(())
+    }
+
+    /// The options a parked permission request offers.
+    pub async fn pending_options(&self, request_id: &str) -> Option<Vec<PermissionOptionInfo>> {
+        self.pending_permissions.lock().await.get(request_id).map(|p| p.options.clone())
+    }
+
     /// Answer a parked `session/request_permission`. `option_id: None` = cancel.
     ///
     /// The `HashMap::remove` is the duplicate-response guard: a second call for
     /// the same request errors without touching the wire.
     pub async fn respond_approval(&self, request_id: &str, option_id: Option<&str>) -> Result<()> {
+        self.respond_approval_shown(request_id, option_id, None).await
+    }
+
+    /// Like `respond_approval`, but recorded as `shown`: what the person chose, when the agent is
+    /// sent something else to get there (Codex's plan is "revised" to implement it in a new mode).
+    pub async fn respond_approval_shown(&self, request_id: &str, option_id: Option<&str>, shown: Option<&str>) -> Result<()> {
         let pending = self
             .pending_permissions
             .lock()
@@ -2377,7 +2432,7 @@ impl AcpClient {
             bus.emit(ControlEvent::ApprovalResolved {
                 session_id: self.control_session_id,
                 request_id: request_id.to_string(),
-                option_id: option_id.map(str::to_string),
+                option_id: shown.or(option_id).map(str::to_string),
                 cancelled: option_id.is_none(),
                 at: Utc::now(),
             });
@@ -2414,8 +2469,17 @@ impl AcpClient {
         }
     }
 
-    /// Answer every parked permission request as cancelled (turn cancel / shutdown).
+    /// Answer every parked permission request and question as cancelled (turn cancel / shutdown).
     async fn drain_pending_permissions(&self) {
+        let questions: Vec<(String, PendingQuestion)> = self.pending_questions.lock().await.drain().collect();
+        for (request_id, pending) in questions {
+            if let Some(t) = self.transport.read().await.clone() {
+                let _ = t.send_response(pending.rpc_id, json!({ "action": "cancel" })).await;
+            }
+            if let Some(bus) = &self.event_bus {
+                bus.emit(ControlEvent::QuestionAnswered { session_id: self.control_session_id, request_id, answers: None, at: Utc::now() });
+            }
+        }
         let drained: Vec<(String, PendingPermission)> = {
             let mut map = self.pending_permissions.lock().await;
             map.drain().collect()
@@ -2606,8 +2670,10 @@ impl AcpClient {
                 };
                 let request_id = id_key(&req.id);
 
-                // Deny rules are absolute: they beat yolo and skip the card.
-                if !self.deny_patterns.is_empty()
+                // Deny rules are absolute: they beat yolo and skip the card. A plan approval
+                // runs nothing itself, so it always reaches the person.
+                if plan_extracted.is_none()
+                    && !self.deny_patterns.is_empty()
                     && grok_permissions::matches_any_pattern(&self.deny_patterns, &tool, &summary)
                 {
                     let reject = options
@@ -2813,6 +2879,18 @@ impl AcpClient {
                             .send_error_response(req.id, -32000, e.to_string())
                             .await?;
                     }
+                }
+            }
+            "elicitation/create" => {
+                let Some((message, questions)) = req.params.as_ref().and_then(crate::questions::parse) else {
+                    // A form we can't show: decline, and the agent carries on without it.
+                    return transport.send_response(req.id, json!({ "action": "decline" })).await;
+                };
+                let request_id = id_key(&req.id);
+                self.pending_questions.lock().await.insert(request_id.clone(), PendingQuestion { rpc_id: req.id, questions: questions.clone() });
+                if let Some(bus) = &self.event_bus {
+                    bus.emit(ControlEvent::QuestionAsked { session_id: self.control_session_id, request_id, message, questions, at: Utc::now() });
+                    bus.emit_status(self.control_session_id, SessionStatus::WaitingApproval).await;
                 }
             }
             other => {
@@ -3816,6 +3894,9 @@ fn extract_tool_plan(tool_name: &str, raw_input: Option<&Value>) -> Option<Strin
     }
     Some(plan.to_string())
 }
+
+/// Codex's planning switch, separate from its approval modes.
+const COLLABORATION_MODE: &str = "collaboration_mode";
 
 /// Does this advertised mode id represent a native plan mode?
 fn is_plan_like(mode_id: &str) -> bool {

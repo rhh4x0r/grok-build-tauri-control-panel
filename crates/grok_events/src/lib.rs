@@ -95,6 +95,22 @@ pub enum ControlEvent {
         cancelled: bool,
         at: DateTime<Utc>,
     },
+    /// The agent asks the person something mid-turn (Codex's clarifying questions, an MCP
+    /// server's form): one or more questions, each with choices and/or free text.
+    QuestionAsked {
+        session_id: Uuid,
+        request_id: String,
+        message: String,
+        questions: Vec<QuestionInfo>,
+        at: DateTime<Utc>,
+    },
+    /// Answered (question id → answer) or declined (`answers: None`).
+    QuestionAnswered {
+        session_id: Uuid,
+        request_id: String,
+        answers: Option<Vec<(String, String)>>,
+        at: DateTime<Utc>,
+    },
     /// A prompt sent by a connected device, so other devices on the same thread see it.
     /// `origin` names the sending client; that client already shows the prompt and skips it.
     UserMessage {
@@ -126,6 +142,34 @@ pub enum ControlEvent {
         session_id: Option<Uuid>,
         payload: Value,
     },
+}
+
+/// One question in a `QuestionAsked`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionInfo {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Choices; empty means free text.
+    #[serde(default)]
+    pub choices: Vec<QuestionChoice>,
+    /// The field that carries a typed answer next to the choices (Codex's "Other" note).
+    #[serde(default)]
+    pub note_id: Option<String>,
+    /// The choice that means "my own answer, in the note" (Codex's "Other").
+    #[serde(default)]
+    pub other_choice: Option<String>,
+    #[serde(default)]
+    pub secret: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionChoice {
+    pub value: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// One option offered by the agent in a `session/request_permission` request.
@@ -189,6 +233,8 @@ impl ControlEvent {
             | ControlEvent::AgentMessage { session_id, .. }
             | ControlEvent::ApprovalRequired { session_id, .. }
             | ControlEvent::ApprovalResolved { session_id, .. }
+            | ControlEvent::QuestionAsked { session_id, .. }
+            | ControlEvent::QuestionAnswered { session_id, .. }
             | ControlEvent::UserMessage { session_id, .. } => Some(*session_id),
             ControlEvent::Error { session_id, .. } | ControlEvent::Raw { session_id, .. } => *session_id,
             ControlEvent::SchedulerJob { .. } | ControlEvent::McpChanged { .. } | ControlEvent::MemoryUpdated { .. } => None,

@@ -116,6 +116,9 @@ pub struct PromptQueue {
     interrupt: Option<Interrupt>,
     /// The last turn ended and nothing has been sent since.
     due: bool,
+    /// A plan was answered: the agent may end that turn as stopped (Claude's "keep planning"),
+    /// which is not the person pressing Stop.
+    plan_answered: bool,
     next_id: u64,
 }
 
@@ -196,6 +199,7 @@ impl PromptQueue {
     /// Something was sent to the thread: a new turn is under way.
     pub fn turn_started(&mut self) {
         self.due = false;
+        self.plan_answered = false;
     }
 
     /// A turn ended. A failure or a stop pauses whatever is waiting.
@@ -205,6 +209,8 @@ impl PromptQueue {
             interrupt.stopped = true;
             return;
         }
+        // A stopped turn can report its end more than once; the flag lasts until the next turn.
+        let end = if self.plan_answered && end == TurnEnd::Stopped { TurnEnd::Finished } else { end };
         match end {
             TurnEnd::Finished => self.due = true,
             TurnEnd::Failed | TurnEnd::Stopped => {
@@ -214,6 +220,11 @@ impl PromptQueue {
                 }
             }
         }
+    }
+
+    /// A plan approval was just answered; the turn's end that follows is not a stop.
+    pub fn plan_answered(&mut self) {
+        self.plan_answered = true;
     }
 
     /// Let a paused queue go: it sends as soon as the agent is free.
@@ -491,5 +502,20 @@ mod tests {
         assert_eq!(TurnEnd::of(&status(SessionStatus::Cancelled)), Some(TurnEnd::Stopped));
         assert_eq!(TurnEnd::of(&status(SessionStatus::Idle)), None, "connecting is not a turn ending");
         assert_eq!(TurnEnd::of(&status(SessionStatus::Running)), None);
+    }
+
+    #[test]
+    fn a_turn_stopped_by_answering_a_plan_still_sends_the_queue() {
+        let mut q = PromptQueue::new();
+        q.push("Make step 2 smaller", Vec::new(), Vec::new());
+        q.plan_answered();
+        q.on_turn_end(TurnEnd::Stopped);
+        q.on_turn_end(TurnEnd::Stopped);
+        assert!(q.next(false).is_some(), "the feedback goes out, however many times the end is reported");
+        // Only that turn: once the next one starts, a Stop is the person's.
+        q.turn_started();
+        q.push("next", Vec::new(), Vec::new());
+        q.on_turn_end(TurnEnd::Stopped);
+        assert!(q.next(false).is_none());
     }
 }

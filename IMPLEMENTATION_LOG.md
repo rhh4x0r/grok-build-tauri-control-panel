@@ -1114,3 +1114,48 @@ All additive; `PROTOCOL_VERSION` stays 1 and a Mac that never calls the new meth
 - Checked: new client and reducer tests; full workspace tests pass. Run without clippy or app builds (asked for tests only).
   - `workspace_lifecycle_checkpoints_sharing_inline_and_archive` timed out twice while other builds loaded the machine, then passed three times in a row with this change in.
 - Not checked on screen.
+
+## 2026-10-12 — Thread names and the narrator use the thread's own model
+
+- Smart names: every new ACP thread is asked for a title, not only threads on a new branch of their own: inline threads, shared checkouts and existing branches get titles too. Only a reused workspace keeps its name. The branch name still changes only for a new branch.
+- `NAME_TIMEOUT` 8 s → 10 s (measured: Claude Opus ~6.3 s, Codex ~7.7 s per naming call). A fallback to the first words is now logged as a warning with the backend and model.
+- Codex one-shot calls pass `exec --skip-git-repo-check`: without it Codex refuses to run outside a Git folder, so naming and narration failed whenever the app's cwd wasn't a repo.
+- Narrator: new default "Same as thread" (`explainer_backend` unset or `"thread"`, `NARRATE_ON_THREAD`). It narrates on the focused thread's backend and model, which `explainer_focus` passes from the registry. Before, it fell back to Grok, or to Claude Haiku when Claude was signed in. An explicit narrator backend still wins. The Grok stale-model self-heal runs only when Grok was chosen explicitly.
+- Settings → Explainer: "Same as thread" option, first in the backend list.
+- Checked: workspace clippy, `bomb_core`/`grok_config` tests, real `claude -p` and `codex exec` naming calls from the shell. Not checked: a thread created in the app on screen.
+- Also in this round: terminal drag-to-select with ⌘C copying the selection; Preview no longer aborts when the webview has no URL (`lb-wry` unwraps WebKit's nil URL).
+
+## 2026-10-12 — Plan approvals: implement in a chosen mode, or keep planning (Claude, Codex)
+
+- Plan card ("Plan ready") replaces Allow / Always allow / Deny for plan approvals: **Implement · auto-accept edits**, **Implement · ask before edits**, **Keep planning**, and "Or reply below to keep working on the plan". A message typed while a plan card is open answers "keep planning" and goes as feedback once the turn ends.
+  - Before, "Always allow" on Claude's plan picked its first always-option, `exit-plan-clear-auto`, which clears the context.
+- `bomb_core::plan_review` maps the choice per agent (tested):
+  - Claude: `exit-plan-auto` (or `exit-plan-accept-edits` when auto isn't offered) / `exit-plan-default`; keep planning = `reject`. The agent switches mode and implements in the same turn.
+  - Codex: its implement option runs under the approval mode captured when the plan's prompt started, so we answer `revise_plan`, switch mode, and queue "Implement the approved plan." (Codex's own wording).
+  - Others: their one-time allow.
+- After answering, the composer's mode follows (`AppModel::set_mode`), so the next message doesn't send `plan` again and put the agent back into plan mode.
+- `PromptQueue::plan_answered`: Claude ends a "keep planning" turn as cancelled; that end no longer pauses the queued feedback. Lasts until the next turn starts (a cancelled turn reports its end more than once).
+- Codex native plan mode: `set_mode("plan")` also sets `collaboration_mode=plan` when advertised, and leaving plan sets it back to `default`; no prompt preamble for Codex. Its approval mode during planning stays `read-only`.
+- Deny rules no longer auto-reject plan approvals (a plan runs nothing itself).
+- Also: one-shot calls (naming, narrator) run the `claude` / `codex` CLIs (`backend_auth::cli_path`), not the ACP adapters. Claude via npx was refused, so Claude naming always fell back. And clicking a macOS notification no longer aborts the app (re-entrant `Notifications` update; selection is deferred).
+- Checked: workspace clippy; grok_acp, bomb_core, bomb_app tests; new plan_review and queue tests. Not checked: a real Claude or Codex plan approval in the app, the iPhone (it still shows generic buttons for plan cards).
+- Not done: Grok's `x.ai/exit_plan_mode` (still answered "method not found"); Codex clarifying questions (`elicitation/create`, needs `clientCapabilities.elicitation`).
+
+## 2026-10-12 — Plan answers in the core, Codex questions, and both on the phone
+
+- `services::answer_plan(id, request_id, choice, feedback)` (RPC `answer_plan`) replaces the desktop-only mapping. `choice` is auto | ask | keep.
+  - The core picks the agent's option (`plan_review`) and answers.
+  - On implement it sets the thread's mode and emits `{"channel":"thread","kind":"approval_mode"}`; the Mac's composer follows it.
+  - Codex: the core waits for the turn to end, then sends "Implement the approved plan." in the chosen mode. Keep with feedback sends the feedback the same way. Both are emitted as `UserMessage` (origin "plan") so every device shows them.
+  - Codex's card is recorded as `implement_plan` ("Yes, implement this plan") via `respond_approval_shown`, not the `revise_plan` actually sent.
+- Codex clarifying questions:
+  - The client advertises `clientCapabilities.elicitation = {form:{}}`.
+  - `elicitation/create` → `grok_acp::questions::parse` → `ControlEvent::QuestionAsked`. Forms we can't show (URL, non-string fields) are declined.
+  - `services::answer_question` (RPC `answer_question`) → `{action:"accept", content}`: a choice's value, or a typed answer as "None of the above" plus the note field. `None` declines. A cancel or shutdown answers open questions `cancel`.
+  - `Body::Question` in the shared transcript. The journal re-sends open questions to devices that connect later. History saves "Asked: …" / "Answered: …" lines.
+- Mac: question card with a choice button per question, "Send answers" and "Skip". A message typed while a question is open answers it, together with the clicked choices.
+- iPhone:
+  - Plan cards: Implement · auto-accept edits / Implement · ask before edits / a "tell it what to change" field with Keep planning. Answered plan cards read "Plan approved" / "Kept planning".
+  - Question card: choices, typed answers (secure field for secret questions), Send answers, Skip.
+  - `Machine::answer_plan` / `answer_question`.
+- Checked: workspace clippy and tests (new: questions parse/content); `scripts/build-ios.sh release`; iOS simulator build. Not checked: a live Codex question or plan in the app, the phone on a device.

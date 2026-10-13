@@ -124,6 +124,11 @@ impl Journal {
             ControlEvent::ApprovalResolved { session_id, request_id, .. } => {
                 inner.pending_approvals.retain(|p| !matches!(p, ControlEvent::ApprovalRequired { session_id: s, request_id: r, .. } if s == session_id && r == request_id));
             }
+            // Open questions wait the same way: a device that connects later must still see them.
+            ControlEvent::QuestionAsked { .. } => inner.pending_approvals.push(event.clone()),
+            ControlEvent::QuestionAnswered { session_id, request_id, .. } => {
+                inner.pending_approvals.retain(|p| !matches!(p, ControlEvent::QuestionAsked { session_id: s, request_id: r, .. } if s == session_id && r == request_id));
+            }
             // A finished or cancelled turn cannot still be waiting on an answer.
             ControlEvent::SessionCompleted { session_id, .. } | ControlEvent::SessionCancelled { session_id, .. } => {
                 inner.pending_approvals.retain(|p| session_of(p) != Some(*session_id));

@@ -5,7 +5,8 @@
 use crate::views::button::Button;
 use crate::models::app::AppModelHandle;
 use bomb_core::summary::{activity_label, running_label, tool_kind};
-use bomb_core::transcript::{ApprovalCard, Body, Entry, PlanDoc, Role, ToolRow};
+use bomb_core::transcript::{ApprovalCard, Body, Entry, PlanDoc, QuestionCard, Role, ToolRow};
+use gpui_kit::component::Disableable as _;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
@@ -126,6 +127,10 @@ enum Row {
     Approval {
         id: u64,
         card: ApprovalCard,
+    },
+    Question {
+        id: u64,
+        card: QuestionCard,
     },
     /// Several answered requests in a row, folded into one line.
     AnsweredApprovals {
@@ -318,6 +323,7 @@ impl TranscriptView {
                             _ => rows.push(Row::Approval { id: e.id, card: card.clone() }),
                         }
                     }
+                    (_, Body::Question(card)) => rows.push(Row::Question { id: e.id, card: card.clone() }),
                     (role, Body::Text(s)) => rows.push(Row::Line {
                         id: e.id,
                         role: *role,
@@ -352,6 +358,7 @@ impl TranscriptView {
             Row::GeneratingImage { id, args, running } => image_placeholder(*id, args, *running, ui),
             Row::Plan { id, state, doc } => self.plan_row(*id, state, doc, ui, cx),
             Row::Approval { id, card } => self.approval_row(*id, card, ui, cx),
+            Row::Question { id, card } => self.question_row(*id, card, ui, cx),
             Row::AnsweredApprovals { first_id, cards } => self.answered_group_row(*first_id, cards, ui, cx),
             Row::Line { id, role, text } => self.line_row(*id, *role, text, ui),
         };
@@ -1093,6 +1100,87 @@ impl TranscriptView {
         self.enter("plan", id, card)
     }
 
+    /// The agent asks something: click a choice per question, or type an answer below.
+    fn question_row(&self, id: u64, card: &QuestionCard, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
+        let open = card.is_open();
+        let model = self.thread.clone();
+        let picks = self.thread.read(cx).question_picks.get(&card.request_id).cloned().unwrap_or_default();
+        let thread_id = uuid::Uuid::parse_str(&self.thread.read(cx).id()).ok();
+        let small = px(crate::theme::Type::SMALL);
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .my_2()
+            .p_3()
+            .rounded(px(Layout::PANEL_RADIUS))
+            .border_1()
+            .border_color(if open { ui.accent.opacity(0.5) } else { ui.border })
+            .bg(if open { ui.accent.opacity(0.05) } else { ui.ink(0.02) })
+            .child(
+                div().flex().items_center().gap_2()
+                    .child(Icon::from(Lucide::Info).size(px(14.)).text_color(ui.text_muted))
+                    .child(div().text_size(small).font_weight(FontWeight::MEDIUM).text_color(if open { ui.accent } else { ui.text_muted })
+                        .child(if open { "Question" } else if card.resolution.as_deref() == Some("declined") { "Question · skipped" } else { "Question · answered" })),
+            );
+        for (qi, q) in card.questions.iter().enumerate() {
+            let picked = picks.iter().find(|(qid, _)| *qid == q.id).map(|(_, v)| v.clone());
+            let answered = card.answers.iter().flatten().find(|(qid, _)| *qid == q.id).map(|(_, a)| a.clone());
+            let mut block = div().flex().flex_col().gap_1()
+                .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(ui.text).child(q.title.clone()))
+                .when_some(q.description.clone().filter(|d| *d != q.title), |el, d| el.child(div().text_size(small).text_color(ui.text_muted).child(d)));
+            if open {
+                let mut choices = div().flex().flex_wrap().gap_2();
+                for (ci, choice) in q.choices.iter().enumerate() {
+                    let selected = picked.as_deref() == Some(choice.value.as_str());
+                    let (rid, qid, value) = (card.request_id.clone(), q.id.clone(), choice.value.clone());
+                    let model = model.clone();
+                    let mut b = Button::new(("question-choice", id as usize * 1000 + qi * 50 + ci)).label(choice.label.clone()).small().compact();
+                    b = if selected { b.primary() } else { b.outline() };
+                    if let Some(d) = choice.description.clone() { b = b.tooltip(d); }
+                    choices = choices.child(b.on_click(move |_, _, cx| model.update(cx, |t, cx| {
+                        let picks = t.question_picks.entry(rid.clone()).or_default();
+                        let was = picks.iter().position(|(q, v)| *q == qid && *v == value);
+                        picks.retain(|(q, _)| *q != qid);
+                        if was.is_none() { picks.push((qid.clone(), value.clone())); }
+                        cx.notify();
+                    })));
+                }
+                if !q.choices.is_empty() { block = block.child(choices); }
+                if q.choices.is_empty() || q.note_id.is_some() {
+                    block = block.child(div().text_size(small).text_color(ui.text_muted).child(if q.choices.is_empty() { "Type your answer below." } else { "Or type your own answer below." }));
+                }
+            } else if let Some(a) = answered {
+                let shown = if q.secret { "••••".to_string() } else { a };
+                block = block.child(div().text_sm().text_color(ui.text_muted).child(shown));
+            }
+            body = body.child(block);
+        }
+        if let (true, Some(thread_id)) = (open, thread_id) {
+            let complete = card.questions.iter().all(|q| picks.iter().any(|(qid, _)| *qid == q.id));
+            let (rid, rid2, answers) = (card.request_id.clone(), card.request_id.clone(), picks.clone());
+            let mut send = Button::new(("question-send", id)).label("Send answers").small().compact().primary();
+            send = if complete {
+                send.on_click(move |_, _, cx| {
+                    if let Some(app) = cx.try_global::<AppModelHandle>().map(|h| h.0.clone()) {
+                        let (rid, answers) = (rid.clone(), answers.clone());
+                        app.update(cx, |m, cx| m.answer_question(thread_id, rid, Some(answers), cx));
+                    }
+                })
+            } else {
+                send.disabled(true)
+            };
+            let skip = Button::new(("question-skip", id)).label("Skip").small().compact().outline().on_click(move |_, _, cx| {
+                if let Some(app) = cx.try_global::<AppModelHandle>().map(|h| h.0.clone()) {
+                    let rid = rid2.clone();
+                    app.update(cx, |m, cx| m.answer_question(thread_id, rid, None, cx));
+                }
+            });
+            body = body.child(div().flex().gap_2().pt_1().child(send).child(skip));
+        }
+        self.enter("question", id, body)
+    }
+
     fn approval_row(
         &self,
         id: u64,
@@ -1113,7 +1201,10 @@ impl TranscriptView {
         let summary = approval_summary(&card.summary, true);
 
         let mut buttons: Vec<AnyElement> = Vec::new();
-        if open {
+        let plan_open = open && card.plan_approval;
+        if plan_open {
+            buttons = plan_buttons(id, &sid, card);
+        } else if open {
             let allow = card
                 .options
                 .iter()
@@ -1200,7 +1291,9 @@ impl TranscriptView {
                             .text_size(px(crate::theme::Type::SMALL))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(if open { ui.warning } else { ui.text_muted })
-                            .child(if open {
+                            .child(if plan_open {
+                                "Plan ready"
+                            } else if open {
                                 "Permission requested"
                             } else {
                                 "Permission request"
@@ -1270,6 +1363,14 @@ impl TranscriptView {
             })
             .when(!buttons.is_empty(), |el| {
                 el.child(div().flex().gap_2().pt_1().children(buttons))
+            })
+            .when(plan_open, |el| {
+                el.child(
+                    div()
+                        .text_size(px(crate::theme::Type::SMALL))
+                        .text_color(ui.text_muted)
+                        .child("Or reply below to keep working on the plan."),
+                )
             });
         self.enter("approval", id, body)
     }
@@ -2145,6 +2246,30 @@ fn mono_block(id: impl Into<ElementId>, text: &str, mono: &SharedString, color: 
 }
 
 #[allow(clippy::too_many_arguments)]
+/// A plan waiting for approval: implement it (choosing how edits are approved), or keep planning.
+fn plan_buttons(id: u64, session_id: &str, card: &ApprovalCard) -> Vec<AnyElement> {
+    let Ok(thread) = uuid::Uuid::parse_str(session_id) else { return Vec::new() };
+    let choice = |key: &'static str, label: &'static str, primary: bool, mode: Option<&'static str>| {
+        let rid = card.request_id.clone();
+        let mut b = Button::new((key, id)).label(label).small().compact();
+        b = if primary { b.primary() } else { b.outline() };
+        b.on_click(move |_, _, cx| {
+            let Some(app) = cx.try_global::<AppModelHandle>().map(|h| h.0.clone()) else { return };
+            let rid = rid.clone();
+            app.update(cx, |m, cx| match mode {
+                Some(mode) => m.implement_plan(thread, rid, mode, cx),
+                None => m.keep_planning(thread, rid, cx),
+            });
+        })
+        .into_any_element()
+    };
+    vec![
+        choice("plan-auto", "Implement · auto-accept edits", true, Some("auto")),
+        choice("plan-ask", "Implement · ask before edits", false, Some("ask")),
+        choice("plan-keep", "Keep planning", false, None),
+    ]
+}
+
 fn respond_button(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,

@@ -1,5 +1,5 @@
 //! ELI12 explainer: narrates the selected thread's activity in plain English
-//! via cheap side-LLM calls (`grok -p`, tools disabled).
+//! via one-shot side-LLM calls (tools disabled), by default on the focused thread's own backend and model.
 //!
 //! Event bus → per-session ring buffers → 5s tick (focused session only) →
 //! one narrator call over the new lines → `Raw { channel: "explain" }` event
@@ -30,15 +30,16 @@ const TICK_SECS: u64 = 5;
 const MIN_GAP: Duration = Duration::from_secs(20);
 /// A long quiet tool with only log lines still gets a word eventually.
 const LOG_ONLY_AFTER: Duration = Duration::from_secs(60);
-/// The cheapest capable narrator when Claude is signed in.
-pub const CHEAP_CLAUDE_NARRATOR: &str = "haiku";
 const ERROR_BACKOFF_SECS: u64 = 60;
 const MAX_BUFFER_LINES: usize = 60;
 const MAX_PROMPT_CHARS: usize = 3000;
 const MAX_OUTPUT_CHARS: usize = 500;
 const CALL_TIMEOUT: Duration = Duration::from_secs(45);
 /// How long a new thread waits for its name before falling back to the first words.
-const NAME_TIMEOUT: Duration = Duration::from_secs(8);
+/// Measured: Claude Opus ~6 s, Codex ~8 s per call, mostly CLI start-up.
+const NAME_TIMEOUT: Duration = Duration::from_secs(10);
+/// Narrator backend meaning "whatever the focused thread runs on".
+pub const NARRATE_ON_THREAD: &str = "thread";
 const NAME_KINDS: &[&str] = &["feat", "fix", "refactor", "chore", "docs", "test"];
 
 const NARRATOR_INSTRUCTIONS: &str = "You narrate a coding agent's work for a smart 12-year-old. \
@@ -71,9 +72,11 @@ pub struct ExplainerService {
     focused: RwLock<Option<Uuid>>,
     enabled: AtomicBool,
     busy: AtomicBool,
-    /// Narrator backend key (grok | claude | codex).
+    /// Narrator backend key (grok | claude | codex), or `NARRATE_ON_THREAD`.
     backend: RwLock<String>,
     model: RwLock<String>,
+    /// The focused thread's (backend, model), used when narrating on the thread.
+    thread_provider: RwLock<Option<(String, String)>>,
     /// Suppress calls until this instant after a narrator failure.
     backoff_until: Mutex<Option<std::time::Instant>>,
 }
@@ -95,8 +98,9 @@ impl ExplainerService {
             focused: RwLock::new(None),
             enabled: AtomicBool::new(enabled),
             busy: AtomicBool::new(false),
-            backend: RwLock::new(backend.unwrap_or_else(|| "grok".into())),
+            backend: RwLock::new(backend.unwrap_or_else(|| NARRATE_ON_THREAD.into())),
             model: RwLock::new(model.unwrap_or_else(|| DEFAULT_EXPLAINER_MODEL.into())),
+            thread_provider: RwLock::new(None),
             backoff_until: Mutex::new(None),
         });
 
@@ -132,8 +136,22 @@ impl ExplainerService {
         svc
     }
 
-    pub async fn set_focus(&self, id: Option<Uuid>) {
+    /// Focus a thread; `provider` is its (backend, model), which the narrator follows by default.
+    pub async fn set_focus(&self, id: Option<Uuid>, provider: Option<(String, String)>) {
         *self.focused.write().await = id;
+        if provider.is_some() {
+            *self.thread_provider.write().await = provider;
+        }
+    }
+
+    /// The (backend, model) to narrate with: the chosen narrator, or the focused thread's own
+    /// (the last focused one when none is); Grok's default if no thread has been focused yet.
+    async fn provider(&self) -> (String, String) {
+        let backend = self.backend.read().await.clone();
+        if backend != NARRATE_ON_THREAD {
+            return (backend, self.model.read().await.clone());
+        }
+        self.thread_provider.read().await.clone().unwrap_or_else(|| ("grok".into(), DEFAULT_EXPLAINER_MODEL.into()))
     }
 
     pub fn set_enabled(&self, enabled: bool) {
@@ -346,14 +364,13 @@ impl ExplainerService {
         }
         prompt.push_str(&format!("\n\nNew activity:\n{activity}"));
 
-        let model = self.model.read().await.clone();
-        let backend = self.backend.read().await.clone();
+        let (backend, model) = self.provider().await;
         debug!(%sid, lines = new_lines.len(), kind, %backend, %model, "explainer call");
         let out = match self.run_narrator(&backend, &model, &prompt).await {
             Ok(out) => out,
             // Stale/invalid model id: self-heal onto the known fast model
             // instead of parking the narrator on an error card.
-            Err(e) if backend == "grok" && !model.is_empty() => {
+            Err(e) if backend == "grok" && !model.is_empty() && *self.backend.read().await == "grok" => {
                 warn!(%model, error = %e, "narrator model failed; falling back to the CLI default model");
                 *self.model.write().await = DEFAULT_EXPLAINER_MODEL.to_string();
                 // Don't keep a model Grok no longer has in the settings either.
@@ -392,8 +409,7 @@ impl ExplainerService {
     /// General one-shot text task on the narrator provider (e.g. memory
     /// digests). Errors bubble to the caller.
     pub async fn summarize(&self, prompt: &str) -> Result<String, String> {
-        let backend = self.backend.read().await.clone();
-        let model = self.model.read().await.clone();
+        let (backend, model) = self.provider().await;
         let out = self.run_narrator(&backend, &model, prompt).await?;
         let text = out.trim().to_string();
         if text.is_empty() {
@@ -405,7 +421,7 @@ impl ExplainerService {
     /// A new thread's branch type, slug and title, from the model the person picked for it.
     /// Bounded by `NAME_TIMEOUT` so creating a thread never waits long; errors mean "use the word slug".
     pub async fn suggest_name(&self, backend: &str, model: &str, prompt: &str) -> Result<ThreadName, String> {
-        let model = model.trim().trim_end_matches("[1m]");
+        let model = model.trim();
         // An offline mock thread has no model to ask: its reply is its own words, checked like any other.
         if model.eq_ignore_ascii_case("mock") {
             let reply = json!({ "type": "feat", "slug": prompt.trim(), "title": prompt.trim() }).to_string();
@@ -431,22 +447,17 @@ impl ExplainerService {
         model: &str,
         prompt: &str,
     ) -> Result<String, String> {
+        let model = model.trim().trim_end_matches("[1m]");
         match backend {
             "claude" | "codex" => {
-                let b = grok_config::Backend::from_key(backend)
-                    .ok_or_else(|| format!("unknown narrator backend: {backend}"))?;
-                let cfg = self.config.read().await.clone();
-                let resolved =
-                    grok_config::resolve_backend(b, &cfg).map_err(|e| e.to_string())?;
-                if !matches!(resolved.via, grok_config::LaunchVia::Binary) {
-                    return Err(format!(
-                        "{backend} is only available via npx here — narrator needs the CLI binary installed"
-                    ));
-                }
-                let cli = GrokCli::new(&resolved.program);
+                // The provider's own CLI: its ACP adapter (what threads run on) has no one-shot mode.
+                let program = grok_cli_wrapper::backend_auth::cli_path(backend)
+                    .ok_or_else(|| format!("the {backend} CLI isn't installed — one-shot calls need it"))?;
+                let cli = GrokCli::new(&program);
                 let mut args: Vec<&str> = match backend {
                     "claude" => vec!["-p", prompt, "--output-format", "text", "--max-turns", "1"],
-                    _ => vec!["exec", prompt],
+                    // Without the flag Codex refuses to run outside a Git folder (the app's own cwd).
+                    _ => vec!["exec", "--skip-git-repo-check", prompt],
                 };
                 if !model.is_empty() {
                     let flag = if backend == "claude" { "--model" } else { "-m" };

@@ -11,6 +11,7 @@ struct TranscriptRowView: View {
         case let .activity(_, items): ActivityLine(items: items)
         case let .plan(entry): PlanCard(entry: entry)
         case let .approval(entry): ApprovalCard(entry: entry, thread: thread)
+        case let .question(entry): QuestionCard(entry: entry, thread: thread)
         case let .line(entry): SystemLine(entry: entry)
         case let .subagent(entry): SubagentCard(entry: entry, thread: thread)
         }
@@ -140,7 +141,7 @@ struct ApprovalCard: View {
     var body: some View {
         if case let .approval(requestId, tool, summary, explanation, options, planApproval, allowPattern, resolution) = entry.body {
             if let resolution {
-                Label(outcome(resolution, options), systemImage: resolution.hasPrefix("reject") || resolution == "cancelled" ? "xmark.circle" : "checkmark.circle")
+                Label(planApproval ? planOutcome(resolution, options) : outcome(resolution, options), systemImage: resolution.hasPrefix("reject") || resolution == "cancelled" ? "xmark.circle" : "checkmark.circle")
                     .font(Theme.sans(13, .medium)).foregroundStyle(Theme.textFaint)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
@@ -154,6 +155,9 @@ struct ApprovalCard: View {
                         .padding(10).frame(maxWidth: .infinity, alignment: .leading)
                         .background(Theme.bubble, in: RoundedRectangle(cornerRadius: 8))
                     if let explanation { Text(explanation).font(Theme.small).foregroundStyle(Theme.textMuted) }
+                    if planApproval {
+                        planActions(requestId)
+                    } else {
                     VStack(spacing: 8) {
                         ForEach(Array(options.enumerated()), id: \.element.id) { index, option in
                             Button {
@@ -170,11 +174,69 @@ struct ApprovalCard: View {
                             .disabled(sending != nil)
                         }
                     }
+                    }
                     if let allowPattern { Text("Always allowing adds \(allowPattern)").font(Theme.caption).foregroundStyle(Theme.textFaint) }
                     if let note { Text(note).font(Theme.caption).foregroundStyle(Theme.textFaint) }
                 }
             }
         }
+    }
+
+    @State private var feedback = ""
+
+    /// Implement the plan (choosing how edits are approved), or keep planning, with notes.
+    @ViewBuilder private func planActions(_ requestId: String) -> some View {
+        VStack(spacing: 8) {
+            planButton(requestId, "auto", "Implement · auto-accept edits", prominent: true)
+            planButton(requestId, "ask", "Implement · ask before edits", prominent: false)
+            HStack(spacing: 8) {
+                TextField("Or tell it what to change…", text: $feedback, axis: .vertical)
+                    .font(Theme.sans(14)).lineLimit(1...4)
+                    .padding(10).background(Theme.bubble, in: RoundedRectangle(cornerRadius: 8))
+                Button {
+                    Task { await plan(requestId, "keep") }
+                } label: {
+                    if sending == "keep" { ProgressView().controlSize(.small) } else { Text("Keep planning") }
+                }
+                .buttonStyle(BombButtonStyle(prominent: false, tint: nil))
+                .disabled(sending != nil)
+            }
+        }
+    }
+
+    private func planButton(_ requestId: String, _ choice: String, _ label: String, prominent: Bool) -> some View {
+        Button {
+            Task { await plan(requestId, choice) }
+        } label: {
+            HStack(spacing: 8) {
+                Text(label).lineLimit(1)
+                if sending == choice { ProgressView().controlSize(.small) }
+            }
+        }
+        .buttonStyle(BombButtonStyle(prominent: prominent, tint: nil))
+        .disabled(sending != nil)
+    }
+
+    private func plan(_ requestId: String, _ choice: String) async {
+        sending = choice
+        defer { sending = nil }
+        let notes = feedback.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            if try await !thread.answerPlan(requestId: requestId, choice: choice, feedback: choice == "keep" && !notes.isEmpty ? notes : nil) {
+                note = "Already answered on another device."
+            } else {
+                feedback = ""
+            }
+        } catch {
+            note = describe(error)
+        }
+    }
+
+    private func planOutcome(_ resolution: String, _ options: [ApprovalChoice]) -> String {
+        if resolution == "cancelled" { return "Plan cancelled" }
+        if resolution == "restored" { return "Asked before this was reopened" }
+        let kind = options.first { $0.id == resolution }?.kind ?? resolution
+        return kind.hasPrefix("reject") ? "Kept planning" : "Plan approved"
     }
 
     private func answer(_ requestId: String, _ optionId: String) async {
@@ -195,6 +257,108 @@ struct ApprovalCard: View {
             let kind = options.first { $0.id == resolution }?.kind ?? resolution
             if kind.hasPrefix("reject") { return "Denied" }
             return kind == "allow_always" ? "Always allowed" : "Allowed"
+        }
+    }
+}
+
+/// The agent asks something (Codex's clarifying questions): pick a choice per question, or type.
+struct QuestionCard: View {
+    let entry: EntryView
+    let thread: ThreadModel
+    @State private var picks: [String: String] = [:]
+    @State private var typed: [String: String] = [:]
+    @State private var sending = false
+    @State private var note: String?
+
+    var body: some View {
+        if case let .question(requestId, _, questions, answers, resolution) = entry.body {
+            if let resolution {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label(resolution == "declined" ? "Question skipped" : "Question answered", systemImage: resolution == "declined" ? "xmark.circle" : "checkmark.circle")
+                        .font(Theme.sans(13, .medium)).foregroundStyle(Theme.textFaint)
+                    ForEach(questions, id: \.id) { q in
+                        if let a = answers.first(where: { $0.questionId == q.id }) {
+                            Text("\(q.title): \(q.secret ? "••••" : a.answer)").font(Theme.caption).foregroundStyle(Theme.textFaint)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                GlassCard(stroke: Theme.accent.opacity(0.55)) {
+                    HStack(spacing: 6) {
+                        Circle().fill(Theme.accent).frame(width: 6, height: 6)
+                        Text("Question").font(Theme.sans(14, .semibold)).foregroundStyle(Theme.text)
+                    }
+                    ForEach(questions, id: \.id) { q in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(q.title).font(Theme.sans(14, .medium)).foregroundStyle(Theme.text)
+                            if let d = q.description, d != q.title { Text(d).font(Theme.small).foregroundStyle(Theme.textMuted) }
+                            ForEach(q.choices, id: \.value) { choice in
+                                Button {
+                                    picks[q.id] = picks[q.id] == choice.value ? nil : choice.value
+                                    if picks[q.id] != nil { typed[q.id] = nil }
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(choice.label).lineLimit(2)
+                                        if let d = choice.description { Text(d).font(Theme.caption).lineLimit(2) }
+                                    }
+                                }
+                                .buttonStyle(BombButtonStyle(prominent: picks[q.id] == choice.value, tint: nil))
+                            }
+                            if q.allowsTyping {
+                                let field = Binding(get: { typed[q.id] ?? "" }, set: { typed[q.id] = $0; if !$0.isEmpty { picks[q.id] = nil } })
+                                Group {
+                                    if q.secret { SecureField(q.choices.isEmpty ? "Your answer" : "Or your own answer", text: field) }
+                                    else { TextField(q.choices.isEmpty ? "Your answer" : "Or your own answer", text: field, axis: .vertical).lineLimit(1...4) }
+                                }
+                                .font(Theme.sans(14)).padding(10).background(Theme.bubble, in: RoundedRectangle(cornerRadius: 8))
+                            }
+                        }
+                    }
+                    HStack(spacing: 8) {
+                        Button {
+                            Task { await send(requestId, questions) }
+                        } label: {
+                            if sending { ProgressView().controlSize(.small) } else { Text("Send answers") }
+                        }
+                        .buttonStyle(BombButtonStyle(prominent: true, tint: nil))
+                        .disabled(sending || !complete(questions))
+                        Button("Skip") { Task { await skip(requestId) } }
+                            .buttonStyle(BombButtonStyle(prominent: false, tint: nil))
+                            .disabled(sending)
+                    }
+                    if let note { Text(note).font(Theme.caption).foregroundStyle(Theme.textFaint) }
+                }
+            }
+        }
+    }
+
+    private func answer(for q: QuestionView) -> String? {
+        if let pick = picks[q.id] { return pick }
+        let text = (typed[q.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+
+    private func complete(_ questions: [QuestionView]) -> Bool {
+        questions.allSatisfy { answer(for: $0) != nil }
+    }
+
+    private func send(_ requestId: String, _ questions: [QuestionView]) async {
+        let answers = questions.compactMap { q in answer(for: q).map { QuestionAnswer(questionId: q.id, answer: $0) } }
+        await submit(requestId, answers)
+    }
+
+    private func skip(_ requestId: String) async {
+        await submit(requestId, [])
+    }
+
+    private func submit(_ requestId: String, _ answers: [QuestionAnswer]) async {
+        sending = true
+        defer { sending = false }
+        do {
+            if try await !thread.answerQuestion(requestId: requestId, answers: answers) { note = "Already answered on another device." }
+        } catch {
+            note = describe(error)
         }
     }
 }

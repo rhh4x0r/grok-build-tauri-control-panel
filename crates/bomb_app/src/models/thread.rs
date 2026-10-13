@@ -30,6 +30,8 @@ pub struct ThreadModel {
     pub expanded: HashSet<u64>,
     pub collapsed_groups: HashSet<u64>,
     pub explain_open: bool,
+    /// Choices clicked on open question cards, per request: question id → choice value.
+    pub question_picks: HashMap<String, Vec<(String, String)>>,
     /// Bumped whenever the transcript should re-pin to its tail.
     pub tail_version: u64,
     ticking: bool,
@@ -48,6 +50,7 @@ impl ThreadModel {
             loading: false,
             markdown: HashMap::new(),
             images: HashMap::new(),
+            question_picks: HashMap::new(),
             expanded: HashSet::new(),
             collapsed_groups: HashSet::new(),
             explain_open: false,

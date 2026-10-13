@@ -94,6 +94,22 @@ pub async fn dispatch(state: &AppState, origin: &str, method: &str, p: Value) ->
                 Err(e) => Err(e),
             }
         }
+        "answer_plan" => {
+            let (id, request_id): (String, String) = (arg(&p, "id")?, arg(&p, "request_id")?);
+            match services::answer_plan(state, id, request_id, arg(&p, "choice")?, arg(&p, "feedback")?).await {
+                Ok(()) => Ok(json!({ "already_resolved": false })),
+                Err(e) if e.contains("no pending permission request") => Ok(json!({ "already_resolved": true })),
+                Err(e) => Err(e),
+            }
+        }
+        "answer_question" => {
+            let (id, request_id): (String, String) = (arg(&p, "id")?, arg(&p, "request_id")?);
+            match services::answer_question(state, id, request_id, arg(&p, "answers")?).await {
+                Ok(()) => Ok(json!({ "already_resolved": false })),
+                Err(e) if e.contains("no pending question") => Ok(json!({ "already_resolved": true })),
+                Err(e) => Err(e),
+            }
+        }
         "set_approval_mode" => { services::set_approval_mode(state, arg(&p, "id")?, arg(&p, "mode")?).await?; Ok(Value::Null) }
         "set_plan_mode" => { services::set_plan_mode(state, arg(&p, "id")?, arg(&p, "enabled")?).await?; Ok(Value::Null) }
         "set_always_approve" => { services::set_always_approve(state, arg(&p, "id")?, arg(&p, "enabled")?).await?; Ok(Value::Null) }

@@ -410,17 +410,15 @@ pub async fn start_session(
         opts.mcp_server_names = resolution.attached_names;
         mcp_skipped = resolution.skipped;
     }
-    // A new branch of its own gets a name from the thread's model, asked before the gate so a
-    // slow answer never holds up other threads. Anything short of a good answer keeps the word slug.
-    let gets_branch = opts.mode == grok_control_core::AgentMode::Acp
-        && opts.workspace_id.is_none()
-        && opts.checkout_branch.is_none()
-        && opts.isolate_worktree;
+    // A new thread gets its title (and, on a branch of its own, the branch name) from its own model,
+    // asked before the gate so a slow answer never holds up other threads. Anything short of a good
+    // answer keeps the first words. A reused workspace keeps its name.
+    let gets_name = opts.mode == grok_control_core::AgentMode::Acp && opts.workspace_id.is_none();
     let smart_name = match opts.prompt.as_deref().map(without_attachment_note) {
-        Some(prompt) if gets_branch && !prompt.trim().is_empty() && state.config.read().await.smart_names => {
+        Some(prompt) if gets_name && !prompt.trim().is_empty() && state.config.read().await.smart_names => {
             let model = opts.model.clone().unwrap_or_default();
             state.explainer.suggest_name(opts.backend.key(), &model, &prompt).await
-                .map_err(|e| tracing::debug!(error = %e, "smart thread name unavailable; using the first words"))
+                .map_err(|e| tracing::warn!(backend = opts.backend.key(), %model, error = %e, "smart thread name unavailable; using the first words"))
                 .ok()
         }
         _ => None,
@@ -1506,7 +1504,10 @@ pub async fn explainer_focus(state: &AppState, id: Option<String>) -> Result<(),
         Some(s) => Some(Uuid::parse_str(s).map_err(err)?),
         None => None,
     };
-    state.explainer.set_focus(uuid).await;
+    let provider = uuid
+        .and_then(|id| state.registry.get_snapshot(id).ok())
+        .map(|s| (s.metadata.backend.key().to_string(), s.metadata.model));
+    state.explainer.set_focus(uuid, provider).await;
     Ok(())
 }
 
@@ -1661,6 +1662,60 @@ pub async fn respond_approval(
         .respond_approval(id, &request_id, option_id.as_deref())
         .await
         .map_err(err)
+}
+
+/// Answer a plan approval by intent: `"auto"` / `"ask"` implement it with edits auto-accepted or
+/// asked about, `"keep"` keeps planning (then `feedback`, if any, goes as the next message).
+/// Every device answers through here, so the agent-specific choice lives in one place
+/// (`plan_review`). Waits for the turn to wind down when a message has to follow.
+pub async fn answer_plan(state: &AppState, id: String, request_id: String, choice: String, feedback: Option<String>) -> Result<(), String> {
+    use crate::plan_review::{implement, keep_planning, Implement, IMPLEMENT_PROMPT};
+    let sid = state.foundry.approval_session(Uuid::parse_str(&id).map_err(err)?);
+    let options = state.registry.pending_options(sid, &request_id).await.map_err(err)?
+        .ok_or_else(|| format!("no pending permission request: {request_id}"))?;
+    let (follow_up, mode) = match choice.as_str() {
+        "keep" => {
+            let option = keep_planning(&options).ok_or("This plan offers no way to keep planning.")?;
+            state.registry.respond_approval_shown(sid, &request_id, &option, None).await.map_err(err)?;
+            (feedback.filter(|f| !f.trim().is_empty()), None)
+        }
+        "auto" | "ask" => match implement(&options, &choice).ok_or("This plan offers no way to approve it.")? {
+            Implement::InTurn(option) => {
+                state.registry.respond_approval_shown(sid, &request_id, &option, None).await.map_err(err)?;
+                // The agent switched itself; match it so later messages don't put it back in plan mode.
+                if let Err(e) = set_approval_mode(state, sid.to_string(), choice.clone()).await {
+                    tracing::warn!(error = %e, "plan approved but the thread's mode wasn't updated");
+                }
+                (None, Some(choice.clone()))
+            }
+            Implement::NextTurn(option) => {
+                // Shown as approved: that's what the person chose, though the agent is told to revise.
+                let shown = options.iter().find(|o| o.kind.contains("allow")).map(|o| o.id.clone());
+                state.registry.respond_approval_shown(sid, &request_id, &option, shown.as_deref()).await.map_err(err)?;
+                (Some(IMPLEMENT_PROMPT.to_string()), Some(choice.clone()))
+            }
+        },
+        other => return Err(format!("unknown plan answer: {other}")),
+    };
+    if let Some(mode) = &mode {
+        state.event_bus.emit(grok_events::ControlEvent::Raw {
+            session_id: Some(sid),
+            payload: serde_json::json!({ "channel": "thread", "kind": "approval_mode", "mode": mode }),
+        });
+    }
+    if let Some(text) = follow_up {
+        wait_turn_settled(state, &sid.to_string(), std::time::Duration::from_secs(60)).await?;
+        // Every device shows it as a message in the thread.
+        state.event_bus.emit(grok_events::ControlEvent::UserMessage { session_id: sid, text: text.clone(), origin: "plan".into(), at: Utc::now() });
+        send_prompt(state, sid.to_string(), text, None, None, mode.or_else(|| Some("plan".into())), None, None, None, None, None).await?;
+    }
+    Ok(())
+}
+
+/// Answer an agent's question (question id → a choice or typed text), or decline it (`None`).
+pub async fn answer_question(state: &AppState, id: String, request_id: String, answers: Option<Vec<(String, String)>>) -> Result<(), String> {
+    let sid = state.foundry.approval_session(Uuid::parse_str(&id).map_err(err)?);
+    state.registry.respond_question(sid, &request_id, answers).await.map_err(err)
 }
 
 /// Rename a thread (manual override of the smart name). Works for live and
@@ -2801,6 +2856,20 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
                 db.append_message(*session_id, "approval", format!("{tool} — {summary}"), *at)
                     .map(|_| ())
             }
+        }
+        // History keeps what was asked and answered as lines; the live card died with the request.
+        QuestionAsked { session_id, questions, at, .. } => {
+            let _ = db.update_session_status(*session_id, "waitingapproval");
+            let asked: Vec<&str> = questions.iter().map(|q| q.title.as_str()).collect();
+            db.append_message(*session_id, "system", format!("Asked: {}", asked.join(" · ")), *at).map(|_| ())
+        }
+        QuestionAnswered { session_id, answers, at, .. } => {
+            let _ = db.update_session_status(*session_id, "running");
+            let body = match answers {
+                Some(answers) => format!("Answered: {}", answers.iter().map(|(_, a)| a.as_str()).collect::<Vec<_>>().join(" · ")),
+                None => "Question skipped".to_string(),
+            };
+            db.append_message(*session_id, "system", body, *at).map(|_| ())
         }
         ApprovalResolved {
             session_id,
