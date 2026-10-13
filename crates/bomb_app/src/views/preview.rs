@@ -91,7 +91,7 @@ impl PreviewPanel {
     fn follow_navigation(&mut self, cx: &App) {
         let (Some(project), Some(view)) = (self.page_project.clone(), self.webview.as_ref()) else { return };
         if !self.pages.contains_key(&project) { return; }
-        if let Ok(current) = view.read(cx).raw().url() {
+        if let Some(current) = current_url(view.read(cx).raw()) {
             if !current.is_empty() && current != "about:blank" && self.loaded_url.as_deref() != Some(current.as_str()) {
                 self.loaded_url = Some(current.clone());
                 self.pages.insert(project, current);
@@ -186,6 +186,22 @@ impl PreviewPanel {
 
 /// The task in one paragraph, for a card: the whole prompt with its line breaks and headings
 /// run together (the card shows two lines of it).
+/// The page the webview is showing, or `None` while it has none.
+/// (wry's own `url()` unwraps WebKit's nil URL and aborts the app.)
+#[cfg(target_os = "macos")]
+fn current_url(view: &wry::WebView) -> Option<String> {
+    use wry::WebViewExtMacOS as _;
+    let webview = view.webview();
+    // SAFETY: the preview panel only runs on the main thread, where WKWebView lives.
+    let url = unsafe { webview.URL() }?;
+    url.absoluteString().map(|s| s.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn current_url(view: &wry::WebView) -> Option<String> {
+    view.url().ok()
+}
+
 fn task_summary(task: &str) -> String {
     task.lines()
         .map(|l| l.trim().trim_start_matches('#').trim())

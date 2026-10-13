@@ -97,8 +97,9 @@ impl Notifications {
             NotifyEvent::Clicked(thread) => {
                 // Bring Bomb Code forward on that thread.
                 cx.activate(true);
+                // Deferred: selecting a thread withdraws its notifications, which updates this model.
                 if let (Ok(id), Some(app)) = (Uuid::parse_str(&thread), cx.try_global::<crate::models::app::AppModelHandle>().map(|h| h.0.clone())) {
-                    app.update(cx, |m, cx| m.select(Some(id), cx));
+                    cx.defer(move |cx| app.update(cx, |m, cx| m.select(Some(id), cx)));
                 }
             }
         }

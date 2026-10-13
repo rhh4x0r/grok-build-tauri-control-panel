@@ -48,3 +48,8 @@ vt100 = "0.16"
 bomb_mobile = { path = "../bomb_mobile" }
 tempfile.workspace = true
 
+
+# Read the preview webview's URL without wry's `url()`, which panics while there's no page.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-foundation = { version = "0.3", features = ["NSString", "NSURL"] }
+objc2-web-kit = { version = "0.3", features = ["WKWebView"] }
