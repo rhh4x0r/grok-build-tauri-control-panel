@@ -1095,6 +1095,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "grok_events",
+ "serde",
  "serde_json",
  "uuid",
 ]
