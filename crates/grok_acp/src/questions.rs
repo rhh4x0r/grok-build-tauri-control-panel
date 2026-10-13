@@ -70,16 +70,20 @@ pub fn parse(params: &Value) -> Option<(String, Vec<QuestionInfo>)> {
         let other_choice = note_id.as_ref().and_then(|_| choices.iter().find(|c| c.value == OTHER_CHOICE)).map(|c| c.value.clone());
         // "None of the above" is what typing an answer means; it isn't a button of its own.
         let choices = choices.into_iter().filter(|c| Some(&c.value) != other_choice.as_ref()).collect();
-        // The question itself: the field's description, or the form's message for a lone question;
-        // the field's title is then just its short header.
-        let header = field.get("title").and_then(Value::as_str).map(str::to_string);
-        let text = field.get("description").and_then(Value::as_str).map(str::to_string)
-            .or_else(|| (asked.len() == 1 && header.as_deref() != Some(message.as_str())).then(|| message.clone()));
-        let (title, description) = match (text, header) {
-            (Some(text), header) => (text.clone(), header.filter(|h| *h != text)),
-            (None, Some(header)) => (header, None),
+        // The question and its short label: Codex titles a field with the question and describes it
+        // with a label, Claude the other way round; the longer one is the question. A lone Claude
+        // question carries its text in the form's message instead.
+        let field_title = field.get("title").and_then(Value::as_str).map(str::to_string);
+        let field_text = field.get("description").and_then(Value::as_str).map(str::to_string);
+        let (title, description) = match (field_title, field_text) {
+            (Some(a), Some(b)) if b.len() > a.len() => (b, Some(a)),
+            (Some(a), Some(b)) => (a, Some(b)),
+            // Only a short label ("server.env"), never a real question, gives way to the message.
+            (Some(label), None) if asked.len() == 1 && message.len() > label.len() && label.chars().count() <= 24 && !label.ends_with('?') => (message.clone(), Some(label)),
+            (Some(text), None) | (None, Some(text)) => (text, None),
             (None, None) => (id.to_string(), None),
         };
+        let description = description.filter(|d| *d != title);
         questions.push(QuestionInfo {
             id: id.to_string(),
             title,
@@ -126,6 +130,18 @@ pub fn content(questions: &[QuestionInfo], answers: &[(String, String)]) -> Valu
         }
     }
     Value::Object(out)
+}
+
+/// Answers to a question restored after a restart, as a message: the agent that asked can no
+/// longer take the form, so it reads them in the conversation. `None` when nothing was answered.
+pub fn answer_message(questions: &[QuestionInfo], answers: &[(String, String)]) -> Option<String> {
+    let lines: Vec<String> = questions.iter().filter_map(|q| {
+        let given: Vec<&str> = answers.iter().filter(|(id, _)| *id == q.id).map(|(_, a)| a.trim()).filter(|a| !a.is_empty())
+            .map(|a| q.choices.iter().find(|c| c.value == a).map(|c| c.label.as_str()).unwrap_or(a))
+            .collect();
+        (!given.is_empty()).then(|| format!("- {}: {}", q.title, given.join(", ")))
+    }).collect();
+    (!lines.is_empty()).then(|| format!("My answer to the question you asked before Bomb Code restarted:\n{}", lines.join("\n")))
 }
 
 #[cfg(test)]
@@ -206,6 +222,14 @@ mod tests {
         assert_eq!(qs.iter().map(|q| (q.title.as_str(), q.multi)).collect::<Vec<_>>(), [("Which platforms?", true), ("Which look?", false)]);
         assert_eq!(content(&qs, &[("question_0".into(), "Mac".into()), ("question_0".into(), "iPhone".into()), ("question_1".into(), "Dark".into())]),
             json!({"question_0": ["mac", "ios"], "question_1": "dark"}));
+    }
+
+    #[test]
+    fn a_restored_question_is_answered_in_words() {
+        let (_, qs) = parse(&codex_form()).unwrap();
+        assert_eq!(answer_message(&qs, &[]), None);
+        assert_eq!(answer_message(&qs, &[("storage".into(), "Postgres".into()), ("name".into(), "sessions".into())]).unwrap(),
+            "My answer to the question you asked before Bomb Code restarted:\n- Where should sessions live?: Postgres\n- What should the table be called?: sessions");
     }
 
     #[test]

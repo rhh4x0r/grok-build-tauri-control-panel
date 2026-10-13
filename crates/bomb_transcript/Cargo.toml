@@ -10,6 +10,7 @@ base64 = "0.22"
 chrono.workspace = true
 grok_events = { path = "../grok_events" }
 serde_json.workspace = true
+serde.workspace = true
 
 [dev-dependencies]
 uuid.workspace = true

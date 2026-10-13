@@ -1121,8 +1121,17 @@ impl TranscriptView {
                 div().flex().items_center().gap_2()
                     .child(Icon::from(Lucide::Info).size(px(14.)).text_color(ui.text_muted))
                     .child(div().text_size(small).font_weight(FontWeight::MEDIUM).text_color(if open { ui.accent } else { ui.text_muted })
-                        .child(if open { "Question" } else if card.resolution.as_deref() == Some("declined") { "Question · skipped" } else { "Question · answered" })),
-            );
+                        .child(match card.resolution.as_deref() {
+                            None => "Question",
+                            Some("declined") => "Question · skipped",
+                            Some("moved_on") => "Question · the conversation moved on",
+                            _ => "Question · answered",
+                        })),
+            )
+            .when(open && card.restored, |el| el.child(
+                div().text_size(small).text_color(ui.text_muted)
+                    .child("Bomb Code restarted while this was waiting. Your answer goes to the agent as a message."),
+            ));
         for (qi, q) in card.questions.iter().enumerate() {
             let picked: Vec<String> = picks.iter().filter(|(qid, _)| *qid == q.id).map(|(_, v)| v.clone()).collect();
             let answered = Some(card.answers.iter().flatten().filter(|(qid, _)| *qid == q.id).map(|(_, a)| a.clone()).collect::<Vec<_>>().join(", ")).filter(|a| !a.is_empty());
@@ -1211,7 +1220,9 @@ impl TranscriptView {
         let summary = approval_summary(&card.summary, true);
 
         let mut buttons: Vec<AnyElement> = Vec::new();
-        let plan_open = open && card.plan_approval;
+        // A plan restored after a restart can still be approved (the core asks in words).
+        let restored_plan = card.plan_approval && card.resolution.as_deref() == Some("restored");
+        let plan_open = (open || restored_plan) && card.plan_approval;
         if plan_open {
             buttons = plan_buttons(id, &sid, card);
         } else if open {
@@ -1379,7 +1390,11 @@ impl TranscriptView {
                     div()
                         .text_size(px(crate::theme::Type::SMALL))
                         .text_color(ui.text_muted)
-                        .child("Or reply below to keep working on the plan."),
+                        .child(if restored_plan {
+                            "Bomb Code restarted while this plan was waiting. Implementing sends “Implement the plan above.”; or reply below to keep working on it."
+                        } else {
+                            "Or reply below to keep working on the plan."
+                        }),
                 )
             });
         self.enter("approval", id, body)

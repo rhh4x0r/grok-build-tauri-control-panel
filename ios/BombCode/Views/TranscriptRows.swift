@@ -140,7 +140,8 @@ struct ApprovalCard: View {
 
     var body: some View {
         if case let .approval(requestId, tool, summary, explanation, options, planApproval, allowPattern, resolution) = entry.body {
-            if let resolution {
+            // A plan restored after a restart can still be approved; anything else restored is history.
+            if let resolution, !(planApproval && resolution == "restored") {
                 Label(planApproval ? planOutcome(resolution, options) : outcome(resolution, options), systemImage: resolution.hasPrefix("reject") || resolution == "cancelled" ? "xmark.circle" : "checkmark.circle")
                     .font(Theme.sans(13, .medium)).foregroundStyle(Theme.textFaint)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -235,6 +236,7 @@ struct ApprovalCard: View {
     private func planOutcome(_ resolution: String, _ options: [ApprovalChoice]) -> String {
         if resolution == "cancelled" { return "Plan cancelled" }
         if resolution == "restored" { return "Asked before this was reopened" }
+        if resolution == "moved_on" { return "The conversation moved on" }
         let kind = options.first { $0.id == resolution }?.kind ?? resolution
         return kind.hasPrefix("reject") ? "Kept planning" : "Plan approved"
     }
@@ -274,7 +276,7 @@ struct QuestionCard: View {
         if case let .question(requestId, _, questions, answers, resolution) = entry.body {
             if let resolution {
                 VStack(alignment: .leading, spacing: 4) {
-                    Label(resolution == "declined" ? "Question skipped" : "Question answered", systemImage: resolution == "declined" ? "xmark.circle" : "checkmark.circle")
+                    Label(resolution == "declined" ? "Question skipped" : resolution == "moved_on" ? "The conversation moved on" : "Question answered", systemImage: resolution == "answered" ? "checkmark.circle" : "xmark.circle")
                         .font(Theme.sans(13, .medium)).foregroundStyle(Theme.textFaint)
                     ForEach(questions, id: \.id) { q in
                         let given = answers.filter { $0.questionId == q.id }.map(\.answer)

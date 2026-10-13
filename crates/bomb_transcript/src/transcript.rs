@@ -114,8 +114,29 @@ pub struct QuestionCard {
     pub questions: Vec<grok_events::QuestionInfo>,
     /// What was answered (question id → answer), once answered.
     pub answers: Option<Vec<(String, String)>>,
-    /// "answered", "declined", or `None` while open.
+    /// "answered", "declined", "moved_on", or `None` while open.
     pub resolution: Option<String>,
+    /// Reloaded from history after a restart: the request died with the agent, so an answer goes
+    /// as a message (`restored_request_id`).
+    pub restored: bool,
+}
+
+/// What a saved question row holds, so it can come back as a card.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SavedQuestion {
+    pub message: String,
+    pub questions: Vec<grok_events::QuestionInfo>,
+}
+
+/// The id a card restored from history answers to: its saved row's number. Any device rebuilds
+/// the same id from the same history, and the core finds the row by it.
+pub fn restored_request_id(seq: u64) -> String {
+    format!("restored-{seq}")
+}
+
+/// The saved row a restored card's id points at.
+pub fn restored_seq(request_id: &str) -> Option<u64> {
+    request_id.strip_prefix("restored-")?.parse().ok()
 }
 
 impl QuestionCard {
@@ -207,6 +228,17 @@ impl Thread {
         Self::default()
     }
 
+    /// Restored questions and plans nobody answered before the conversation moved on: history now.
+    fn retire_restored_cards(&mut self) {
+        for e in &mut self.entries {
+            match &mut e.body {
+                Body::Question(q) if q.restored && q.is_open() => q.resolution = Some("moved_on".into()),
+                Body::Approval(a) if a.plan_approval && a.resolution.as_deref() == Some("restored") => a.resolution = Some("moved_on".into()),
+                _ => {}
+            }
+        }
+    }
+
     /// Unanswered question cards, oldest first.
     pub fn open_questions(&self) -> impl Iterator<Item = &QuestionCard> {
         self.entries.iter().filter_map(|e| match &e.body {
@@ -257,9 +289,16 @@ impl Thread {
                 .unwrap_or_else(|_| Utc::now());
             match row.role.as_str() {
                 "prompt" | "user" => {
+                    // The conversation went on past any question or plan still waiting above.
+                    self.retire_restored_cards();
                     let (text, images) = split_prompt_row(&row.body);
                     let e = self.push(Role::You, Body::Text(text), at);
                     e.images = images;
+                }
+                "question" => {
+                    let Ok(saved) = serde_json::from_str::<SavedQuestion>(&row.body) else { continue };
+                    let card = QuestionCard { request_id: restored_request_id(row.seq), message: saved.message, questions: saved.questions, answers: None, resolution: None, restored: true };
+                    self.push(Role::Approval, Body::Question(card), at);
                 }
                 "agent" => {
                     if starts_with_status_glyph(&row.body) || is_noise_agent_text(&row.body) {
@@ -305,7 +344,8 @@ impl Thread {
                     };
                     self.push(Role::Plan, Body::Plan(doc), at);
                 }
-                "approval" => {
+                "approval" | "plan_approval" => {
+                    let plan_approval = row.role == "plan_approval";
                     let (tool, summary) = match row.body.split_once(" — ") {
                         Some((t, s)) => (t.to_string(), s.to_string()),
                         None => ("tool".into(), row.body.clone()),
@@ -313,12 +353,13 @@ impl Thread {
                     self.push(
                         Role::Approval,
                         Body::Approval(ApprovalCard {
-                            request_id: String::new(),
+                            // A plan can still be approved after a restart (as a message); other requests can't.
+                            request_id: if plan_approval { restored_request_id(row.seq) } else { String::new() },
                             tool,
                             summary,
                             explanation: None,
                             options: Vec::new(),
-                            plan_approval: false,
+                            plan_approval,
                             allow_pattern: None,
                             resolution: Some("restored".into()),
                         }),
@@ -363,6 +404,14 @@ impl Thread {
                         || row.body.starts_with("→ prompt accepted")
                     {
                         self.protocol(&row.body);
+                    } else if row.body.starts_with("Answered: ") || row.body == "Question skipped" {
+                        let resolution = if row.body == "Question skipped" { "declined" } else { "answered" };
+                        let asked = self.entries.iter_mut().rev().find_map(|e| match &mut e.body {
+                            Body::Question(q) if q.is_open() => Some(q),
+                            _ => None,
+                        });
+                        if let Some(q) = asked { q.resolution = Some(resolution.into()); }
+                        self.push(Role::System, Body::Text(row.body.clone()), at);
                     } else if let Some(outcome) = saved_approval_outcome(&row.body) {
                         // The answer belongs to the request above it, not on a line of its own.
                         let asked = self.entries.iter_mut().rev().find_map(|e| match &mut e.body {
@@ -532,8 +581,14 @@ impl Thread {
                 ch
             }
             ControlEvent::QuestionAsked { request_id, message, questions, at, .. } => {
+                // Still live after all (a server thread outlives this app): the restored card becomes it.
+                let restored = self.entries.iter().rposition(|e| matches!(&e.body, Body::Question(q) if q.restored && q.is_open() && q.questions == *questions));
+                if let Some(i) = restored {
+                    if let Body::Question(q) = &mut self.entries[i].body { q.request_id = request_id.clone(); q.restored = false; }
+                    return vec![Change::Updated(i)];
+                }
                 let mut ch = self.close_streams();
-                let card = QuestionCard { request_id: request_id.clone(), message: message.clone(), questions: questions.clone(), answers: None, resolution: None };
+                let card = QuestionCard { request_id: request_id.clone(), message: message.clone(), questions: questions.clone(), answers: None, resolution: None, restored: false };
                 self.push(Role::Approval, Body::Question(card), *at);
                 ch.push(Change::Appended(self.entries.len() - 1));
                 self.presence.signal(Phase::Wait, Patch { note: Some(message.clone()), ..Default::default() }, now);
@@ -1277,7 +1332,7 @@ fn saved_approval_outcome(line: &str) -> Option<&str> {
 /// `reject_once`, `cancelled`). `None` for a saved request whose answer was never recorded.
 pub fn approval_outcome_label(resolution: &str, kind: Option<&str>) -> Option<&'static str> {
     let text = kind.unwrap_or(resolution).to_ascii_lowercase();
-    if resolution == "restored" { return None; }
+    if resolution == "restored" || resolution == "moved_on" { return None; }
     Some(if text.contains("cancel") { "Cancelled" }
         else if text.contains("reject") || text.contains("deny") { "Denied" }
         else if text.contains("always") { "Always allowed" }
@@ -1331,6 +1386,38 @@ mod tests {
         // Its next real event carries on from there rather than restarting the turn.
         t.apply(&ControlEvent::AgentMessage { session_id: sid(), text: "still here".into(), at: Utc::now() }, now);
         assert!(t.presence.turn_active());
+        assert_eq!(t.entries.len(), 1);
+    }
+
+    #[test]
+    fn waiting_questions_and_plans_come_back_answerable_until_the_conversation_moves_on() {
+        use grok_events::{QuestionInfo, TranscriptEntry};
+        let row = |role: &str, body: &str, seq| TranscriptEntry { role: role.into(), body: body.into(), at: "2026-10-13T04:00:00Z".into(), seq };
+        let q = QuestionInfo { id: "q".into(), title: "Which store?".into(), description: None, choices: vec![], note_id: None, other_choice: None, secret: false, required: true, multi: false };
+        let saved = serde_json::to_string(&SavedQuestion { message: "?".into(), questions: vec![q.clone()] }).unwrap();
+        let open_cards = |t: &Thread| t.entries.iter().filter_map(|e| match &e.body {
+            Body::Question(c) if c.is_open() => Some(c.request_id.clone()),
+            Body::Approval(a) if a.plan_approval && a.resolution.as_deref() == Some("restored") => Some(a.request_id.clone()),
+            _ => None,
+        }).collect::<Vec<_>>();
+
+        // Still waiting when the app quit: both come back, answerable by their saved rows' numbers.
+        let mut t = Thread::new();
+        t.hydrate(&[row("prompt", "plan it", 1), row("plan_approval", "Approve Plan — approve the plan above?", 2), row("question", &saved, 3)]);
+        assert_eq!(open_cards(&t), ["restored-2", "restored-3"]);
+        assert!(matches!(&t.entries[2].body, Body::Question(c) if c.restored && c.questions == vec![q.clone()]));
+
+        // Answered before the restart, or followed by another message: history, not buttons.
+        let mut t = Thread::new();
+        t.hydrate(&[row("question", &saved, 1), row("system", "Answered: Postgres", 2), row("plan_approval", "Approve Plan — ?", 3), row("prompt", "never mind", 4)]);
+        assert!(open_cards(&t).is_empty());
+        assert!(matches!(&t.entries[0].body, Body::Question(c) if c.resolution.as_deref() == Some("answered")));
+
+        // A server thread's question that is still live: the restored card turns back into it.
+        let mut t = Thread::new();
+        t.hydrate(&[row("question", &saved, 1)]);
+        t.apply(&ControlEvent::QuestionAsked { session_id: sid(), request_id: "7".into(), message: "?".into(), questions: vec![q], at: chrono::Utc::now() }, Instant::now());
+        assert_eq!(open_cards(&t), ["7"]);
         assert_eq!(t.entries.len(), 1);
     }
 

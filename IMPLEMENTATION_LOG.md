@@ -1206,3 +1206,19 @@ All additive; `PROTOCOL_VERSION` stays 1 and a Mac that never calls the new meth
   - Multi-select questions (`array` of `anyOf` items) were declined outright.
   - Now: the "Other" box is the question's note (typed text goes there; with a pick it rides along as a note), multi-select is supported (Mac and phone), and only questions the form marks required must be answered.
 - Checked: workspace clippy and tests (new: Claude lone, several and multi-select forms; optional fields), iOS bindings and simulator build. `bomb_server` `a_phone_streams_only_the_thread_it_has_open…` failed once in a full parallel run and passed 3/3 alone (timing). Not checked: a live Claude question on the new build.
+
+## 2026-10-13 — Waiting questions and plans survive a restart
+
+- A restart kills the local agent and the request it was waiting on. The card now comes back answerable, and the answer goes to the agent as a message.
+- Saved rows: a question is saved whole (`question` row, `SavedQuestion` JSON) instead of an "Asked: …" line; a plan approval as `plan_approval` (other approvals stay `approval`). `kind_to_role` keeps both. Older threads only have the plain line, so they don't come back.
+- Restore: each card is identified by `restored-<row seq>`, so every device rebuilds the same id and the core can find the row.
+  - A question with no "Answered"/"Question skipped" after it comes back open (`restored: true`).
+  - A plan approval with no outcome after it comes back actionable.
+  - Any later message of yours retires both (`moved_on`).
+  - A live question that turns up again (a server thread that outlived the app) takes over its restored card instead of adding one.
+- Core:
+  - `answer_question` on a restored id records the answer ("Answered: …") and sends it as a message (`questions::answer_message`, using choice labels).
+  - `answer_plan` on a restored id records the choice; Implement sets the mode and sends "Implement the plan above."; Keep planning sends any feedback.
+- Question parsing: the longer of a field's title and description is the question, the shorter its label (Codex puts the question in the title, Claude in the description). A lone question's form message replaces only a short label-like title.
+- Mac and phone: restored cards say Bomb Code restarted and that the answer goes as a message; retired ones read "The conversation moved on".
+- Checked: workspace clippy and tests (new: restore and retire, the live question taking over, answers in words); iOS bindings and simulator build. Not checked: a real restart with a question waiting.

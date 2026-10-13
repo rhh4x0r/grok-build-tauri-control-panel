@@ -1672,6 +1672,9 @@ pub async fn respond_approval(
 pub async fn answer_plan(state: &AppState, id: String, request_id: String, choice: String, feedback: Option<String>) -> Result<(), String> {
     use crate::plan_review::{implement, keep_planning, Implement, IMPLEMENT_PROMPT};
     let sid = state.foundry.approval_session(Uuid::parse_str(&id).map_err(err)?);
+    if crate::transcript::restored_seq(&request_id).is_some() {
+        return answer_restored_plan(state, sid, request_id, choice, feedback).await;
+    }
     let options = state.registry.pending_options(sid, &request_id).await.map_err(err)?
         .ok_or_else(|| format!("no pending permission request: {request_id}"))?;
     let (follow_up, mode) = match choice.as_str() {
@@ -1713,9 +1716,45 @@ pub async fn answer_plan(state: &AppState, id: String, request_id: String, choic
     Ok(())
 }
 
+/// A plan restored after a restart: its approval request died with the agent, so implementing it
+/// switches the mode and asks in words; keeping it just closes the card (feedback goes as a message).
+async fn answer_restored_plan(state: &AppState, sid: Uuid, request_id: String, choice: String, feedback: Option<String>) -> Result<(), String> {
+    let (option, follow_up, mode) = match choice.as_str() {
+        "keep" => ("reject", feedback.filter(|f| !f.trim().is_empty()), None),
+        "auto" | "ask" => ("implement", Some("Implement the plan above.".to_string()), Some(choice.clone())),
+        other => return Err(format!("unknown plan answer: {other}")),
+    };
+    state.event_bus.emit(grok_events::ControlEvent::ApprovalResolved { session_id: sid, request_id, option_id: Some(option.into()), cancelled: false, at: Utc::now() });
+    if let Some(mode) = &mode {
+        set_approval_mode(state, sid.to_string(), mode.clone()).await?;
+        state.event_bus.emit(grok_events::ControlEvent::Raw {
+            session_id: Some(sid),
+            payload: serde_json::json!({ "channel": "thread", "kind": "approval_mode", "mode": mode }),
+        });
+    }
+    if let Some(text) = follow_up {
+        state.event_bus.emit(grok_events::ControlEvent::UserMessage { session_id: sid, text: text.clone(), origin: "plan".into(), at: Utc::now() });
+        send_prompt(state, sid.to_string(), text, None, None, mode.or_else(|| Some("plan".into())), None, None, None, None, None).await?;
+    }
+    Ok(())
+}
+
 /// Answer an agent's question (question id → a choice or typed text), or decline it (`None`).
 pub async fn answer_question(state: &AppState, id: String, request_id: String, answers: Option<Vec<(String, String)>>) -> Result<(), String> {
     let sid = state.foundry.approval_session(Uuid::parse_str(&id).map_err(err)?);
+    // Restored after a restart: the asking agent is gone, so the answers go as a message.
+    if let Some(seq) = crate::transcript::restored_seq(&request_id) {
+        let row = state.persistence.transcript_entries(sid).map_err(err)?.into_iter().find(|e| e.seq == seq && e.role == "question")
+            .ok_or("That question is no longer in this thread")?;
+        let saved: crate::transcript::SavedQuestion = serde_json::from_str(&row.body).map_err(err)?;
+        let text = answers.as_deref().and_then(|a| grok_acp::questions::answer_message(&saved.questions, a));
+        state.event_bus.emit(grok_events::ControlEvent::QuestionAnswered { session_id: sid, request_id, answers, at: Utc::now() });
+        if let Some(text) = text {
+            state.event_bus.emit(grok_events::ControlEvent::UserMessage { session_id: sid, text: text.clone(), origin: "question".into(), at: Utc::now() });
+            send_prompt(state, sid.to_string(), text, None, None, None, None, None, None, None, None).await?;
+        }
+        return Ok(());
+    }
     state.registry.respond_question(sid, &request_id, answers).await.map_err(err)
 }
 
@@ -2839,6 +2878,7 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
             tool,
             summary,
             auto_approved,
+            plan_approval,
             at,
             ..
         } => {
@@ -2854,15 +2894,17 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
                 let _ = db.update_session_status(*session_id, "waitingapproval");
                 // Durable as an approval row so it renders as a card (inert
                 // after restart — the live request died with the process).
-                db.append_message(*session_id, "approval", format!("{tool} — {summary}"), *at)
+                // A plan is saved as one, so it can still be approved after a restart.
+                db.append_message(*session_id, if *plan_approval { "plan_approval" } else { "approval" }, format!("{tool} — {summary}"), *at)
                     .map(|_| ())
             }
         }
         // History keeps what was asked and answered as lines; the live card died with the request.
-        QuestionAsked { session_id, questions, at, .. } => {
+        // The whole question, so it comes back as a card after a restart (answered by a message).
+        QuestionAsked { session_id, message, questions, at, .. } => {
             let _ = db.update_session_status(*session_id, "waitingapproval");
-            let asked: Vec<&str> = questions.iter().map(|q| q.title.as_str()).collect();
-            db.append_message(*session_id, "system", format!("Asked: {}", asked.join(" · ")), *at).map(|_| ())
+            let saved = crate::transcript::SavedQuestion { message: message.clone(), questions: questions.clone() };
+            db.append_message(*session_id, "question", serde_json::to_string(&saved).unwrap_or_default(), *at).map(|_| ())
         }
         QuestionAnswered { session_id, answers, at, .. } => {
             let _ = db.update_session_status(*session_id, "running");

@@ -644,6 +644,9 @@ fn kind_to_role(kind: &str) -> String {
         "image" => "image".into(),
         // Permission requests render as (inert, post-restart) approval cards.
         "approval" => "approval".into(),
+        // A plan waiting for approval, and an agent's question: they come back answerable.
+        "plan_approval" => "plan_approval".into(),
+        "question" => "question".into(),
         _ => "system".into(),
     }
 }
