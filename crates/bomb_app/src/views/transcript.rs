@@ -132,6 +132,10 @@ enum Row {
         id: u64,
         card: QuestionCard,
     },
+    Handoff {
+        id: u64,
+        card: bomb_core::transcript::HandoffCard,
+    },
     /// Several answered requests in a row, folded into one line.
     AnsweredApprovals {
         first_id: u64,
@@ -324,6 +328,7 @@ impl TranscriptView {
                         }
                     }
                     (_, Body::Question(card)) => rows.push(Row::Question { id: e.id, card: card.clone() }),
+                    (_, Body::Handoff(card)) => rows.push(Row::Handoff { id: e.id, card: card.clone() }),
                     (role, Body::Text(s)) => rows.push(Row::Line {
                         id: e.id,
                         role: *role,
@@ -359,6 +364,7 @@ impl TranscriptView {
             Row::Plan { id, state, doc } => self.plan_row(*id, state, doc, ui, cx),
             Row::Approval { id, card } => self.approval_row(*id, card, ui, cx),
             Row::Question { id, card } => self.question_row(*id, card, ui, cx),
+            Row::Handoff { id, card } => self.handoff_row(*id, card, ui),
             Row::AnsweredApprovals { first_id, cards } => self.answered_group_row(*first_id, cards, ui, cx),
             Row::Line { id, role, text } => self.line_row(*id, *role, text, ui),
         };
@@ -393,6 +399,7 @@ impl TranscriptView {
     fn user_row(&self, id: u64, text: &str, images: &[Arc<Image>], ui: &Ui) -> AnyElement {
         // The agent is told where attached files are; the person just sees that they are attached.
         let (text, files) = split_attached_files(text);
+        let text = bomb_core::transcript::without_mention_note(&text).to_string();
         let hover = ui.hover;
         let bubble = div()
             .w_full()
@@ -661,6 +668,8 @@ impl TranscriptView {
                 let speaker = read_aloud_button(&self.thread, id, raw, ui, cx);
                 let text_for_copy: SharedString = bomb_foundry::presentation::stage_prose(raw).to_string().into();
                 let text_for_mem = text_for_copy.clone();
+                let text_to_send = text_for_copy.to_string();
+                let from = uuid::Uuid::parse_str(&self.thread.read(cx).id()).ok();
                 let action = |id: &'static str, label: &'static str| {
                     div()
                         .id(id)
@@ -691,6 +700,13 @@ impl TranscriptView {
                                 app.update(cx, |m, cx| m.remember(t, cx));
                             }),
                         )
+                        // This reply, word for word, to another thread, which starts working on it.
+                        .when_some(from, |el, from| el.child(
+                            action("send-reply", "Send to thread…").on_click(move |_, window, cx| {
+                                let app = cx.global::<AppModelHandle>().0.clone();
+                                super::thread_picker::open_send_to(app, from, text_to_send.clone(), window, cx);
+                            }),
+                        ))
                         .children(speaker),
                 )
             });
@@ -1108,6 +1124,43 @@ impl TranscriptView {
             )
             .child(div().text_sm().child(TextView::new(state).selectable(true).on_link_click(|href, click, _, cx| open_link_with(href, std::path::Path::new(""), click.modifiers().platform, cx))));
         self.enter("plan", id, card)
+    }
+
+    /// Something passed to or from another thread: a line that opens that thread.
+    fn handoff_row(&self, id: u64, card: &bomb_core::transcript::HandoffCard, ui: &Ui) -> AnyElement {
+        let thread = uuid::Uuid::parse_str(&card.thread).ok();
+        let small = px(crate::theme::Type::SMALL);
+        let row = div()
+            .id(("handoff", id))
+            .flex()
+            .items_start()
+            .gap_2()
+            .my_1()
+            .px_3()
+            .py_2()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(ui.border)
+            .bg(ui.ink(0.02))
+            .cursor_pointer()
+            .hover(|s| s.bg(ui.hover))
+            .on_click(move |_, _, cx| {
+                let Some(thread) = thread else { return };
+                if let Some(app) = cx.try_global::<AppModelHandle>().map(|h| h.0.clone()) {
+                    app.update(cx, |m, cx| {
+                        if m.threads.contains_key(&thread) { m.select(Some(thread), cx) } else { m.toast(crate::models::app::ToastKind::Info, "That thread isn't in your list here."); cx.notify(); }
+                    });
+                }
+            })
+            .child(Icon::from(if card.outgoing { Lucide::ArrowRight } else { Lucide::ArrowLeft }).size(px(14.)).mt(px(2.)).text_color(ui.accent))
+            .child(
+                div().flex_1().min_w_0().flex().flex_col().gap_0p5()
+                    .child(div().text_size(small).text_color(ui.text).child(format!("{} “{}”", if card.outgoing { "Sent to" } else { "From" }, card.title)))
+                    .when(!card.preview.is_empty(), |el| el.child(
+                        div().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_muted).line_clamp(2).child(card.preview.clone()),
+                    )),
+            );
+        self.enter("handoff", id, div().child(row))
     }
 
     /// The agent asks something: click a choice per question, or type an answer below.

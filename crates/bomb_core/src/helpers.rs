@@ -44,6 +44,8 @@ pub struct Helpers {
     tokens_used: Mutex<HashMap<Uuid, u64>>,
     /// The shared state, for background work (set once helpers are served).
     shared: Mutex<Option<std::sync::Weak<AppState>>>,
+    /// Threads each thread's person @-mentioned: where its agent may send handoffs.
+    pub mentions: crate::handoff::Mentions,
 }
 
 impl Helpers {
@@ -63,7 +65,7 @@ impl Helpers {
         self.tokens.lock().unwrap_or_else(|e| e.into_inner()).get(token).copied()
     }
 
-    fn shared(&self) -> Option<Arc<AppState>> {
+    pub fn shared(&self) -> Option<Arc<AppState>> {
         self.shared.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|w| w.upgrade())
     }
 
@@ -89,10 +91,11 @@ pub fn mcp_server(state: &AppState, thread: Uuid) -> Option<Value> {
     }))
 }
 
-/// The `bomb` tools run without an approval card: they're Bomb Code's own, and a helper never
-/// gets more freedom than its thread. Only these six names; deny rules still win.
+/// The `bomb` tools run without an approval card: they're Bomb Code's own, a helper never gets
+/// more freedom than its thread, and a handoff goes only to threads the person mentioned. Only
+/// these names; deny rules still win.
 pub fn allow_rules() -> Vec<String> {
-    ["list_agents", "start_helper", "wait_helpers", "helper_status", "message_helper", "stop_helper"]
+    ["list_agents", "start_helper", "wait_helpers", "helper_status", "message_helper", "stop_helper", "find_threads", "read_thread", "send_to_thread"]
         .iter()
         .map(|tool| format!("*bomb*{tool}*"))
         .collect()
@@ -166,6 +169,17 @@ pub async fn call(state: &AppState, parent: Uuid, method: &str, params: &Value) 
             let helper = owned(state, parent, &text("id"))?;
             services::cancel_session(state, helper.to_string()).await?;
             Ok(json!({ "id": helper, "status": "stopped" }))
+        }
+        // Handoffs between threads (crate::handoff).
+        "find_threads" => crate::handoff::find_threads(state, &text("query"), Some(parent)).await,
+        "read_thread" => {
+            let id = Uuid::parse_str(&text("thread")).map_err(|_| "Give the thread's id (from the mention, or find_threads).".to_string())?;
+            crate::handoff::read_thread(state, id, params["limit"].as_u64().unwrap_or(20) as usize)
+        }
+        "send_to_thread" => {
+            let id = Uuid::parse_str(&text("thread")).map_err(|_| "Give the thread's id (from the mention, or find_threads).".to_string())?;
+            let shared = state.helpers.shared().ok_or("Handoffs aren't available right now.")?;
+            crate::handoff::send_from_agent(&shared, parent, id, text("message"))
         }
         other => Err(format!("No helper tool called {other}.")),
     }

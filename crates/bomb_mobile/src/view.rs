@@ -138,6 +138,7 @@ pub struct EntryView {
 impl From<&Entry> for EntryView {
     fn from(entry: &Entry) -> Self {
         let body = match &entry.body {
+            Body::Text(text) if entry.role == Role::You => EntryBody::Text { text: bomb_transcript::transcript::without_mention_note(text).to_string() },
             Body::Text(text) => EntryBody::Text { text: text.clone() },
             Body::Tool(tool) => EntryBody::Tool { tool_id: tool.tool_id.clone(), name: tool.name.clone(), status: tool.status.clone(), args: tool.args.clone(), result: tool.result.clone() },
             Body::Plan(plan) => EntryBody::Plan { title: plan.title.clone(), markdown: plan.markdown.clone() },
@@ -150,6 +151,10 @@ impl From<&Entry> for EntryView {
                 plan_approval: card.plan_approval,
                 allow_pattern: card.allow_pattern.clone(),
                 resolution: card.resolution.clone(),
+            },
+            // The phone shows a handoff as a line: where it went or came from, and how it began.
+            Body::Handoff(card) => EntryBody::Text {
+                text: format!("{} “{}”: {}", if card.outgoing { "Sent to" } else { "From" }, card.title, card.preview),
             },
             Body::Question(card) => EntryBody::Question {
                 request_id: card.request_id.clone(),

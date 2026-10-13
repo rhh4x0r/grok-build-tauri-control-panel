@@ -790,6 +790,8 @@ pub async fn send_prompt(
     effort: Option<String>,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
+    // Threads the person @-mentions here are the ones this thread's agent may hand off to.
+    state.helpers.mentions.note(id, &prompt);
     if state.foundry.for_thread(&id.to_string()).is_some_and(|r| !matches!(r.status, bomb_foundry::RunStatus::Completed | bomb_foundry::RunStatus::Stopped)) {
         return Err("This thread has a Foundry run. Stop the run before sending a separate prompt.".into());
     }
@@ -2639,7 +2641,7 @@ pub async fn wake_thread(state: &AppState, id: String) -> Result<(), String> {
     resume_saved_session(state, id, None, None, mode, None, None).await.map(|_| ())
 }
 
-fn extract_meta_string(json: &str, key: &str) -> Option<String> {
+pub(crate) fn extract_meta_string(json: &str, key: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(json)
         .ok()
         .and_then(|v| {
@@ -2938,6 +2940,11 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
         }
         // The line before a turn the agent started itself; saved, so a reopened thread keeps
         // that turn's reply apart from the last one's.
+        // A handoff's card on either side, so it's there when the thread is reopened.
+        Raw { session_id: Some(session_id), payload } if payload["channel"] == "handoff" => match crate::transcript::HandoffCard::from_event(payload) {
+            Some(card) => db.append_message(*session_id, "handoff", serde_json::to_string(&card).unwrap_or_default(), Utc::now()).map(|_| ()),
+            None => Ok(()),
+        },
         Raw { session_id: Some(session_id), payload } if payload["channel"] == "thread" && payload["kind"] == "divider" => {
             let Some(line) = payload["line"].as_str() else { return Ok(()) };
             db.append_message(*session_id, "system", line, Utc::now()).map(|_| ())

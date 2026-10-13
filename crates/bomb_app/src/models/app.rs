@@ -1684,6 +1684,13 @@ impl AppModel {
                     // The composer observes AppModel; refresh its advertised command menu.
                     cx.notify();
                 }
+                // A thread's agent handed something to a thread in another core: pass it along.
+                ControlEvent::Raw { payload, .. }
+                    if payload.get("channel").and_then(|c| c.as_str()) == Some("handoff") && payload.get("kind").and_then(|k| k.as_str()) == Some("relay") =>
+                {
+                    let payload = payload.clone();
+                    self.relay_handoff(&payload, cx);
+                }
                 ControlEvent::Raw { payload, session_id: Some(id) }
                     if payload.get("channel").and_then(|c| c.as_str()) == Some("thread") =>
                 {
@@ -2265,6 +2272,35 @@ impl AppModel {
             if let Err(e) = res {
                 let _ = this.update(cx, |m, cx| m.fail(format!("Couldn't answer the plan: {e}"), cx));
             }
+        });
+    }
+
+    /// "Send to thread…": post `text` from one thread into another, which starts working on it.
+    pub fn forward_to_thread(&mut self, from: Uuid, to: Uuid, to_title: String, text: String, cx: &mut Context<Self>) {
+        let core = self.core_of_thread(from, cx);
+        let this = cx.entity().downgrade();
+        let title = to_title.clone();
+        spawn_service(cx, async move { core.handoff_send(from.to_string(), to.to_string(), to_title, text).await }, move |res, cx| {
+            let _ = this.update(cx, |m, cx| match res {
+                Ok(()) => { m.toast(ToastKind::Success, format!("Sent to “{title}”. It starts once that thread is free.")); cx.notify(); }
+                Err(e) => m.fail(format!("Couldn't send it: {e}"), cx),
+            });
+        });
+    }
+
+    /// A handoff for a thread in another core (the Mac's, or a server's): pass it to that core.
+    fn relay_handoff(&mut self, payload: &serde_json::Value, cx: &mut Context<Self>) {
+        let text = |k: &str| payload[k].as_str().unwrap_or_default().to_string();
+        let Ok(to) = Uuid::parse_str(&text("to")) else { return };
+        if !self.threads.contains_key(&to) {
+            self.toast(ToastKind::Warning, "A handoff was for a thread this Mac doesn't have.");
+            return;
+        }
+        let core = self.core_of_thread(to, cx);
+        let (from, from_title, message) = (text("from"), text("from_title"), text("message"));
+        let this = cx.entity().downgrade();
+        spawn_service(cx, async move { core.handoff_deliver(to.to_string(), from, from_title, message).await }, move |res, cx| {
+            if let Err(e) = res { let _ = this.update(cx, |m, cx| m.fail(format!("Couldn't pass on a handoff: {e}"), cx)); }
         });
     }
 

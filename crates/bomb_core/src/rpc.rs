@@ -102,6 +102,21 @@ pub async fn dispatch(state: &AppState, origin: &str, method: &str, p: Value) ->
                 Err(e) => Err(e),
             }
         }
+        // Handoffs: the person forwards a reply ("Send to thread…"), or the app relays one into a
+        // thread this core holds.
+        "handoff_send" => {
+            let shared = state.helpers.shared().ok_or("Handoffs aren't available right now.")?;
+            let (from, to): (String, String) = (arg(&p, "from")?, arg(&p, "to")?);
+            let (from, to) = (Uuid::parse_str(&from).map_err(|e| e.to_string())?, Uuid::parse_str(&to).map_err(|e| e.to_string())?);
+            out(crate::handoff::send(&shared, from, to, arg(&p, "to_title")?, arg(&p, "message")?)?)
+        }
+        "handoff_deliver" => {
+            let shared = state.helpers.shared().ok_or("Handoffs aren't available right now.")?;
+            let (to, from): (String, String) = (arg(&p, "to")?, arg(&p, "from")?);
+            let (to, from) = (Uuid::parse_str(&to).map_err(|e| e.to_string())?, Uuid::parse_str(&from).map_err(|e| e.to_string())?);
+            crate::handoff::deliver(shared, to, from, arg(&p, "from_title")?, arg(&p, "message")?);
+            Ok(Value::Null)
+        }
         "answer_question" => {
             let (id, request_id): (String, String) = (arg(&p, "id")?, arg(&p, "request_id")?);
             match services::answer_question(state, id, request_id, arg(&p, "answers")?).await {

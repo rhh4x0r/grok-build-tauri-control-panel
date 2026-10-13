@@ -33,6 +33,15 @@ impl Core {
         matches!(self, Self::Remote(_))
     }
 
+    /// The same core: this Mac's, or the same server's.
+    pub fn same_as(&self, other: &Core) -> bool {
+        match (self, other) {
+            (Self::Local(a), Self::Local(b)) => Arc::ptr_eq(a, b),
+            (Self::Remote(a), Self::Remote(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+
     fn adopt_thread(remote: &RemoteCore, mut t: ThreadDto) -> ThreadDto {
         t.project_root = Some(remote.root(t.project_root.as_deref().unwrap_or(&t.cwd)));
         t.cwd = remote.root(&t.cwd);
@@ -150,6 +159,24 @@ impl Core {
         match self {
             Self::Local(state) => services::answer_plan(state, id, request_id, choice, feedback).await,
             Self::Remote(r) => r.request("answer_plan", json!({ "id": id, "request_id": request_id, "choice": choice, "feedback": feedback })).await.map(|_| ()),
+        }
+    }
+
+    /// Send `message` from one thread to another; the receiving thread starts on it.
+    pub async fn handoff_send(&self, from: String, to: String, to_title: String, message: String) -> Result<(), String> {
+        let params = json!({ "from": from, "to": to, "to_title": to_title, "message": message });
+        match self {
+            Self::Local(state) => bomb_core::rpc::dispatch(state, "mac", "handoff_send", params).await.map(|_| ()),
+            Self::Remote(r) => r.request("handoff_send", params).await.map(|_| ()),
+        }
+    }
+
+    /// Post a handoff into a thread this core holds (relayed from another machine's thread).
+    pub async fn handoff_deliver(&self, to: String, from: String, from_title: String, message: String) -> Result<(), String> {
+        let params = json!({ "to": to, "from": from, "from_title": from_title, "message": message });
+        match self {
+            Self::Local(state) => bomb_core::rpc::dispatch(state, "mac", "handoff_deliver", params).await.map(|_| ()),
+            Self::Remote(r) => r.request("handoff_deliver", params).await.map(|_| ()),
         }
     }
 

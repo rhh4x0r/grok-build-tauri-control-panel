@@ -1235,3 +1235,16 @@ All additive; `PROTOCOL_VERSION` stays 1 and a Mac that never calls the new meth
   - "starting" counts as in progress for the resume.
   - A reducer-level "Running starts presence" net was tried and dropped: once a finished turn has settled, a late Running ack can't be told from a new turn.
 - Checked: clippy, transcript tests. Not checked on screen (app not restarted at Max's request).
+
+## 2026-10-13 — Handoffs between threads (@ mentions, Send to thread…)
+
+- Composer: typing `@` opens a picker of every thread in any project, on this Mac or a server (`thread_picker::choices`, searchable by title, project and server, most recent first). Picking one writes `@Title`.
+- On send, a note goes with the message (`MENTION_NOTE`, hidden in the bubble on the Mac and the phone). It gives each mentioned thread's id. For a thread in another core, which the agent's tools can't reach, it also carries that thread's latest messages from what this Mac has loaded.
+- The `bomb` tools gain `find_threads`, `read_thread` (recent conversation, oldest first) and `send_to_thread`, all run without a card. The agent reads the person's own words and decides what to read or send ("take what happened in @X", "send this algo to @Y").
+- Guardrail: `send_to_thread` only reaches threads the person @-mentioned in that thread (`handoff::Mentions`, recorded from the note in `send_prompt`). Otherwise the agent is told to ask for a mention. This replaces the approval card first proposed.
+- Delivery (`handoff::deliver`):
+  - It waits for the receiving thread's turn to end, then posts "From the thread “…”" as a prompt in that thread's own mode, so it starts right away. Both sides get a card (`Body::Handoff`, saved as a `handoff` row) that opens the other thread.
+  - A thread held by another core is relayed: the core emits `relay`, and the app passes it to the owning core (`handoff_deliver` RPC). Agent → Mac or server works while the Mac is connected.
+- "Send to thread…" on a reply's footer: a searchable dialog (`thread_picker::open_send_to`) forwards that reply word for word (`handoff_send`).
+- Phone: handoff cards show as a line; the mention note is hidden. No @ picker or Send to thread on the phone yet.
+- Checked: workspace clippy and tests (new: the mention guardrail; a real handoff between two threads starts the receiver and leaves both cards), iOS bindings and simulator build. Not checked on screen.

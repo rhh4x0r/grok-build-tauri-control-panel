@@ -104,6 +104,31 @@ pub enum Body {
     Plan(PlanDoc),
     Approval(ApprovalCard),
     Question(QuestionCard),
+    Handoff(HandoffCard),
+}
+
+/// Something passed between threads: "Sent to …" in the sender, "From …" in the receiver.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct HandoffCard {
+    /// Sent from this thread (else received here).
+    pub outgoing: bool,
+    /// The other thread.
+    pub thread: String,
+    pub title: String,
+    pub preview: String,
+}
+
+impl HandoffCard {
+    /// The card a `handoff` event (`sent` / `received`) describes.
+    pub fn from_event(payload: &Value) -> Option<Self> {
+        let outgoing = match payload.get("kind")?.as_str()? { "sent" => true, "received" => false, _ => return None };
+        Some(Self {
+            outgoing,
+            thread: payload.get("thread")?.as_str()?.to_string(),
+            title: payload.get("title").and_then(Value::as_str).unwrap_or("another thread").to_string(),
+            preview: payload.get("preview").and_then(Value::as_str).unwrap_or_default().to_string(),
+        })
+    }
 }
 
 /// The agent asking the person something mid-turn (Codex's clarifying questions).
@@ -119,6 +144,18 @@ pub struct QuestionCard {
     /// Reloaded from history after a restart: the request died with the agent, so an answer goes
     /// as a message (`restored_request_id`).
     pub restored: bool,
+}
+
+/// Heads the note a message carries about the threads it @-mentions (ids for the agent's tools,
+/// and for threads on another machine a little of their conversation). Bubbles leave it out.
+pub const MENTION_NOTE: &str = "[Threads mentioned — Bomb Code]";
+
+/// A message as its writer typed it: without its mention note.
+pub fn without_mention_note(text: &str) -> &str {
+    match text.find(&format!("\n\n{MENTION_NOTE}")) {
+        Some(i) => &text[..i],
+        None => text,
+    }
 }
 
 /// What a saved question row holds, so it can come back as a card.
@@ -294,6 +331,11 @@ impl Thread {
                     let (text, images) = split_prompt_row(&row.body);
                     let e = self.push(Role::You, Body::Text(text), at);
                     e.images = images;
+                }
+                "handoff" => {
+                    if let Ok(card) = serde_json::from_str::<HandoffCard>(&row.body) {
+                        self.push(Role::System, Body::Handoff(card), at);
+                    }
                 }
                 "question" => {
                     let Ok(saved) = serde_json::from_str::<SavedQuestion>(&row.body) else { continue };
@@ -925,6 +967,15 @@ impl Thread {
                     .map(|line| self.note_system(&line))
                     .unwrap_or_default()
             }
+            "handoff" => match HandoffCard::from_event(payload) {
+                Some(card) => {
+                    let mut ch = self.close_streams();
+                    self.push(Role::System, Body::Handoff(card), Utc::now());
+                    ch.push(Change::Appended(self.entries.len() - 1));
+                    ch
+                }
+                None => Vec::new(),
+            },
             "thread" if str_at(payload, "kind").as_deref() == Some("label") => {
                 match str_at(payload, "label") {
                     Some(l) if !l.is_empty() => {

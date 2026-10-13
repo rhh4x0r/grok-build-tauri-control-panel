@@ -100,6 +100,11 @@ pub struct ComposerView {
     model_menu_open: bool,
     slash_index: usize,
     slash_dismissed: bool,
+    /// The @ thread picker: highlighted row, closed by Escape, and the threads picked so far
+    /// (title as written after @, and the thread).
+    mention_index: usize,
+    mention_dismissed: bool,
+    mentions: Vec<(String, uuid::Uuid)>,
     model_search: Entity<InputState>,
     provider_filter: Option<String>,
     speed: Entity<super::speed::SpeedSelector>,
@@ -162,6 +167,8 @@ impl ComposerView {
                 InputEvent::Change => {
                     this.slash_index = 0;
                     this.slash_dismissed = false;
+                    this.mention_index = 0;
+                    this.mention_dismissed = false;
                     cx.notify();
                 }
                 InputEvent::PressEnter { shift: false, .. } => this.send(window, cx),
@@ -198,6 +205,9 @@ impl ComposerView {
             model_menu_open: false,
             slash_index: 0,
             slash_dismissed: false,
+            mention_index: 0,
+            mention_dismissed: false,
+            mentions: Vec::new(),
             model_search: cx.new(|cx| InputState::new(window, cx).placeholder("Search models…")),
             provider_filter: None,
             sent_draft: None,
@@ -502,6 +512,111 @@ impl ComposerView {
         )
     }
 
+    /// Threads for the @ being typed, if one is.
+    fn mention_matches(&self, cx: &App) -> Vec<super::thread_picker::ThreadChoice> {
+        if self.mention_dismissed {
+            return Vec::new();
+        }
+        let text = self.input.read(cx).value().to_string();
+        let Some((_, query)) = mention_query(&text, &self.mentions) else { return Vec::new() };
+        let m = self.model.read(cx);
+        super::thread_picker::matching(super::thread_picker::choices(m, m.selected, cx), query, 8)
+    }
+
+    /// Put the picked thread's name after the @, and remember which thread it means.
+    fn choose_mention(&mut self, pick: super::thread_picker::ThreadChoice, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.input.read(cx).value().to_string();
+        let Some((at, _)) = mention_query(&text, &self.mentions) else { return };
+        let value = format!("{}@{} ", &text[..at], pick.title);
+        self.input.update(cx, |s, cx| s.set_value(value, window, cx));
+        self.mentions.retain(|(_, id)| *id != pick.id);
+        self.mentions.push((pick.title, pick.id));
+        self.mention_dismissed = true;
+        self.focus(window, cx);
+        cx.notify();
+    }
+
+    /// The note sent with a message about the threads it mentions: each one's id for the agent's
+    /// tools, and for a thread on another machine (which the agent can't read) its latest messages.
+    fn mention_note(&self, text: &str, cx: &App) -> Option<String> {
+        let m = self.model.read(cx);
+        let here = match m.selected {
+            Some(id) => m.core_of_thread(id, cx),
+            None => crate::runtime::core_for_root(cx, m.active_project.as_deref().unwrap_or_default()),
+        };
+        let picked: Vec<&(String, uuid::Uuid)> = self.mentions.iter().filter(|(title, _)| text.contains(&format!("@{title}"))).collect();
+        if picked.is_empty() {
+            return None;
+        }
+        let all = super::thread_picker::choices(m, None, cx);
+        let mut note = format!("{}\nThe person @-mentioned these threads. Use the bomb tools read_thread and send_to_thread with their ids when the request involves them.", bomb_core::transcript::MENTION_NOTE);
+        for (title, id) in picked {
+            let detail = all.iter().find(|c| c.id == *id).map(|c| c.detail()).unwrap_or_default();
+            note.push_str(&format!("\n- @{title}: thread id {id} · {detail}"));
+            if !m.core_of_thread(*id, cx).same_as(&here) {
+                let said: Vec<String> = m.threads.get(id).map(|t| t.read(cx).thread.entries.iter().rev()
+                    .filter_map(|e| match (&e.role, &e.body) {
+                        (bomb_core::transcript::Role::You, bomb_core::transcript::Body::Text(t)) => Some(format!("person: {}", clip(bomb_core::transcript::without_mention_note(t), 600))),
+                        (bomb_core::transcript::Role::Agent, bomb_core::transcript::Body::Text(t)) if !t.trim().is_empty() => Some(format!("agent: {}", clip(t, 600))),
+                        _ => None,
+                    }).take(8).collect()).unwrap_or_default();
+                if said.is_empty() {
+                    note.push_str("\n  (It runs on another machine, and its conversation isn't loaded here: read_thread can't reach it, but send_to_thread can.)");
+                } else {
+                    note.push_str("\n  It runs on another machine, so read_thread can't reach it; its latest messages, newest first:");
+                    for line in said { note.push_str(&format!("\n  > {}", line.replace('\n', " "))); }
+                }
+            }
+        }
+        Some(note)
+    }
+
+    fn mention_menu(&self, ui: &Ui, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let threads = self.mention_matches(cx);
+        if threads.is_empty() {
+            return None;
+        }
+        let selected = self.mention_index.min(threads.len() - 1);
+        let mut menu = div()
+            .id("thread-mention-menu")
+            .w_full()
+            .max_h(px(300.))
+            .overflow_y_scroll()
+            .mb_2()
+            .p_2()
+            .rounded(px(12.))
+            .border_1()
+            .border_color(ui.border)
+            .bg(ui.bg)
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(div().px_2().py_1().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_faint)
+                .child("Threads in any project · ↑ ↓ to navigate · Tab or Enter to mention"));
+        for (index, pick) in threads.into_iter().enumerate() {
+            let chosen = pick.clone();
+            menu = menu.child(
+                div()
+                    .id(SharedString::from(format!("mention-{}", pick.id)))
+                    .px_2()
+                    .py_1p5()
+                    .rounded(px(7.))
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .when(index == selected, |el| el.bg(ui.selected_bg()))
+                    .hover(|s| s.bg(ui.hover))
+                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                    .on_click(cx.listener(move |this, _, window, cx| this.choose_mention(chosen.clone(), window, cx)))
+                    .child(div().size(px(7.)).rounded_full().flex_shrink_0().bg(if pick.working { ui.accent } else { ui.border }))
+                    .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(px(crate::theme::Type::SMALL)).text_color(ui.text).child(pick.title.clone()))
+                    .child(div().flex_shrink_0().text_size(px(crate::theme::Type::CAPTION)).text_color(ui.text_muted).child(pick.detail())),
+            );
+        }
+        Some(menu.into_any_element())
+    }
+
     fn choose_slash(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.input
             .update(cx, |s, cx| s.set_value(format!("/{name} "), window, cx));
@@ -752,6 +867,12 @@ impl ComposerView {
         if text.is_empty() && self.attachments.is_empty() {
             return;
         }
+        // Threads it @-mentions go along as a note (ids for the agent; hidden in the bubble).
+        let text = match self.mention_note(&text, cx) {
+            Some(note) => format!("{text}\n\n{note}"),
+            None => text,
+        };
+        self.mentions.clear();
         // Codex: pausing or clearing a goal acts now, even mid-turn, rather than waiting in line.
         if let Some(action) = self.goal_action(&text, cx) {
             let id = self.model.read(cx).selected;
@@ -2058,6 +2179,7 @@ impl Render for ComposerView {
             ui.pill_border()
         };
         let slash_menu = self.slash_menu(&ui, cx);
+        let mention_menu = self.mention_menu(&ui, cx);
         let destination=self.destination_message.as_ref().map(|_|self.destination_panel(&ui,cx));
         let setup = self.foundry_setup.then(||self.foundry_panel(&ui,cx));
         let tray = self.tray(&ui, cx);
@@ -2100,6 +2222,24 @@ impl Render for ComposerView {
                 {
                     return;
                 }
+                // The @ picker first: it's open only while typing a mention.
+                let threads = this.mention_matches(cx);
+                if !threads.is_empty() {
+                    match ev.keystroke.key.as_str() {
+                        "down" => this.mention_index = (this.mention_index + 1) % threads.len(),
+                        "up" => this.mention_index = (this.mention_index + threads.len() - 1) % threads.len(),
+                        "enter" | "tab" => {
+                            let pick = threads[this.mention_index.min(threads.len() - 1)].clone();
+                            this.choose_mention(pick, window, cx);
+                        }
+                        "escape" => this.mention_dismissed = true,
+                        _ => return,
+                    }
+                    cx.stop_propagation();
+                    window.prevent_default();
+                    cx.notify();
+                    return;
+                }
                 let commands = this.slash_matches(cx);
                 if commands.is_empty() {
                     return;
@@ -2136,6 +2276,7 @@ impl Render for ComposerView {
                     .max_w(px(Layout::COMPOSER_MAX))
                     .flex()
                     .flex_col()
+                    .when_some(mention_menu, |el, menu| el.child(menu))
                     .when_some(slash_menu, |el, menu| el.child(menu))
                     .child(div().flex().justify_center().child(
                         div().w_full().max_w(px(Layout::CONTENT_MAX)).px_6().child(routing_card)
@@ -2432,6 +2573,24 @@ struct SlashCommand {
     description: String,
     hint: Option<String>,
 }
+/// The @ mention being typed at the end of `text`: where its @ is, and the words after it. Not
+/// once it's a thread already picked, past a line break, or longer than a thread's name.
+fn mention_query<'a>(text: &'a str, picked: &[(String, uuid::Uuid)]) -> Option<(usize, &'a str)> {
+    let at = text.rfind('@')?;
+    if at > 0 && !text[..at].ends_with(char::is_whitespace) {
+        return None;
+    }
+    let query = &text[at + 1..];
+    if query.contains('\n') || query.chars().count() > 48 || picked.iter().any(|(title, _)| query.starts_with(title.as_str())) {
+        return None;
+    }
+    Some((at, query))
+}
+
+fn clip(text: &str, max: usize) -> String {
+    if text.chars().count() <= max { text.to_string() } else { format!("{}…", text.chars().take(max).collect::<String>()) }
+}
+
 fn slash_query(text: &str) -> Option<&str> {
     let query = text.strip_prefix('/')?;
     (!query.chars().any(char::is_whitespace)).then_some(query)

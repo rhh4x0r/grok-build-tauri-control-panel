@@ -647,6 +647,7 @@ fn kind_to_role(kind: &str) -> String {
         // A plan waiting for approval, and an agent's question: they come back answerable.
         "plan_approval" => "plan_approval".into(),
         "question" => "question".into(),
+        "handoff" => "handoff".into(),
         _ => "system".into(),
     }
 }

@@ -58,6 +58,21 @@ fn tools() -> Value {
             "description": "Stop a helper that's still working.",
             "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] },
         },
+        {
+            "name": "find_threads",
+            "description": "Find the person's other Bomb Code threads, in any project, by words in their title, project or branch. Threads the person @-mentioned are listed with their ids in their message already.",
+            "inputSchema": { "type": "object", "properties": { "query": { "type": "string" } } },
+        },
+        {
+            "name": "read_thread",
+            "description": "Read another thread's recent conversation (what the person asked and its agent answered), oldest first. Use it when the person refers to what happened or was decided in an @-mentioned thread.",
+            "inputSchema": { "type": "object", "properties": { "thread": { "type": "string", "description": "The thread's id" }, "limit": { "type": "integer", "description": "Messages to return, newest kept (default 20, at most 60)" } }, "required": ["thread"] },
+        },
+        {
+            "name": "send_to_thread",
+            "description": "Hand something to another thread the person @-mentioned: it's posted there as a message and that thread's agent starts on it (after its current turn). Write it so that agent can act on it alone: what to do, and everything it needs (the code, the decision, the context). Only threads the person mentioned can be sent to.",
+            "inputSchema": { "type": "object", "properties": { "thread": { "type": "string", "description": "The thread's id" }, "message": { "type": "string" } }, "required": ["thread", "message"] },
+        },
     ])
 }
 
@@ -129,7 +144,7 @@ mod tests {
         assert_eq!(init["result"]["serverInfo"]["name"], "bomb");
         let list = answer(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })).unwrap();
         let names: Vec<&str> = list["result"]["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
-        assert_eq!(names, ["list_agents", "start_helper", "wait_helpers", "helper_status", "message_helper", "stop_helper"]);
+        assert_eq!(names, ["list_agents", "start_helper", "wait_helpers", "helper_status", "message_helper", "stop_helper", "find_threads", "read_thread", "send_to_thread"]);
         assert!(answer(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).is_none(), "notifications get no reply");
     }
 }
